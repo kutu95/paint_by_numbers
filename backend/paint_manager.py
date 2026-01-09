@@ -752,13 +752,23 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
                             best_multi_error = recipe['error']
                             best_multi_pigment = recipe
         
-        # Choose best recipe
-        if best_multi_pigment and (best_one_pigment is None or best_multi_pigment['error'] < best_one_error):
-            recipes.append({
-                'palette_index': color['index'],
-                'recipe': best_multi_pigment,
-                'type': best_multi_pigment.get('type', 'multi_pigment')
-            })
+        # Choose best recipe - ALWAYS prefer multi-pigment if available
+        # Multi-pigment recipes are better even if error is slightly higher
+        if best_multi_pigment:
+            # Use multi-pigment unless one-pigment is MUCH better (error difference > 10.0)
+            if best_one_pigment is None or best_multi_error < best_one_error + 10.0:
+                recipes.append({
+                    'palette_index': color['index'],
+                    'recipe': best_multi_pigment,
+                    'type': best_multi_pigment.get('type', 'multi_pigment')
+                })
+            else:
+                # One-pigment is much better, use it
+                recipes.append({
+                    'palette_index': color['index'],
+                    'recipe': best_one_pigment,
+                    'type': 'one_pigment'
+                })
         elif best_one_pigment:
             recipes.append({
                 'palette_index': color['index'],
