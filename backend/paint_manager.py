@@ -541,11 +541,39 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
                     if white_ratio < 0.3:
                         continue
                     
-                    # Blend the colors
+                    # Get actual paint colors at these ratios (for calibrated paints)
+                    paint_labs_at_ratio = []
+                    for i, (cal, hex_rgb, ratio) in enumerate(zip(
+                        paint_calibrations, 
+                        paint_hex_colors, 
+                        [p1_ratio, p2_ratio, p3_ratio]
+                    )):
+                        if cal:
+                            # Use calibrated color at this specific ratio
+                            lab = interpolate_lab_from_calibration(cal, ratio)
+                            if lab:
+                                paint_labs_at_ratio.append(lab)
+                            else:
+                                # Fallback to hex
+                                if hex_rgb:
+                                    paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
+                                else:
+                                    break
+                        else:
+                            # Use hex color (uncalibrated)
+                            if hex_rgb:
+                                paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
+                            else:
+                                break
+                    
+                    if len(paint_labs_at_ratio) != 3:
+                        continue
+                    
+                    # Blend the colors using actual ratios
                     blended_lab = [
-                        paint_labs[0][0] * p1_ratio + paint_labs[1][0] * p2_ratio + paint_labs[2][0] * p3_ratio + 100.0 * white_ratio * 0.9,
-                        paint_labs[0][1] * p1_ratio + paint_labs[1][1] * p2_ratio + paint_labs[2][1] * p3_ratio,
-                        paint_labs[0][2] * p1_ratio + paint_labs[1][2] * p2_ratio + paint_labs[2][2] * p3_ratio
+                        paint_labs_at_ratio[0][0] * p1_ratio + paint_labs_at_ratio[1][0] * p2_ratio + paint_labs_at_ratio[2][0] * p3_ratio + 100.0 * white_ratio * 0.9,
+                        paint_labs_at_ratio[0][1] * p1_ratio + paint_labs_at_ratio[1][1] * p2_ratio + paint_labs_at_ratio[2][1] * p3_ratio,
+                        paint_labs_at_ratio[0][2] * p1_ratio + paint_labs_at_ratio[1][2] * p2_ratio + paint_labs_at_ratio[2][2] * p3_ratio
                     ]
                     
                     error = delta_e_lab(target_lab, blended_lab)
