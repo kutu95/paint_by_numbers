@@ -6,11 +6,11 @@ After=network.target
 Type=simple
 User=www-data
 WorkingDirectory=/opt/layerpainter/frontend
-Environment="PATH=/usr/bin:/usr/local/bin"
+Environment="PATH=/usr/bin:/usr/local/bin:/usr/local/bin:/bin:/usr/bin"
 Environment="NEXT_PUBLIC_API_BASE_URL=http://192.168.0.146:8000"
-Environment="PORT=3000"
+Environment="PORT=3001"
 Environment="HOSTNAME=0.0.0.0"
-ExecStart=/usr/bin/npm start
+ExecStart=/bin/bash -c 'source /etc/profile && /usr/bin/npm start'
 Restart=always
 RestartSec=10
 
