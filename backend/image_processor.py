@@ -444,6 +444,19 @@ def process_image(
             'outline_glow_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_outline_glow.png'
         })
     
+    # Add final "finished" layer showing the complete quantized image
+    finished_layer_index = len(layers)
+    layers.append({
+        'layer_index': finished_layer_index,
+        'palette_index': -1,  # Special marker for finished layer
+        'is_finished': True,
+        'finished_url': f'/api/sessions/{output_dir.name}/preview.jpg',
+        'mask_url': f'/api/sessions/{output_dir.name}/preview.jpg',  # For backward compatibility
+        'outline_thin_url': f'/api/sessions/{output_dir.name}/preview.jpg',  # No outline for finished
+        'outline_thick_url': f'/api/sessions/{output_dir.name}/preview.jpg',
+        'outline_glow_url': f'/api/sessions/{output_dir.name}/preview.jpg'
+    })
+    
     return {
         'width': w,
         'height': h,

@@ -11,6 +11,8 @@ interface Layer {
   outline_thin_url: string
   outline_thick_url: string
   outline_glow_url: string
+  is_finished?: boolean
+  finished_url?: string
 }
 
 interface SessionData {
@@ -80,7 +82,7 @@ export default function ProjectionViewer() {
     let next = currentLayer + direction
     const maxLayer = sessionData.layers.length - 1
 
-    // Skip done layers
+    // Skip done layers (but don't skip the finished layer)
     while (next >= 0 && next <= maxLayer && doneLayers.has(next)) {
       next += direction
     }
@@ -91,6 +93,10 @@ export default function ProjectionViewer() {
   }, [sessionData, currentLayer, doneLayers])
 
   const toggleDone = useCallback(() => {
+    // Don't allow marking the finished layer as done
+    if (sessionData?.layers[currentLayer]?.is_finished) {
+      return
+    }
     const newDone = new Set(doneLayers)
     if (newDone.has(currentLayer)) {
       newDone.delete(currentLayer)
@@ -99,7 +105,7 @@ export default function ProjectionViewer() {
     }
     setDoneLayers(newDone)
     saveDoneLayers(newDone)
-  }, [currentLayer, doneLayers, saveDoneLayers])
+  }, [currentLayer, doneLayers, saveDoneLayers, sessionData])
 
   // Mouse auto-hide
   useEffect(() => {
@@ -209,7 +215,7 @@ export default function ProjectionViewer() {
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
-    outlineMode === 'off'
+    currentLayerData.is_finished || outlineMode === 'off'
       ? null
       : `${baseUrl}${currentLayerData[`outline_${outlineMode}_url` as keyof Layer]}`
 
@@ -246,32 +252,50 @@ export default function ProjectionViewer() {
 
           {/* Main canvas */}
           <div className="relative w-full h-full flex items-center justify-center">
-            {/* Mask image */}
-            <img
-              src={`${baseUrl}${currentLayerData.mask_url}`}
-              alt={`Layer ${currentLayer}`}
-              className="absolute"
-              style={{
-                opacity: registrationMode ? 0 : maskOpacity / 100,
-                filter: inverted ? 'invert(1)' : 'none',
-                maxWidth: '100%',
-                maxHeight: '100%',
-                objectFit: 'contain',
-              }}
-            />
-
-            {/* Outline overlay */}
-            {outlineUrl && (
+            {/* Finished image or Mask image */}
+            {currentLayerData.is_finished ? (
               <img
-                src={outlineUrl}
-                alt="Outline"
-                className="absolute pointer-events-none"
+                src={`${baseUrl}${currentLayerData.finished_url || currentLayerData.mask_url}`}
+                alt="Finished Image"
+                className="absolute"
                 style={{
+                  opacity: registrationMode ? 0 : 1,
+                  filter: inverted ? 'invert(1)' : 'none',
                   maxWidth: '100%',
                   maxHeight: '100%',
                   objectFit: 'contain',
                 }}
               />
+            ) : (
+              <>
+                {/* Mask image */}
+                <img
+                  src={`${baseUrl}${currentLayerData.mask_url}`}
+                  alt={`Layer ${currentLayer}`}
+                  className="absolute"
+                  style={{
+                    opacity: registrationMode ? 0 : maskOpacity / 100,
+                    filter: inverted ? 'invert(1)' : 'none',
+                    maxWidth: '100%',
+                    maxHeight: '100%',
+                    objectFit: 'contain',
+                  }}
+                />
+
+                {/* Outline overlay */}
+                {outlineUrl && (
+                  <img
+                    src={outlineUrl}
+                    alt="Outline"
+                    className="absolute pointer-events-none"
+                    style={{
+                      maxWidth: '100%',
+                      maxHeight: '100%',
+                      objectFit: 'contain',
+                    }}
+                  />
+                )}
+              </>
             )}
 
             {/* Corner crosshairs */}
@@ -379,14 +403,24 @@ export default function ProjectionViewer() {
           {showHUD && (
             <div className="fixed bottom-4 left-4 right-4 bg-black bg-opacity-70 p-4 rounded text-white text-sm">
               <div className="flex flex-wrap gap-4">
-                <div>Layer: {currentLayer + 1} / {sessionData.layers.length}</div>
-                <div>Opacity: {maskOpacity}%</div>
-                <div>Outline: {outlineMode}</div>
+                <div>
+                  {currentLayerData.is_finished 
+                    ? 'Finished Image' 
+                    : `Layer: ${currentLayer + 1} / ${sessionData.layers.length - 1}`}
+                </div>
+                {!currentLayerData.is_finished && (
+                  <>
+                    <div>Opacity: {maskOpacity}%</div>
+                    <div>Outline: {outlineMode}</div>
+                  </>
+                )}
                 <div>{inverted ? 'Inverted' : 'Normal'}</div>
                 <div>{crosshairs ? 'Crosshairs ON' : 'Crosshairs OFF'}</div>
                 <div>{grid ? 'Grid ON' : 'Grid OFF'}</div>
                 <div>{registrationMode ? 'Registration ON' : 'Registration OFF'}</div>
-                <div>{doneLayers.has(currentLayer) ? '✓ Done' : ''}</div>
+                {!currentLayerData.is_finished && (
+                  <div>{doneLayers.has(currentLayer) ? '✓ Done' : ''}</div>
+                )}
               </div>
               <div className="mt-2 text-xs text-gray-400">
                 ← → / Space: Navigate | D: Toggle Done | C: Crosshairs | G: Grid | I: Invert | O: Outline | [ ]: Opacity | R: Registration | B: Black | W: White | H: HUD | Esc: Back
