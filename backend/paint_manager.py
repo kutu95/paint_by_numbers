@@ -735,11 +735,6 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
                 'recipe': best_one_pigment,
                 'type': 'one_pigment'
             })
-            recipes.append({
-                'palette_index': color['index'],
-                'recipe': best_one_pigment,
-                'type': 'one_pigment'
-            })
         else:
             # This shouldn't happen now, but just in case
             recipes.append({
