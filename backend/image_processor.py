@@ -106,22 +106,48 @@ def quantize_lab(image: np.ndarray, n_colors: int, seed: int = 42, saturation_bo
     return labels, quantized, palette
 
 
-def clean_mask(mask: np.ndarray, min_area_ratio: float = 0.0002) -> np.ndarray:
-    """Remove tiny components and apply morphological operations."""
+def clean_mask(mask: np.ndarray, min_area_ratio: float = 0.0002, coverage: float = 0.0) -> np.ndarray:
+    """Remove tiny components and apply morphological operations.
+    
+    Args:
+        mask: Binary mask to clean
+        min_area_ratio: Minimum area ratio threshold for keeping components
+        coverage: Coverage percentage of this color (0-100), used to adjust threshold for sparse colors
+    """
+    # For colors with very low coverage, use a more lenient threshold
+    # This prevents removing all content from sparse colors
+    if coverage > 0 and coverage < 0.5:
+        # For very sparse colors (<0.5% coverage), use 10x more lenient threshold
+        min_area_ratio = min_area_ratio * 0.1
+    
     # Remove tiny components
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
     total_area = mask.shape[0] * mask.shape[1]
-    min_area = int(total_area * min_area_ratio)
+    min_area = max(1, int(total_area * min_area_ratio))  # Ensure at least 1 pixel
     
     cleaned = np.zeros_like(mask, dtype=np.uint8)
     for label_id in range(1, num_labels):
         if stats[label_id, cv2.CC_STAT_AREA] >= min_area:
             cleaned[labels == label_id] = 255
     
-    # Morphological close then open
-    kernel = np.ones((3, 3), np.uint8)
-    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
-    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel)
+    # If cleaning removed everything, keep the largest component even if below threshold
+    if np.sum(cleaned) == 0 and num_labels > 1:
+        # Find the largest component
+        largest_label = 1
+        largest_area = stats[1, cv2.CC_STAT_AREA]
+        for label_id in range(2, num_labels):
+            if stats[label_id, cv2.CC_STAT_AREA] > largest_area:
+                largest_area = stats[label_id, cv2.CC_STAT_AREA]
+                largest_label = label_id
+        # Keep at least the largest component
+        if largest_area > 0:
+            cleaned[labels == largest_label] = 255
+    
+    # Morphological close then open (only if we have content)
+    if np.sum(cleaned) > 0:
+        kernel = np.ones((3, 3), np.uint8)
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel)
     
     return cleaned
 
@@ -275,7 +301,9 @@ def process_image(
     base_masks = {}
     for idx in range(n_colors):
         mask = (labels == idx).astype(np.uint8) * 255
-        cleaned = clean_mask(mask, min_area_ratio=min_area_ratio)
+        # Get coverage for this color to inform mask cleaning
+        color_coverage = palette[idx]['coverage'] if idx < len(palette) else 0.0
+        cleaned = clean_mask(mask, min_area_ratio=min_area_ratio, coverage=color_coverage)
         base_masks[idx] = cleaned
     
     # Step 4: Order layers
