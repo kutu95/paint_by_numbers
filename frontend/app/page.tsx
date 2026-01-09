@@ -304,13 +304,13 @@ export default function Home() {
                 <label className="block mb-2">
                   Color Vibrancy Boost: {(saturationBoost * 100).toFixed(0)}%
                   <span className="text-xs text-gray-400 ml-2">
-                    (100% = no change, 150% = more vibrant, 200% = maximum vibrancy)
+                    (100% = no change, 150% = more vibrant, 500% = maximum vibrancy)
                   </span>
                 </label>
                 <input
                   type="range"
                   min="0.5"
-                  max="2.0"
+                  max="5.0"
                   step="0.05"
                   value={saturationBoost}
                   onChange={(e) => setSaturationBoost(parseFloat(e.target.value))}
@@ -319,7 +319,7 @@ export default function Home() {
                 <div className="flex justify-between text-xs text-gray-400 mt-1">
                   <span>50% (Less Vibrant)</span>
                   <span>100% (Normal)</span>
-                  <span>200% (Maximum)</span>
+                  <span>500% (Maximum)</span>
                 </div>
               </div>
             </div>

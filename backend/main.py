@@ -94,9 +94,9 @@ async def create_session(
     if max_side < 100 or max_side > 5000:
         logger.error(f"Invalid max_side: {max_side}")
         raise HTTPException(status_code=400, detail="max_side must be between 100 and 5000")
-    if saturation_boost < 0.5 or saturation_boost > 2.0:
+    if saturation_boost < 0.5 or saturation_boost > 5.0:
         logger.error(f"Invalid saturation_boost: {saturation_boost}")
-        raise HTTPException(status_code=400, detail="saturation_boost must be between 0.5 and 2.0")
+        raise HTTPException(status_code=400, detail="saturation_boost must be between 0.5 and 5.0")
     
     # Create session directory
     session_id = str(uuid.uuid4())
