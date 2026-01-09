@@ -639,9 +639,9 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
                     best_one_error = recipe['error']
                     best_one_pigment = recipe
         
-        # Try multi-pigment recipes - prioritize MORE pigments (4, 3, then 2 as fallback)
+        # Try multi-pigment recipes - ALWAYS use at least 3 colors (no 2-color fallback)
         best_multi_pigment = None
-        best_multi_error = best_one_error
+        best_multi_error = float('inf')
         best_pigment_count = 0  # Track how many pigments in best recipe
         
         # Strategy: Try MORE pigments first, prefer recipes with more colors
@@ -683,7 +683,7 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
                                     best_multi_error = adjusted_error
                                     best_multi_pigment = recipe
         
-        # Try 3 pigments if available (or if 4 didn't work well)
+        # Try 3 pigments - REQUIRED minimum (no 2-color recipes)
         if len(search_paints) >= 3:
             for i, paint1 in enumerate(search_paints):
                 for j, paint2 in enumerate(search_paints[i+1:], i+1):
@@ -706,9 +706,9 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
                                     if is_achromatic(paint):
                                         recipe['error'] += 10.0
                             
-                            # Only use 3-pigment if we don't have 4-pigment, or if it's significantly better
+                            # Use 3-pigment if we don't have 4-pigment, or if it's better
                             if best_pigment_count < 3:
-                                if best_multi_pigment is None or recipe['error'] < best_multi_error + 1.5:
+                                if best_multi_pigment is None or recipe['error'] < best_multi_error:
                                     best_multi_error = recipe['error']
                                     best_multi_pigment = recipe
                                     best_pigment_count = 3
@@ -716,61 +716,25 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
                                 best_multi_error = recipe['error']
                                 best_multi_pigment = recipe
         
-        # Try 2 pigments as fallback if:
-        # 1. We have < 3 paints available, OR
-        # 2. We tried 3+ but got no valid recipes (best_pigment_count still 0)
-        if len(search_paints) >= 2 and (len(search_paints) < 3 or best_pigment_count == 0):
-            for i, paint1 in enumerate(search_paints):
-                for paint2 in search_paints[i+1:]:
-                    # Don't allow two achromatic paints for colored targets
-                    if not target_is_achromatic and is_achromatic(paint1) and is_achromatic(paint2):
-                        continue
-                    
-                    paint1_hex = paint1.get('hex_approx', '')
-                    paint2_hex = paint2.get('hex_approx', '')
-                    recipe = find_best_two_pigment_recipe(
-                        target_lab, 
-                        paint1['id'], 
-                        paint2['id'],
-                        paint1_hex,
-                        paint2_hex
-                    )
-                    if recipe:
-                        # Add penalty if using achromatic paints for colored target
-                        if not target_is_achromatic:
-                            if is_achromatic(paint1):
-                                recipe['error'] += 15.0
-                            if is_achromatic(paint2):
-                                recipe['error'] += 15.0
-                        
-                        # Only use 2-pigment if we don't have 3+ pigment recipe, or if it's much better
-                        if best_pigment_count < 2:
-                            if best_multi_pigment is None or recipe['error'] < best_multi_error + 1.0:
-                                best_multi_error = recipe['error']
-                                best_multi_pigment = recipe
-                                best_pigment_count = 2
-                        elif best_pigment_count == 2 and recipe['error'] < best_multi_error:
-                            best_multi_error = recipe['error']
-                            best_multi_pigment = recipe
+        # NO 2-PIGMENT FALLBACK - we require at least 3 colors
         
-        # Choose best recipe - ALWAYS prefer multi-pigment if available
-        # Multi-pigment recipes are better even if error is slightly higher
-        if best_multi_pigment:
-            # Use multi-pigment unless one-pigment is MUCH better (error difference > 10.0)
-            if best_one_pigment is None or best_multi_error < best_one_error + 10.0:
-                recipes.append({
-                    'palette_index': color['index'],
-                    'recipe': best_multi_pigment,
-                    'type': best_multi_pigment.get('type', 'multi_pigment')
-                })
-            else:
-                # One-pigment is much better, use it
-                recipes.append({
-                    'palette_index': color['index'],
-                    'recipe': best_one_pigment,
-                    'type': 'one_pigment'
-                })
+        # Choose best recipe - REQUIRE multi-pigment (at least 3 colors)
+        # Only use one-pigment if we couldn't generate any multi-pigment recipe
+        if best_multi_pigment and best_pigment_count >= 3:
+            # We have a valid 3+ pigment recipe - use it
+            recipes.append({
+                'palette_index': color['index'],
+                'recipe': best_multi_pigment,
+                'type': best_multi_pigment.get('type', 'multi_pigment')
+            })
         elif best_one_pigment:
+            # Fallback to one-pigment only if we couldn't generate 3+ pigment recipe
+            # This should rarely happen if we have 3+ paints available
+            recipes.append({
+                'palette_index': color['index'],
+                'recipe': best_one_pigment,
+                'type': 'one_pigment'
+            })
             recipes.append({
                 'palette_index': color['index'],
                 'recipe': best_one_pigment,
