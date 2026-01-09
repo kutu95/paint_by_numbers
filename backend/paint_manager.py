@@ -447,8 +447,9 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
     best_error = float('inf')
     best_recipe = None
     
-    # Fine grid search - use smaller steps for better accuracy
-    step = 0.03 if n_pigments == 3 else 0.02 if n_pigments == 4 else 0.02
+    # Two-stage grid search: coarse first, then refine around best result
+    # Coarse grid search - use smaller steps for better accuracy
+    coarse_step = 0.02 if n_pigments == 3 else 0.015 if n_pigments == 4 else 0.015
     
     # Generate all combinations of ratios
     # Allow more flexibility - total pigment can be up to 0.6 (white can be 0.4)
@@ -456,8 +457,10 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
     max_ratio_per_pigment = max_total_pigment / n_pigments
     
     if n_pigments == 3:
-        for p1_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, step):
-            for p2_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, step):
+        # Stage 1: Coarse grid search
+        best_coarse_ratios = None
+        for p1_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, coarse_step):
+            for p2_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, coarse_step):
                 remaining = max_total_pigment - p1_ratio - p2_ratio
                 if remaining < 0.02:
                     continue
@@ -482,19 +485,74 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
                 
                 if error < best_error:
                     best_error = error
-                    best_recipe = {
-                        'pigment_ids': paint_ids,
-                        'pigment_ratios': [p1_ratio, p2_ratio, p3_ratio],
-                        'white_ratio': white_ratio,
-                        'error': best_error,
-                        'type': 'three_pigment',
-                        'uncalibrated': calibrated_count < n_pigments
-                    }
+                    best_coarse_ratios = [p1_ratio, p2_ratio, p3_ratio]
+        
+        # Stage 2: Fine refinement around best coarse result
+        if best_coarse_ratios:
+            refine_step = 0.005  # Much finer step for refinement
+            refine_range = 0.03  # Search within ±3% of best coarse result
+            
+            for p1_ratio in np.arange(
+                max(0.02, best_coarse_ratios[0] - refine_range),
+                min(max_ratio_per_pigment * 2.5, best_coarse_ratios[0] + refine_range + refine_step),
+                refine_step
+            ):
+                for p2_ratio in np.arange(
+                    max(0.02, best_coarse_ratios[1] - refine_range),
+                    min(max_ratio_per_pigment * 2.5, best_coarse_ratios[1] + refine_range + refine_step),
+                    refine_step
+                ):
+                    remaining = max_total_pigment - p1_ratio - p2_ratio
+                    if remaining < 0.02:
+                        continue
+                    p3_ratio = min(max_ratio_per_pigment * 2.5, remaining)
+                    if p3_ratio < 0.02:
+                        continue
+                    
+                    white_ratio = 1.0 - p1_ratio - p2_ratio - p3_ratio
+                    if white_ratio < 0.3:
+                        continue
+                    
+                    # Blend the colors
+                    blended_lab = [
+                        paint_labs[0][0] * p1_ratio + paint_labs[1][0] * p2_ratio + paint_labs[2][0] * p3_ratio + 100.0 * white_ratio * 0.9,
+                        paint_labs[0][1] * p1_ratio + paint_labs[1][1] * p2_ratio + paint_labs[2][1] * p3_ratio,
+                        paint_labs[0][2] * p1_ratio + paint_labs[1][2] * p2_ratio + paint_labs[2][2] * p3_ratio
+                    ]
+                    
+                    error = delta_e_lab(target_lab, blended_lab)
+                    if calibrated_count < n_pigments:
+                        error += (n_pigments - calibrated_count) * 3.0
+                    
+                    if error < best_error:
+                        best_error = error
+                        best_recipe = {
+                            'pigment_ids': paint_ids,
+                            'pigment_ratios': [p1_ratio, p2_ratio, p3_ratio],
+                            'white_ratio': white_ratio,
+                            'error': best_error,
+                            'type': 'three_pigment',
+                            'uncalibrated': calibrated_count < n_pigments
+                        }
+        
+        # If refinement didn't find better, use coarse result
+        if best_coarse_ratios and not best_recipe:
+            white_ratio = 1.0 - sum(best_coarse_ratios)
+            best_recipe = {
+                'pigment_ids': paint_ids,
+                'pigment_ratios': best_coarse_ratios,
+                'white_ratio': white_ratio,
+                'error': best_error,
+                'type': 'three_pigment',
+                'uncalibrated': calibrated_count < n_pigments
+            }
     
     elif n_pigments == 4:
-        for p1_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, step):
-            for p2_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, step):
-                for p3_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, step):
+        # Stage 1: Coarse grid search (slightly coarser for 4 pigments due to complexity)
+        best_coarse_ratios = None
+        for p1_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, coarse_step):
+            for p2_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, coarse_step):
+                for p3_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, coarse_step):
                     remaining = max_total_pigment - p1_ratio - p2_ratio - p3_ratio
                     if remaining < 0.02:
                         continue
@@ -522,14 +580,75 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
                     
                     if error < best_error:
                         best_error = error
-                        best_recipe = {
-                            'pigment_ids': paint_ids,
-                            'pigment_ratios': [p1_ratio, p2_ratio, p3_ratio, p4_ratio],
-                            'white_ratio': white_ratio,
-                            'error': best_error,
-                            'type': 'four_pigment',
-                            'uncalibrated': calibrated_count < n_pigments
-                        }
+                        best_coarse_ratios = [p1_ratio, p2_ratio, p3_ratio, p4_ratio]
+        
+        # Stage 2: Fine refinement around best coarse result
+        if best_coarse_ratios:
+            refine_step = 0.005  # Much finer step for refinement
+            refine_range = 0.03  # Search within ±3% of best coarse result
+            
+            for p1_ratio in np.arange(
+                max(0.02, best_coarse_ratios[0] - refine_range),
+                min(max_ratio_per_pigment * 2.5, best_coarse_ratios[0] + refine_range + refine_step),
+                refine_step
+            ):
+                for p2_ratio in np.arange(
+                    max(0.02, best_coarse_ratios[1] - refine_range),
+                    min(max_ratio_per_pigment * 2.5, best_coarse_ratios[1] + refine_range + refine_step),
+                    refine_step
+                ):
+                    for p3_ratio in np.arange(
+                        max(0.02, best_coarse_ratios[2] - refine_range),
+                        min(max_ratio_per_pigment * 2.5, best_coarse_ratios[2] + refine_range + refine_step),
+                        refine_step
+                    ):
+                        remaining = max_total_pigment - p1_ratio - p2_ratio - p3_ratio
+                        if remaining < 0.02:
+                            continue
+                        p4_ratio = min(max_ratio_per_pigment * 2.5, remaining)
+                        if p4_ratio < 0.02:
+                            continue
+                        
+                        white_ratio = 1.0 - p1_ratio - p2_ratio - p3_ratio - p4_ratio
+                        if white_ratio < 0.3:
+                            continue
+                        
+                        # Blend the colors
+                        blended_lab = [
+                            paint_labs[0][0] * p1_ratio + paint_labs[1][0] * p2_ratio + 
+                            paint_labs[2][0] * p3_ratio + paint_labs[3][0] * p4_ratio + 100.0 * white_ratio * 0.9,
+                            paint_labs[0][1] * p1_ratio + paint_labs[1][1] * p2_ratio + 
+                            paint_labs[2][1] * p3_ratio + paint_labs[3][1] * p4_ratio,
+                            paint_labs[0][2] * p1_ratio + paint_labs[1][2] * p2_ratio + 
+                            paint_labs[2][2] * p3_ratio + paint_labs[3][2] * p4_ratio
+                        ]
+                        
+                        error = delta_e_lab(target_lab, blended_lab)
+                        if calibrated_count < n_pigments:
+                            error += (n_pigments - calibrated_count) * 4.0
+                        
+                        if error < best_error:
+                            best_error = error
+                            best_recipe = {
+                                'pigment_ids': paint_ids,
+                                'pigment_ratios': [p1_ratio, p2_ratio, p3_ratio, p4_ratio],
+                                'white_ratio': white_ratio,
+                                'error': best_error,
+                                'type': 'four_pigment',
+                                'uncalibrated': calibrated_count < n_pigments
+                            }
+        
+        # If refinement didn't find better, use coarse result
+        if best_coarse_ratios and not best_recipe:
+            white_ratio = 1.0 - sum(best_coarse_ratios)
+            best_recipe = {
+                'pigment_ids': paint_ids,
+                'pigment_ratios': best_coarse_ratios,
+                'white_ratio': white_ratio,
+                'error': best_error,
+                'type': 'four_pigment',
+                'uncalibrated': calibrated_count < n_pigments
+            }
     else:
         # Reject any other number of pigments (including 2)
         return None
