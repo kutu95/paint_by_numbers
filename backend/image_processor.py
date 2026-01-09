@@ -17,11 +17,27 @@ def normalize_image(image: np.ndarray, max_side: int) -> Tuple[np.ndarray, float
     return resized, scale
 
 
-def quantize_lab(image: np.ndarray, n_colors: int, seed: int = 42) -> Tuple[np.ndarray, np.ndarray, List[Dict]]:
-    """Quantize image using Lab color space and k-means."""
+def quantize_lab(image: np.ndarray, n_colors: int, seed: int = 42, saturation_boost: float = 1.0) -> Tuple[np.ndarray, np.ndarray, List[Dict]]:
+    """Quantize image using Lab color space and k-means.
+    
+    Args:
+        image: Input RGB image
+        n_colors: Number of colors in palette
+        seed: Random seed for reproducibility
+        saturation_boost: Multiplier for saturation (1.0 = no change, >1.0 = more vibrant, <1.0 = less vibrant)
+    """
     # Ensure image is valid (no NaN or inf values)
     if np.any(np.isnan(image)) or np.any(np.isinf(image)):
         raise ValueError("Image contains invalid (NaN or Inf) values")
+    
+    # Apply saturation boost if requested
+    if saturation_boost != 1.0:
+        # Convert to HSV for saturation adjustment
+        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV).astype(np.float32)
+        # Boost saturation channel
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * saturation_boost, 0, 255)
+        hsv = hsv.astype(np.uint8)
+        image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
     
     # Convert to Lab
     lab_image = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
@@ -199,7 +215,8 @@ def process_image(
     n_colors: int,
     overpaint_mm: float,
     order_mode: str,
-    max_side: int
+    max_side: int,
+    saturation_boost: float = 1.0
 ) -> Dict:
     """Main processing pipeline."""
     # Load image
@@ -229,7 +246,7 @@ def process_image(
     h, w = normalized.shape[:2]
     
     # Step 2: Quantize
-    labels, quantized, palette = quantize_lab(normalized, n_colors)
+    labels, quantized, palette = quantize_lab(normalized, n_colors, seed=42, saturation_boost=saturation_boost)
     
     # Save quantized preview
     preview_path = output_dir / 'preview.jpg'

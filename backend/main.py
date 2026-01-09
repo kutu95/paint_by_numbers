@@ -72,7 +72,8 @@ async def create_session(
     n_colors: int = Form(16),
     overpaint_mm: float = Form(5.0),
     order_mode: str = Form("largest"),
-    max_side: int = Form(1920)
+    max_side: int = Form(1920),
+    saturation_boost: float = Form(1.0)
 ):
     """Create a new session and process the image."""
     try:
@@ -93,6 +94,9 @@ async def create_session(
     if max_side < 100 or max_side > 5000:
         logger.error(f"Invalid max_side: {max_side}")
         raise HTTPException(status_code=400, detail="max_side must be between 100 and 5000")
+    if saturation_boost < 0.5 or saturation_boost > 2.0:
+        logger.error(f"Invalid saturation_boost: {saturation_boost}")
+        raise HTTPException(status_code=400, detail="saturation_boost must be between 0.5 and 2.0")
     
     # Create session directory
     session_id = str(uuid.uuid4())
@@ -113,14 +117,15 @@ async def create_session(
     
     try:
         # Process image
-        logger.info(f"Processing image: {image_path}, n_colors={n_colors}, overpaint_mm={overpaint_mm}")
+        logger.info(f"Processing image: {image_path}, n_colors={n_colors}, overpaint_mm={overpaint_mm}, saturation_boost={saturation_boost}")
         result = process_image(
             str(image_path),
             session_dir,
             n_colors,
             overpaint_mm,
             order_mode,
-            max_side
+            max_side,
+            saturation_boost
         )
         
         result['session_id'] = session_id

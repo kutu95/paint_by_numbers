@@ -36,6 +36,7 @@ export default function Home() {
   const [overpaintMm, setOverpaintMm] = useState(5)
   const [orderMode, setOrderMode] = useState<'largest' | 'smallest' | 'manual'>('largest')
   const [maxSide, setMaxSide] = useState(1920)
+  const [saturationBoost, setSaturationBoost] = useState(1.0)
   const [processing, setProcessing] = useState(false)
   const [sessionData, setSessionData] = useState<SessionResponse | null>(null)
   const [manualOrder, setManualOrder] = useState<number[]>([])
@@ -100,6 +101,7 @@ export default function Home() {
     formData.append('overpaint_mm', overpaintMm.toString())
     formData.append('order_mode', orderMode)
     formData.append('max_side', maxSide.toString())
+    formData.append('saturation_boost', saturationBoost.toString())
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/sessions`, {
@@ -296,6 +298,29 @@ export default function Home() {
                   <option value="1920">1920px</option>
                   <option value="2400">2400px</option>
                 </select>
+              </div>
+
+              <div className="col-span-2">
+                <label className="block mb-2">
+                  Color Vibrancy Boost: {(saturationBoost * 100).toFixed(0)}%
+                  <span className="text-xs text-gray-400 ml-2">
+                    (100% = no change, 150% = more vibrant, 200% = maximum vibrancy)
+                  </span>
+                </label>
+                <input
+                  type="range"
+                  min="0.5"
+                  max="2.0"
+                  step="0.05"
+                  value={saturationBoost}
+                  onChange={(e) => setSaturationBoost(parseFloat(e.target.value))}
+                  className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                />
+                <div className="flex justify-between text-xs text-gray-400 mt-1">
+                  <span>50% (Less Vibrant)</span>
+                  <span>100% (Normal)</span>
+                  <span>200% (Maximum)</span>
+                </div>
               </div>
             </div>
 
