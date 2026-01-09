@@ -473,9 +473,18 @@ export default function Home() {
                 {sessionData.palette.map((color) => (
                   <div key={color.index} className="text-center">
                     <div
-                      className="w-16 h-16 rounded border border-gray-600"
+                      className="w-16 h-16 rounded border border-gray-600 relative flex items-center justify-center"
                       style={{ backgroundColor: color.hex }}
-                    />
+                    >
+                      <span
+                        className="text-white font-bold text-lg drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]"
+                        style={{
+                          textShadow: '0 1px 2px rgba(0,0,0,0.8), 0 0 4px rgba(0,0,0,0.5)',
+                        }}
+                      >
+                        {color.index}
+                      </span>
+                    </div>
                     <div className="text-xs mt-1">{color.coverage.toFixed(1)}%</div>
                   </div>
                 ))}
