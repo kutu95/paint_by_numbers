@@ -406,7 +406,8 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
         Recipe dict with pigment IDs, ratios, white_ratio, and error
     """
     n_pigments = len(paint_ids)
-    if n_pigments < 2:
+    # ONLY handle 3+ pigments - no 2-pigment recipes
+    if n_pigments < 3:
         return None
     
     # Try to get calibrated colors first
@@ -529,6 +530,9 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
                             'type': 'four_pigment',
                             'uncalibrated': calibrated_count < n_pigments
                         }
+    else:
+        # Reject any other number of pigments (including 2)
+        return None
     
     return best_recipe
 
