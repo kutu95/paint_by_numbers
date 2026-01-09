@@ -106,7 +106,7 @@ export default function Home() {
     }
   }, [nColors, overpaintMm, orderMode, maxSide, saturationBoost, detailLevel])
 
-  // Restore image preview from localStorage on mount
+  // Restore image preview and session data from localStorage on mount
   useEffect(() => {
     const savedPreview = localStorage.getItem('current_image_preview')
     const savedFileName = localStorage.getItem('current_image_name')
@@ -128,7 +128,30 @@ export default function Home() {
         console.error('Failed to restore image file:', err)
       }
     }
+
+    // Restore session data if coming back from projection viewer
+    const currentSessionId = localStorage.getItem('current_session_id')
+    if (currentSessionId) {
+      const savedSession = localStorage.getItem(`session_${currentSessionId}`)
+      if (savedSession) {
+        try {
+          const data: SessionResponse = JSON.parse(savedSession)
+          setSessionData(data)
+          // Restore manual order if needed (check saved order mode or assume manual if order exists)
+          // Manual order restoration will happen when orderMode is checked
+        } catch (e) {
+          console.error('Failed to restore session data:', e)
+        }
+      }
+    }
   }, [])
+
+  // Restore manual order when sessionData is restored and orderMode is manual
+  useEffect(() => {
+    if (sessionData && orderMode === 'manual') {
+      setManualOrder([...sessionData.order])
+    }
+  }, [sessionData, orderMode])
 
   const handleGenerate = async () => {
     if (!image) {
@@ -199,6 +222,8 @@ export default function Home() {
 
   const handleStartProjection = () => {
     if (sessionData) {
+      // Save session ID so we can restore when coming back
+      localStorage.setItem('current_session_id', sessionData.session_id)
       router.push(`/project/${sessionData.session_id}`)
     }
   }

@@ -179,7 +179,9 @@ export default function ProjectionViewer() {
           break
         case 'escape':
         case 'Escape':
-          router.push('/')
+          // Save current session ID before navigating back
+          localStorage.setItem('current_session_id', sessionId)
+          router.back()
           break
       }
     }
@@ -230,7 +232,11 @@ export default function ProjectionViewer() {
           {/* Back button - only show when HUD is visible */}
           {showHUD && (
             <button
-              onClick={() => router.push('/')}
+              onClick={() => {
+                // Save current session ID before navigating back
+                localStorage.setItem('current_session_id', sessionId)
+                router.back()
+              }}
               className="fixed top-4 left-4 z-50 px-4 py-2 bg-black bg-opacity-70 hover:bg-opacity-90 text-white rounded flex items-center gap-2 transition-opacity"
               style={{ opacity: mouseActive ? 1 : 0.3 }}
             >
