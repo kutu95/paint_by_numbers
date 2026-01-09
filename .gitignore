@@ -56,9 +56,10 @@ data/paint/calibration/*.jpg
 data/paint/calibration/*.png
 !data/paint/library.json
 
-# Deployment
+# Deployment - allow service files in deployment directory
+!deployment/*.service
+# But ignore service files elsewhere
 *.service
-# Keep deployment files in deployment/ directory
 
 # TypeScript
 *.tsbuildinfo
