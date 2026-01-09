@@ -73,7 +73,8 @@ async def create_session(
     overpaint_mm: float = Form(5.0),
     order_mode: str = Form("largest"),
     max_side: int = Form(1920),
-    saturation_boost: float = Form(1.0)
+    saturation_boost: float = Form(1.0),
+    detail_level: float = Form(0.5)
 ):
     """Create a new session and process the image."""
     try:
@@ -97,6 +98,9 @@ async def create_session(
     if saturation_boost < 0.5 or saturation_boost > 5.0:
         logger.error(f"Invalid saturation_boost: {saturation_boost}")
         raise HTTPException(status_code=400, detail="saturation_boost must be between 0.5 and 5.0")
+    if detail_level < 0.0 or detail_level > 1.0:
+        logger.error(f"Invalid detail_level: {detail_level}")
+        raise HTTPException(status_code=400, detail="detail_level must be between 0.0 and 1.0")
     
     # Create session directory
     session_id = str(uuid.uuid4())
@@ -125,7 +129,8 @@ async def create_session(
             overpaint_mm,
             order_mode,
             max_side,
-            saturation_boost
+            saturation_boost,
+            detail_level
         )
         
         result['session_id'] = session_id

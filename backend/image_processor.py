@@ -216,7 +216,8 @@ def process_image(
     overpaint_mm: float,
     order_mode: str,
     max_side: int,
-    saturation_boost: float = 1.0
+    saturation_boost: float = 1.0,
+    detail_level: float = 0.5
 ) -> Dict:
     """Main processing pipeline."""
     # Load image

@@ -37,6 +37,7 @@ export default function Home() {
   const [orderMode, setOrderMode] = useState<'largest' | 'smallest' | 'manual'>('largest')
   const [maxSide, setMaxSide] = useState(1920)
   const [saturationBoost, setSaturationBoost] = useState(1.0)
+  const [detailLevel, setDetailLevel] = useState(0.5)
   const [processing, setProcessing] = useState(false)
   const [sessionData, setSessionData] = useState<SessionResponse | null>(null)
   const [manualOrder, setManualOrder] = useState<number[]>([])
@@ -102,6 +103,7 @@ export default function Home() {
     formData.append('order_mode', orderMode)
     formData.append('max_side', maxSide.toString())
     formData.append('saturation_boost', saturationBoost.toString())
+    formData.append('detail_level', detailLevel.toString())
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/sessions`, {
@@ -320,6 +322,29 @@ export default function Home() {
                   <span>50% (Less Vibrant)</span>
                   <span>100% (Normal)</span>
                   <span>500% (Maximum)</span>
+                </div>
+              </div>
+
+              <div className="col-span-2">
+                <label className="block mb-2">
+                  Detail Level: {(detailLevel * 100).toFixed(0)}%
+                  <span className="text-xs text-gray-400 ml-2">
+                    (Higher = more detail preserved, Lower = cleaner/simpler)
+                  </span>
+                </label>
+                <input
+                  type="range"
+                  min="0.0"
+                  max="1.0"
+                  step="0.01"
+                  value={detailLevel}
+                  onChange={(e) => setDetailLevel(parseFloat(e.target.value))}
+                  className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-green-600"
+                />
+                <div className="flex justify-between text-xs text-gray-400 mt-1">
+                  <span>0% (Simple)</span>
+                  <span>50% (Balanced)</span>
+                  <span>100% (Maximum Detail)</span>
                 </div>
               </div>
             </div>
