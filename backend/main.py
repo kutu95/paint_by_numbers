@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # CORS middleware - allow origins from environment or default to localhost
-# Default includes both port 3000 and 3001 for compatibility
-allowed_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001").split(",")
+# Default includes common ports for compatibility
+allowed_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://localhost:3002").split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
