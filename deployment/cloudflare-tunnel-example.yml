@@ -1,0 +1,14 @@
+tunnel: b2be279d-ebd1-41c7-8b33-c6e64b24547d
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  # LayerPainter Frontend
+  - hostname: layerpainter.yourdomain.com  # Replace with your actual domain
+    service: http://localhost:3003
+  
+  # LayerPainter Backend API
+  - hostname: layerpainter-api.yourdomain.com  # Replace with your actual domain
+    service: http://localhost:8000
+  
+  # Catch-all rule (must be last)
+  - service: http_status:404
