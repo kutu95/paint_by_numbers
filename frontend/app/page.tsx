@@ -301,39 +301,50 @@ export default function Home() {
   // Handle generating recipes from palette
   const [selectedLibraryGroup, setSelectedLibraryGroup] = useState<string>('default')
   const [libraryGroups, setLibraryGroups] = useState<Array<{group: string, name: string, paint_count: number, calibrated_count: number}>>([])
+  const [libraryGroupsLoaded, setLibraryGroupsLoaded] = useState(false)
 
-  // Load library groups on mount
+  // Load library groups on mount (client-side only)
   useEffect(() => {
+    if (typeof window === 'undefined') return
     loadLibraryGroups()
   }, [])
 
-  // Auto-generate recipes when library group changes and we have session data
+  // Auto-generate recipes when library group changes and we have session data (client-side only)
   useEffect(() => {
-    if (sessionData && selectedLibraryGroup && libraryGroups.length > 0 && !loadingRecipes) {
+    if (typeof window === 'undefined' || !mounted) return
+    if (sessionData && selectedLibraryGroup && libraryGroups.length > 0 && !loadingRecipes && libraryGroupsLoaded) {
       // Use a ref or flag to prevent duplicate calls
       const recipeKey = `${sessionData.session_id}_${selectedLibraryGroup}`
       const lastGenerated = sessionStorage.getItem(`recipes_${recipeKey}`)
       
       if (!lastGenerated) {
-        handleGenerateRecipes()
-        sessionStorage.setItem(`recipes_${recipeKey}`, 'true')
+        // Delay slightly to avoid hydration issues
+        const timer = setTimeout(() => {
+          handleGenerateRecipes()
+          sessionStorage.setItem(`recipes_${recipeKey}`, 'true')
+        }, 100)
+        return () => clearTimeout(timer)
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedLibraryGroup]) // Only regenerate when group changes
+  }, [selectedLibraryGroup, libraryGroupsLoaded, mounted]) // Only regenerate when group changes
 
   const loadLibraryGroups = async () => {
+    if (typeof window === 'undefined') return
     try {
       const response = await fetch(`${API_BASE_URL}/api/paint/library/groups`)
       const data = await response.json()
-      setLibraryGroups(data.groups || [])
-      if (data.groups && data.groups.length > 0) {
+      const groups = data.groups || []
+      setLibraryGroups(groups)
+      setLibraryGroupsLoaded(true)
+      if (groups.length > 0) {
         // Try to find a group with calibrated paints, otherwise use default
-        const calibratedGroup = data.groups.find((g: any) => g.calibrated_count > 0)
-        setSelectedLibraryGroup(calibratedGroup ? calibratedGroup.group : data.groups[0].group)
+        const calibratedGroup = groups.find((g: any) => g.calibrated_count > 0)
+        setSelectedLibraryGroup(calibratedGroup ? calibratedGroup.group : groups[0].group)
       }
     } catch (error) {
       console.error('Failed to load library groups:', error)
+      setLibraryGroupsLoaded(true) // Set to true even on error to prevent infinite waiting
     }
   }
 
@@ -721,7 +732,7 @@ export default function Home() {
                     Calibrate Paints in {libraryGroups.find(g => g.group === selectedLibraryGroup)?.name || 'Library'}
                   </button>
                 </div>
-                {libraryGroups.find(g => g.group === selectedLibraryGroup)?.calibrated_count === 0 && (
+                {libraryGroupsLoaded && libraryGroups.find(g => g.group === selectedLibraryGroup)?.calibrated_count === 0 && (
                   <p className="text-yellow-400 text-sm">
                     ⚠️ No calibrated paints in this library. Recipes will use estimated colors. 
                     <button 
