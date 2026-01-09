@@ -294,13 +294,18 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
         with open(cal2_file, 'r') as f:
             cal2 = json.load(f)
         
-        # Coarse grid search
+        # Fine grid search for better accuracy
         best_error = float('inf')
         best_recipe = None
         
-        for p1_ratio in np.arange(0.0, 0.31, 0.05):
-            for p2_ratio in np.arange(0.0, 0.31, 0.05):
-                if p1_ratio + p2_ratio > 0.5:  # Keep white dominant
+        # Allow up to 60% total pigment (40% white minimum)
+        max_total_pigment = 0.6
+        for p1_ratio in np.arange(0.02, 0.35, 0.02):
+            for p2_ratio in np.arange(0.02, 0.35, 0.02):
+                if p1_ratio + p2_ratio > max_total_pigment:
+                    continue
+                # Ensure minimum ratio for each pigment (at least 2% each)
+                if p1_ratio < 0.02 or p2_ratio < 0.02:
                     continue
                 
                 # Approximate: blend the two single-pigment Labs at their ratios
@@ -344,13 +349,18 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
             rgb2 = [int(hex2_clean[i:i+2], 16) for i in (0, 2, 4)]
             lab2 = rgb_to_lab(rgb2)
             
-            # Simple grid search with approximate colors
+            # Fine grid search with approximate colors
             best_error = float('inf')
             best_recipe = None
             
-            for p1_ratio in np.arange(0.05, 0.26, 0.05):
-                for p2_ratio in np.arange(0.05, 0.26, 0.05):
-                    if p1_ratio + p2_ratio > 0.5:
+            # Allow up to 60% total pigment (40% white minimum)
+            max_total_pigment = 0.6
+            for p1_ratio in np.arange(0.02, 0.35, 0.02):
+                for p2_ratio in np.arange(0.02, 0.35, 0.02):
+                    if p1_ratio + p2_ratio > max_total_pigment:
+                        continue
+                    # Ensure minimum ratio for each pigment (at least 2% each)
+                    if p1_ratio < 0.02 or p2_ratio < 0.02:
                         continue
                     
                     white_ratio = 1.0 - p1_ratio - p2_ratio
