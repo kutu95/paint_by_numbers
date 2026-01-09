@@ -72,8 +72,8 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const router = useRouter()
 
-  // Helper function to convert hex to RGB
-  const hexToRgb = (hex: string) => {
+  // Helper function to convert hex to RGB object for modal display
+  const hexToRgbObject = (hex: string) => {
     const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex)
     return result
       ? {
@@ -689,11 +689,11 @@ export default function Home() {
                   <span className="text-gray-300 font-semibold">Hex:</span>
                   <span className="text-white font-mono">{selectedColor.hex.toUpperCase()}</span>
                 </div>
-                {hexToRgb(selectedColor.hex) && (
+                {hexToRgbObject(selectedColor.hex) && (
                   <div className="flex items-center justify-between p-3 bg-gray-700 rounded">
                     <span className="text-gray-300 font-semibold">RGB:</span>
                     <span className="text-white font-mono">
-                      R: {hexToRgb(selectedColor.hex)!.r} | G: {hexToRgb(selectedColor.hex)!.g} | B: {hexToRgb(selectedColor.hex)!.b}
+                      R: {hexToRgbObject(selectedColor.hex)!.r} | G: {hexToRgbObject(selectedColor.hex)!.g} | B: {hexToRgbObject(selectedColor.hex)!.b}
                     </span>
                   </div>
                 )}
