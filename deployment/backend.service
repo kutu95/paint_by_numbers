@@ -7,7 +7,7 @@ Type=simple
 User=www-data
 WorkingDirectory=/opt/layerpainter/backend
 Environment="PATH=/opt/layerpainter/backend/venv/bin"
-Environment="CORS_ORIGINS=http://192.168.0.146:3000,http://localhost:3000"
+Environment="CORS_ORIGINS=http://192.168.0.146:3003,http://localhost:3003,http://192.168.0.146:3000,http://localhost:3000"
 ExecStart=/opt/layerpainter/backend/venv/bin/python main.py
 Restart=always
 RestartSec=10
