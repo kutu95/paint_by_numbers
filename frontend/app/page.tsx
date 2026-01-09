@@ -32,12 +32,37 @@ interface SessionResponse {
 export default function Home() {
   const [image, setImage] = useState<File | null>(null)
   const [preview, setPreview] = useState<string | null>(null)
-  const [nColors, setNColors] = useState(16)
-  const [overpaintMm, setOverpaintMm] = useState(5)
-  const [orderMode, setOrderMode] = useState<'largest' | 'smallest' | 'manual'>('largest')
-  const [maxSide, setMaxSide] = useState(1920)
-  const [saturationBoost, setSaturationBoost] = useState(1.0)
-  const [detailLevel, setDetailLevel] = useState(0.5)
+  // Load settings from localStorage or use defaults
+  const loadSettings = () => {
+    if (typeof window === 'undefined') return null
+    try {
+      const saved = localStorage.getItem('layerpainter_settings')
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        return {
+          nColors: parsed.nColors ?? 16,
+          overpaintMm: parsed.overpaintMm ?? 5,
+          orderMode: parsed.orderMode ?? 'largest',
+          maxSide: parsed.maxSide ?? 1920,
+          saturationBoost: parsed.saturationBoost ?? 1.0,
+          detailLevel: parsed.detailLevel ?? 0.5,
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load settings from localStorage:', e)
+    }
+    return null
+  }
+
+  const savedSettings = loadSettings()
+  const [nColors, setNColors] = useState(savedSettings?.nColors ?? 16)
+  const [overpaintMm, setOverpaintMm] = useState(savedSettings?.overpaintMm ?? 5)
+  const [orderMode, setOrderMode] = useState<'largest' | 'smallest' | 'manual' | 'lightest'>(
+    savedSettings?.orderMode ?? 'largest'
+  )
+  const [maxSide, setMaxSide] = useState(savedSettings?.maxSide ?? 1920)
+  const [saturationBoost, setSaturationBoost] = useState(savedSettings?.saturationBoost ?? 1.0)
+  const [detailLevel, setDetailLevel] = useState(savedSettings?.detailLevel ?? 0.5)
   const [processing, setProcessing] = useState(false)
   const [sessionData, setSessionData] = useState<SessionResponse | null>(null)
   const [manualOrder, setManualOrder] = useState<number[]>([])
@@ -62,6 +87,24 @@ export default function Home() {
       reader.readAsDataURL(file)
     }
   }
+
+  // Save settings to localStorage whenever they change
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      const settings = {
+        nColors,
+        overpaintMm,
+        orderMode,
+        maxSide,
+        saturationBoost,
+        detailLevel,
+      }
+      localStorage.setItem('layerpainter_settings', JSON.stringify(settings))
+    } catch (e) {
+      console.error('Failed to save settings to localStorage:', e)
+    }
+  }, [nColors, overpaintMm, orderMode, maxSide, saturationBoost, detailLevel])
 
   // Restore image preview from localStorage on mount
   useEffect(() => {
