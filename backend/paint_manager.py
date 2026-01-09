@@ -325,7 +325,8 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
                             'pigment2_id': paint_id2,
                             'pigment2_ratio': p2_ratio,
                             'white_ratio': white_ratio,
-                            'error': best_error
+                            'error': best_error,
+                            'type': 'two_pigment'
                         }
         
         if best_recipe:
@@ -372,6 +373,7 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
                             'pigment2_ratio': p2_ratio,
                             'white_ratio': white_ratio,
                             'error': best_error,
+                            'type': 'two_pigment',
                             'uncalibrated': True
                         }
             
@@ -380,6 +382,137 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
             return None
     
     return None
+
+
+def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str], paint_hexes: List[str]) -> Optional[Dict]:
+    """Find best mixing ratio for multiple pigments + white.
+    
+    Args:
+        target_lab: Target color in Lab color space
+        paint_ids: List of paint IDs
+        paint_hexes: List of hex colors for paints (if uncalibrated)
+    
+    Returns:
+        Recipe dict with pigment IDs, ratios, white_ratio, and error
+    """
+    n_pigments = len(paint_ids)
+    if n_pigments < 2:
+        return None
+    
+    # Try to get calibrated colors first
+    paint_labs = []
+    calibrated_count = 0
+    
+    for paint_id, paint_hex in zip(paint_ids, paint_hexes):
+        cal_file = CALIBRATION_DIR / f"{paint_id}.json"
+        if cal_file.exists():
+            # Use a representative ratio (0.1) to get approximate color
+            with open(cal_file, 'r') as f:
+                calibration = json.load(f)
+            lab = interpolate_lab_from_calibration(calibration, 0.1)
+            if lab:
+                paint_labs.append(lab)
+                calibrated_count += 1
+                continue
+        
+        # Fallback to hex color
+        if paint_hex:
+            try:
+                hex_clean = paint_hex.lstrip('#')
+                rgb = [int(hex_clean[i:i+2], 16) for i in (0, 2, 4)]
+                lab = rgb_to_lab(rgb)
+                paint_labs.append(lab)
+            except:
+                return None
+        else:
+            return None
+    
+    if len(paint_labs) != n_pigments:
+        return None
+    
+    # Grid search for best ratios
+    # For n pigments, we'll try different combinations
+    # Keep total pigment ratio <= 0.5 (white dominant)
+    best_error = float('inf')
+    best_recipe = None
+    
+    # Coarse grid search - adjust step size based on number of pigments
+    step = 0.05 if n_pigments == 3 else 0.03 if n_pigments == 4 else 0.02
+    
+    # Generate all combinations of ratios
+    max_ratio_per_pigment = 0.5 / n_pigments  # Distribute evenly
+    
+    if n_pigments == 3:
+        for p1_ratio in np.arange(0.05, max_ratio_per_pigment * 2, step):
+            for p2_ratio in np.arange(0.05, max_ratio_per_pigment * 2, step):
+                p3_ratio = min(max_ratio_per_pigment * 2, 0.5 - p1_ratio - p2_ratio)
+                if p3_ratio < 0.05:
+                    continue
+                
+                white_ratio = 1.0 - p1_ratio - p2_ratio - p3_ratio
+                if white_ratio < 0.5:  # Keep white dominant
+                    continue
+                
+                # Blend the colors
+                blended_lab = [
+                    paint_labs[0][0] * p1_ratio + paint_labs[1][0] * p2_ratio + paint_labs[2][0] * p3_ratio + 100.0 * white_ratio * 0.9,
+                    paint_labs[0][1] * p1_ratio + paint_labs[1][1] * p2_ratio + paint_labs[2][1] * p3_ratio,
+                    paint_labs[0][2] * p1_ratio + paint_labs[1][2] * p2_ratio + paint_labs[2][2] * p3_ratio
+                ]
+                
+                error = delta_e_lab(target_lab, blended_lab)
+                if calibrated_count < n_pigments:
+                    error += (n_pigments - calibrated_count) * 3.0  # Penalty for uncalibrated
+                
+                if error < best_error:
+                    best_error = error
+                    best_recipe = {
+                        'pigment_ids': paint_ids,
+                        'pigment_ratios': [p1_ratio, p2_ratio, p3_ratio],
+                        'white_ratio': white_ratio,
+                        'error': best_error,
+                        'type': 'three_pigment',
+                        'uncalibrated': calibrated_count < n_pigments
+                    }
+    
+    elif n_pigments == 4:
+        for p1_ratio in np.arange(0.03, max_ratio_per_pigment * 2, step):
+            for p2_ratio in np.arange(0.03, max_ratio_per_pigment * 2, step):
+                for p3_ratio in np.arange(0.03, max_ratio_per_pigment * 2, step):
+                    p4_ratio = min(max_ratio_per_pigment * 2, 0.5 - p1_ratio - p2_ratio - p3_ratio)
+                    if p4_ratio < 0.03:
+                        continue
+                    
+                    white_ratio = 1.0 - p1_ratio - p2_ratio - p3_ratio - p4_ratio
+                    if white_ratio < 0.5:
+                        continue
+                    
+                    # Blend the colors
+                    blended_lab = [
+                        paint_labs[0][0] * p1_ratio + paint_labs[1][0] * p2_ratio + 
+                        paint_labs[2][0] * p3_ratio + paint_labs[3][0] * p4_ratio + 100.0 * white_ratio * 0.9,
+                        paint_labs[0][1] * p1_ratio + paint_labs[1][1] * p2_ratio + 
+                        paint_labs[2][1] * p3_ratio + paint_labs[3][1] * p4_ratio,
+                        paint_labs[0][2] * p1_ratio + paint_labs[1][2] * p2_ratio + 
+                        paint_labs[2][2] * p3_ratio + paint_labs[3][2] * p4_ratio
+                    ]
+                    
+                    error = delta_e_lab(target_lab, blended_lab)
+                    if calibrated_count < n_pigments:
+                        error += (n_pigments - calibrated_count) * 4.0  # Penalty for uncalibrated
+                    
+                    if error < best_error:
+                        best_error = error
+                        best_recipe = {
+                            'pigment_ids': paint_ids,
+                            'pigment_ratios': [p1_ratio, p2_ratio, p3_ratio, p4_ratio],
+                            'white_ratio': white_ratio,
+                            'error': best_error,
+                            'type': 'four_pigment',
+                            'uncalibrated': calibrated_count < n_pigments
+                        }
+    
+    return best_recipe
 
 
 def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_group: str = "default") -> List[Dict]:
@@ -395,8 +528,57 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
     library = load_library(library_group)
     paints = library.get('paints', [])
     
-    # Filter to base paints only
+    # Filter to base paints only, excluding white and black (they're mixing components, not color pigments)
     base_paints = [p for p in paints if p.get('type') == 'base']
+    
+    # Identify white and black paints (by name or color)
+    def is_achromatic(paint: Dict) -> bool:
+        """Check if a paint is white, black, or essentially achromatic (gray)."""
+        paint_id_lower = paint.get('id', '').lower()
+        paint_name_lower = paint.get('name', '').lower()
+        
+        # Check by name
+        achromatic_names = ['white', 'black', 'carbon black', 'titanium white', 'zinc white']
+        if any(name in paint_id_lower or name in paint_name_lower for name in achromatic_names):
+            return True
+        
+        # Check by color - if it's very close to white, black, or gray
+        hex_color = paint.get('hex_approx', '')
+        if hex_color:
+            try:
+                hex_clean = hex_color.lstrip('#')
+                r = int(hex_clean[0:2], 16)
+                g = int(hex_clean[2:4], 16)
+                b = int(hex_clean[4:6], 16)
+                
+                # Check if it's essentially white (all channels > 240)
+                if r > 240 and g > 240 and b > 240:
+                    return True
+                
+                # Check if it's essentially black (all channels < 20)
+                if r < 20 and g < 20 and b < 20:
+                    return True
+                
+                # Check if it's essentially gray (all channels similar, within 30 of each other)
+                if abs(r - g) < 30 and abs(g - b) < 30 and abs(r - b) < 30:
+                    # And it's not a very saturated color
+                    max_channel = max(r, g, b)
+                    min_channel = min(r, g, b)
+                    if max_channel - min_channel < 40:  # Low saturation = gray
+                        return True
+            except:
+                pass
+        
+        return False
+    
+    # Separate colored paints from achromatic ones
+    colored_paints = [p for p in base_paints if not is_achromatic(p)]
+    achromatic_paints = [p for p in base_paints if is_achromatic(p)]
+    
+    # Use colored paints for matching, but keep achromatic for reference
+    if not colored_paints:
+        # Fallback: if no colored paints, use all paints but with heavy penalty
+        colored_paints = base_paints
     
     if not base_paints:
         # No paints available at all
@@ -412,22 +594,45 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
         target_rgb = color['rgb']
         target_lab = rgb_to_lab([float(c) for c in target_rgb])
         
+        # Check if target is essentially achromatic (gray/white/black)
+        target_is_achromatic = False
+        r, g, b = target_rgb
+        if abs(r - g) < 30 and abs(g - b) < 30 and abs(r - b) < 30:
+            max_channel = max(r, g, b)
+            min_channel = min(r, g, b)
+            if max_channel - min_channel < 40:  # Low saturation = gray
+                target_is_achromatic = True
+        
         # Try one-pigment recipes first (prefer calibrated, fallback to approximate)
+        # Only use colored paints for colored targets
+        search_paints = colored_paints if not target_is_achromatic else base_paints
         best_one_pigment = None
         best_one_error = float('inf')
         
-        for paint in base_paints:
+        for paint in search_paints:
             paint_hex = paint.get('hex_approx', '')
             recipe = find_best_one_pigment_recipe(target_lab, paint['id'], paint_hex)
-            if recipe and recipe['error'] < best_one_error:
-                best_one_error = recipe['error']
-                best_one_pigment = recipe
+            if recipe:
+                # Add penalty if using achromatic paint for colored target
+                if not target_is_achromatic and is_achromatic(paint):
+                    recipe['error'] += 20.0  # Heavy penalty
+                
+                if recipe['error'] < best_one_error:
+                    best_one_error = recipe['error']
+                    best_one_pigment = recipe
         
-        # Try two-pigment recipes (if one-pigment error is high or no good one-pigment found)
-        best_two_pigment = None
-        if best_one_error > 5.0 or best_one_pigment is None:  # Threshold for trying two pigments
-            for i, paint1 in enumerate(base_paints):
-                for paint2 in base_paints[i+1:]:
+        # Try multi-pigment recipes (2, 3, 4, etc.) if one-pigment error is high
+        best_multi_pigment = None
+        best_multi_error = best_one_error
+        
+        if best_one_error > 3.0 or best_one_pigment is None:  # Threshold for trying multiple pigments
+            # Try 2 pigments
+            for i, paint1 in enumerate(search_paints):
+                for paint2 in search_paints[i+1:]:
+                    # Don't allow two achromatic paints for colored targets
+                    if not target_is_achromatic and is_achromatic(paint1) and is_achromatic(paint2):
+                        continue
+                    
                     paint1_hex = paint1.get('hex_approx', '')
                     paint2_hex = paint2.get('hex_approx', '')
                     recipe = find_best_two_pigment_recipe(
@@ -437,11 +642,87 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
                         paint1_hex,
                         paint2_hex
                     )
-                    if recipe and (best_one_pigment is None or recipe['error'] < best_one_error):
-                        best_two_pigment = recipe
+                    if recipe:
+                        # Add penalty if using achromatic paints for colored target
+                        if not target_is_achromatic:
+                            if is_achromatic(paint1):
+                                recipe['error'] += 15.0
+                            if is_achromatic(paint2):
+                                recipe['error'] += 15.0
+                        
+                        if recipe['error'] < best_multi_error:
+                            best_multi_error = recipe['error']
+                            best_multi_pigment = recipe
+            
+            # Try 3 pigments if 2 pigments still not good enough
+            if best_multi_error > 5.0 and len(search_paints) >= 3:
+                for i, paint1 in enumerate(search_paints):
+                    for j, paint2 in enumerate(search_paints[i+1:], i+1):
+                        for paint3 in search_paints[j+1:]:
+                            # Don't allow all achromatic paints for colored targets
+                            if not target_is_achromatic:
+                                achromatic_count = sum([is_achromatic(p) for p in [paint1, paint2, paint3]])
+                                if achromatic_count >= 2:  # Don't allow 2+ achromatic in 3-pigment mix
+                                    continue
+                            
+                            recipe = find_best_multi_pigment_recipe(
+                                target_lab,
+                                [paint1['id'], paint2['id'], paint3['id']],
+                                [paint1.get('hex_approx', ''), paint2.get('hex_approx', ''), paint3.get('hex_approx', '')]
+                            )
+                            if recipe:
+                                # Add penalty if using achromatic paints
+                                if not target_is_achromatic:
+                                    for paint in [paint1, paint2, paint3]:
+                                        if is_achromatic(paint):
+                                            recipe['error'] += 10.0
+                                
+                                if recipe['error'] < best_multi_error:
+                                    best_multi_error = recipe['error']
+                                    best_multi_pigment = recipe
+                                    if best_multi_error < 3.0:  # Good enough, stop searching
+                                        break
+                        if best_multi_error < 3.0:
+                            break
+                    if best_multi_error < 3.0:
                         break
-                if best_two_pigment:
-                    break
+            
+            # Try 4 pigments if 3 still not good enough (for very complex colors)
+            if best_multi_error > 8.0 and len(search_paints) >= 4:
+                for i, paint1 in enumerate(search_paints):
+                    for j, paint2 in enumerate(search_paints[i+1:], i+1):
+                        for k, paint3 in enumerate(search_paints[j+1:], j+1):
+                            for paint4 in search_paints[k+1:]:
+                                # Don't allow too many achromatic paints
+                                if not target_is_achromatic:
+                                    achromatic_count = sum([is_achromatic(p) for p in [paint1, paint2, paint3, paint4]])
+                                    if achromatic_count >= 2:
+                                        continue
+                                
+                                recipe = find_best_multi_pigment_recipe(
+                                    target_lab,
+                                    [paint1['id'], paint2['id'], paint3['id'], paint4['id']],
+                                    [paint1.get('hex_approx', ''), paint2.get('hex_approx', ''), 
+                                     paint3.get('hex_approx', ''), paint4.get('hex_approx', '')]
+                                )
+                                if recipe:
+                                    # Add penalty if using achromatic paints
+                                    if not target_is_achromatic:
+                                        for paint in [paint1, paint2, paint3, paint4]:
+                                            if is_achromatic(paint):
+                                                recipe['error'] += 8.0
+                                    
+                                    if recipe['error'] < best_multi_error:
+                                        best_multi_error = recipe['error']
+                                        best_multi_pigment = recipe
+                                        if best_multi_error < 5.0:  # Good enough
+                                            break
+                            if best_multi_error < 5.0:
+                                break
+                        if best_multi_error < 5.0:
+                            break
+                    if best_multi_error < 5.0:
+                        break
         
         # Choose best recipe
         if best_two_pigment and (best_one_pigment is None or best_two_pigment['error'] < best_one_error):
