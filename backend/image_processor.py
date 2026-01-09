@@ -126,13 +126,26 @@ def clean_mask(mask: np.ndarray, min_area_ratio: float = 0.0002) -> np.ndarray:
     return cleaned
 
 
+def calculate_lightness(rgb: List[int]) -> float:
+    """Calculate relative luminance (lightness) from RGB values."""
+    # Use standard relative luminance formula
+    # Convert to 0-1 range first
+    r, g, b = [c / 255.0 for c in rgb]
+    # Relative luminance formula
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
 def order_layers(palette: List[Dict], order_mode: str) -> List[int]:
-    """Order layers by coverage or return manual order."""
+    """Order layers by coverage, lightness, or return manual order."""
     if order_mode == 'largest':
         sorted_palette = sorted(palette, key=lambda x: x['coverage'], reverse=True)
         return [p['index'] for p in sorted_palette]
     elif order_mode == 'smallest':
         sorted_palette = sorted(palette, key=lambda x: x['coverage'])
+        return [p['index'] for p in sorted_palette]
+    elif order_mode == 'lightest':
+        # Sort by lightness (L value) - lightest first
+        sorted_palette = sorted(palette, key=lambda x: calculate_lightness(x['rgb']), reverse=True)
         return [p['index'] for p in sorted_palette]
     else:  # manual
         return [p['index'] for p in palette]

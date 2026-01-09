@@ -286,6 +286,7 @@ export default function Home() {
                 >
                   <option value="largest">Largest Coverage First</option>
                   <option value="smallest">Smallest Coverage First</option>
+                  <option value="lightest">Lightest Colours First</option>
                   <option value="manual">Manual</option>
                 </select>
               </div>

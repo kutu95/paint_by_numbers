@@ -89,9 +89,9 @@ async def create_session(
     if overpaint_mm < 0 or overpaint_mm > 50:
         logger.error(f"Invalid overpaint_mm: {overpaint_mm}")
         raise HTTPException(status_code=400, detail="overpaint_mm must be between 0 and 50")
-    if order_mode not in ["largest", "smallest", "manual"]:
+    if order_mode not in ["largest", "smallest", "manual", "lightest"]:
         logger.error(f"Invalid order_mode: {order_mode}")
-        raise HTTPException(status_code=400, detail="order_mode must be largest, smallest, or manual")
+        raise HTTPException(status_code=400, detail="order_mode must be largest, smallest, manual, or lightest")
     if max_side < 100 or max_side > 5000:
         logger.error(f"Invalid max_side: {max_side}")
         raise HTTPException(status_code=400, detail="max_side must be between 100 and 5000")
