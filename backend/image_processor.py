@@ -254,10 +254,15 @@ def process_image(
     cv2.imwrite(str(preview_path), cv2.cvtColor(quantized, cv2.COLOR_RGB2BGR))
     
     # Step 3: Clean masks
+    # detail_level: 0.0 = high detail (keep small components), 1.0 = low detail (remove more)
+    # Map detail_level (0-1) to min_area_ratio (0.00005 - 0.002)
+    # Low values = preserve more detail, high values = remove more small components
+    min_area_ratio = 0.00005 + (detail_level * 0.00195)  # Range: 0.00005 to 0.002
+    
     base_masks = {}
     for idx in range(n_colors):
         mask = (labels == idx).astype(np.uint8) * 255
-        cleaned = clean_mask(mask)
+        cleaned = clean_mask(mask, min_area_ratio=min_area_ratio)
         base_masks[idx] = cleaned
     
     # Step 4: Order layers
