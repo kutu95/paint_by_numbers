@@ -229,6 +229,99 @@ def smart_overpaint_expansion(
     return expanded_masks
 
 
+def ensure_complete_coverage(
+    expanded_masks: Dict[int, np.ndarray],
+    order: List[int],
+    quantized_image: np.ndarray,
+    labels: np.ndarray,
+    palette: List[Dict]
+) -> Dict[int, np.ndarray]:
+    """Ensure all pixels are covered by at least one layer.
+    
+    After overpaint expansion, some pixels might be missed due to:
+    - Mask cleaning removing small components
+    - Overpaint logic removing pixels that were supposed to be painted by earlier layers
+    
+    This function assigns any unpainted pixels to the appropriate layer based on
+    the quantized color at that location.
+    
+    Args:
+        expanded_masks: Dictionary of palette index to mask
+        order: List of palette indices in paint order
+        quantized_image: The quantized RGB image
+        labels: The K-means labels for each pixel (0 to n_colors-1)
+        palette: List of palette dictionaries with 'rgb' key
+    
+    Returns:
+        Updated expanded_masks with all pixels covered
+    """
+    # Create a union of all painted areas
+    painted_union = np.zeros_like(list(expanded_masks.values())[0], dtype=np.uint8)
+    for mask in expanded_masks.values():
+        painted_union = cv2.bitwise_or(painted_union, mask)
+    
+    # Find unpainted pixels
+    unpainted_mask = cv2.bitwise_not(painted_union)
+    unpainted_pixels = np.sum(unpainted_mask > 0)
+    
+    if unpainted_pixels == 0:
+        # Already fully covered
+        return expanded_masks
+    
+    # For each unpainted pixel, assign it to the layer matching its quantized color
+    # This ensures every pixel is covered by the layer that represents its color
+    for palette_idx in order:
+        if palette_idx >= len(palette):
+            continue
+            
+        mask = expanded_masks[palette_idx]
+        
+        # Find pixels that should belong to this color (from K-means labels)
+        color_mask = (labels == palette_idx).astype(np.uint8) * 255
+        
+        # Find unpainted pixels that match this color
+        missing_pixels = cv2.bitwise_and(color_mask, unpainted_mask)
+        
+        # Add these pixels to the current layer
+        if np.sum(missing_pixels) > 0:
+            expanded_masks[palette_idx] = cv2.bitwise_or(mask, missing_pixels)
+            # Update unpainted mask
+            unpainted_mask = cv2.bitwise_and(unpainted_mask, cv2.bitwise_not(missing_pixels))
+    
+    # If there are still unpainted pixels (shouldn't happen, but just in case),
+    # assign them to the nearest layer by color similarity
+    remaining_unpainted = np.sum(unpainted_mask > 0)
+    if remaining_unpainted > 0:
+        # Get coordinates of unpainted pixels
+        unpainted_coords = np.argwhere(unpainted_mask > 0)
+        
+        # For each unpainted pixel, find the palette color that best matches its quantized color
+        for y, x in unpainted_coords:
+            # Get the quantized color at this location (RGB)
+            pixel_color_rgb = quantized_image[y, x]  # Shape: (3,)
+            
+            # Find the palette index that best matches this color
+            best_idx = order[0] if order else 0  # Default to first layer
+            min_dist = float('inf')
+            
+            for palette_idx in order:
+                if palette_idx >= len(palette):
+                    continue
+                    
+                palette_color_rgb = np.array(palette[palette_idx]['rgb'])
+                
+                # Calculate Euclidean distance in RGB space
+                color_dist = np.linalg.norm(pixel_color_rgb - palette_color_rgb)
+                if color_dist < min_dist:
+                    min_dist = color_dist
+                    best_idx = palette_idx
+            
+            # Add this pixel to the best matching layer
+            expanded_masks[best_idx][y, x] = 255
+    
+    return expanded_masks
+
+
 def generate_outline(mask: np.ndarray, style: str = 'thin') -> np.ndarray:
     """Generate outline overlay from mask."""
     if style == 'off':
@@ -325,6 +418,9 @@ def process_image(
     
     # Step 5: Smart overpaint expansion
     expanded_masks = smart_overpaint_expansion(base_masks, order, overpaint_mm, max_side)
+    
+    # Step 5.5: Ensure complete coverage - fill any unpainted areas
+    expanded_masks = ensure_complete_coverage(expanded_masks, order, quantized, labels, palette)
     
     # Step 6: Generate outlines and save
     layers = []
