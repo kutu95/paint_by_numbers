@@ -68,8 +68,21 @@ export default function Home() {
   const [manualOrder, setManualOrder] = useState<number[]>([])
   const [recipes, setRecipes] = useState<any[]>([])
   const [loadingRecipes, setLoadingRecipes] = useState(false)
+  const [selectedColor, setSelectedColor] = useState<PaletteColor | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const router = useRouter()
+
+  // Helper function to convert hex to RGB
+  const hexToRgb = (hex: string) => {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex)
+    return result
+      ? {
+          r: parseInt(result[1], 16),
+          g: parseInt(result[2], 16),
+          b: parseInt(result[3], 16),
+        }
+      : null
+  }
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -105,6 +118,17 @@ export default function Home() {
       console.error('Failed to save settings to localStorage:', e)
     }
   }, [nColors, overpaintMm, orderMode, maxSide, saturationBoost, detailLevel])
+
+  // Handle ESC key to close modal
+  useEffect(() => {
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && selectedColor) {
+        setSelectedColor(null)
+      }
+    }
+    window.addEventListener('keydown', handleEsc)
+    return () => window.removeEventListener('keydown', handleEsc)
+  }, [selectedColor])
 
   // Restore image preview and session data from localStorage on mount
   useEffect(() => {
@@ -473,8 +497,9 @@ export default function Home() {
                 {sessionData.palette.map((color) => (
                   <div key={color.index} className="text-center">
                     <div
-                      className="w-16 h-16 rounded border border-gray-600 relative flex items-center justify-center"
+                      className="w-16 h-16 rounded border border-gray-600 relative flex items-center justify-center cursor-pointer hover:opacity-90 transition-opacity"
                       style={{ backgroundColor: color.hex }}
+                      onClick={() => setSelectedColor(color)}
                     >
                       <span
                         className="text-white font-bold text-lg drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]"
@@ -628,6 +653,59 @@ export default function Home() {
                   Click "Generate Recipes" to create mixing recipes for each palette color.
                 </div>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Color Modal */}
+        {selectedColor && (
+          <div
+            className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50"
+            onClick={() => setSelectedColor(null)}
+          >
+            <div
+              className="bg-gray-800 rounded-lg p-8 max-w-md w-full mx-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-2xl font-bold">Palette Color {selectedColor.index}</h3>
+                <button
+                  onClick={() => setSelectedColor(null)}
+                  className="text-gray-400 hover:text-white text-2xl font-bold w-8 h-8 flex items-center justify-center rounded hover:bg-gray-700"
+                >
+                  ×
+                </button>
+              </div>
+
+              {/* Large color swatch */}
+              <div
+                className="w-full aspect-square rounded-lg border-4 border-gray-600 mb-6 shadow-2xl"
+                style={{ backgroundColor: selectedColor.hex }}
+              />
+
+              {/* Color information */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between p-3 bg-gray-700 rounded">
+                  <span className="text-gray-300 font-semibold">Hex:</span>
+                  <span className="text-white font-mono">{selectedColor.hex.toUpperCase()}</span>
+                </div>
+                {hexToRgb(selectedColor.hex) && (
+                  <div className="flex items-center justify-between p-3 bg-gray-700 rounded">
+                    <span className="text-gray-300 font-semibold">RGB:</span>
+                    <span className="text-white font-mono">
+                      R: {hexToRgb(selectedColor.hex)!.r} | G: {hexToRgb(selectedColor.hex)!.g} | B: {hexToRgb(selectedColor.hex)!.b}
+                    </span>
+                  </div>
+                )}
+                <div className="flex items-center justify-between p-3 bg-gray-700 rounded">
+                  <span className="text-gray-300 font-semibold">Coverage:</span>
+                  <span className="text-white">{selectedColor.coverage.toFixed(1)}%</span>
+                </div>
+              </div>
+
+              <div className="mt-6 text-sm text-gray-400 text-center">
+                Click outside or press ESC to close
+              </div>
             </div>
           </div>
         )}
