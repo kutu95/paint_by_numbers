@@ -196,6 +196,11 @@ def smart_overpaint_expansion(
     for idx, palette_idx in enumerate(order):
         base = base_masks[palette_idx].copy()
         
+        # If base mask is empty, skip (this shouldn't happen after our fix, but just in case)
+        if np.sum(base) == 0:
+            expanded_masks[palette_idx] = base
+            continue
+        
         # Gamma scaling: early layers expand more
         scale = (1 - idx / max(1, N - 1)) ** gamma
         r_px = max(1, round(r_px_base * scale))
@@ -206,6 +211,15 @@ def smart_overpaint_expansion(
         
         # Remove already painted areas
         paint_mask = cv2.bitwise_and(expanded, cv2.bitwise_not(painted_union))
+        
+        # If expanded mask becomes empty after removing painted areas, use the base mask
+        # This ensures every color that exists in the palette has at least something to paint
+        if np.sum(paint_mask) == 0:
+            # Use the base mask, but remove only the areas that would overlap
+            paint_mask = cv2.bitwise_and(base, cv2.bitwise_not(painted_union))
+            # If still empty, just use the base mask (this ensures the layer isn't completely empty)
+            if np.sum(paint_mask) == 0:
+                paint_mask = base
         
         # Update painted union
         painted_union = cv2.bitwise_or(painted_union, paint_mask)
