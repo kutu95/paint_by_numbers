@@ -294,7 +294,7 @@ export default function Home() {
       const p1Percent = (recipe.pigment1_ratio * 100).toFixed(1)
       const p2Percent = (recipe.pigment2_ratio * 100).toFixed(1)
       return `${warning}White ${whitePercent}% + ${recipe.pigment1_id} ${p1Percent}% + ${recipe.pigment2_id} ${p2Percent}%`
-    } else if (recipeData.type === 'three_pigment' || recipeData.type === 'four_pigment') {
+    } else if (recipeData.type === 'three_pigment' || recipeData.type === 'four_pigment' || recipeData.type === 'multi_pigment') {
       const whitePercent = (recipe.white_ratio * 100).toFixed(1)
       const pigmentParts = recipe.pigment_ids.map((id: string, idx: number) => {
         const ratio = recipe.pigment_ratios[idx]
