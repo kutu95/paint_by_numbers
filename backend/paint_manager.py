@@ -716,9 +716,10 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
                                 best_multi_error = recipe['error']
                                 best_multi_pigment = recipe
         
-        # Try 2 pigments only as fallback (ONLY if we don't have 3+ paints available)
-        # If we have 3+ paints, we should have tried them above, so only use 2 if we have < 3 paints
-        if len(search_paints) >= 2 and len(search_paints) < 3:
+        # Try 2 pigments as fallback if:
+        # 1. We have < 3 paints available, OR
+        # 2. We tried 3+ but got no valid recipes (best_pigment_count still 0)
+        if len(search_paints) >= 2 and (len(search_paints) < 3 or best_pigment_count == 0):
             for i, paint1 in enumerate(search_paints):
                 for paint2 in search_paints[i+1:]:
                     # Don't allow two achromatic paints for colored targets
