@@ -69,6 +69,7 @@ export default function Home() {
   const [recipes, setRecipes] = useState<any[]>([])
   const [loadingRecipes, setLoadingRecipes] = useState(false)
   const [selectedColor, setSelectedColor] = useState<PaletteColor | null>(null)
+  const [mounted, setMounted] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const router = useRouter()
 
@@ -119,8 +120,14 @@ export default function Home() {
     }
   }, [nColors, overpaintMm, orderMode, maxSide, saturationBoost, detailLevel])
 
+  // Set mounted flag after component mounts (client-side only)
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+
   // Handle ESC key to close modal
   useEffect(() => {
+    if (!mounted || typeof window === 'undefined') return
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && selectedColor) {
         setSelectedColor(null)
@@ -128,7 +135,7 @@ export default function Home() {
     }
     window.addEventListener('keydown', handleEsc)
     return () => window.removeEventListener('keydown', handleEsc)
-  }, [selectedColor])
+  }, [selectedColor, mounted])
 
   // Restore image preview and session data from localStorage on mount
   useEffect(() => {
@@ -657,8 +664,8 @@ export default function Home() {
           </div>
         )}
 
-        {/* Color Modal */}
-        {selectedColor && (
+        {/* Color Modal - only render after mount to avoid hydration issues */}
+        {mounted && selectedColor && (
           <div
             className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50"
             onClick={() => setSelectedColor(null)}
