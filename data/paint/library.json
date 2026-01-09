@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "paints": [
+    {
+      "id": "black",
+      "name": "Black",
+      "type": "base",
+      "hex_approx": "#000000",
+      "notes": ""
+    },
+    {
+      "id": "red",
+      "name": "Red",
+      "type": "base",
+      "hex_approx": "#ff0000",
+      "notes": ""
+    },
+    {
+      "id": "yellow",
+      "name": "Yellow",
+      "type": "base",
+      "hex_approx": "#ffff00",
+      "notes": ""
+    },
+    {
+      "id": "blue",
+      "name": "Blue",
+      "type": "base",
+      "hex_approx": "#0000ff",
+      "notes": ""
+    },
+    {
+      "id": "white",
+      "name": "White",
+      "type": "base",
+      "hex_approx": "#ffffff",
+      "notes": ""
+    }
+  ]
+}

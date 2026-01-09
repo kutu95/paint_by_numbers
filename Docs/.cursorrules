@@ -1,0 +1,72 @@
+# .cursorrules — LayerPainter (Projection Paint Layers)
+
+You are building a projection-first web app per CURSOR_CONTEXT.md.
+Follow the spec exactly. Avoid adding features not listed.
+
+## Non-goals / Hard constraints
+- DO NOT implement zip export, file export, PDF export, or downloads.
+- DO NOT add authentication, databases, or user accounts.
+- DO NOT add keystone correction or complex calibration (only the simple wall-width hint is allowed).
+- DO NOT introduce additional services (Redis, Celery, S3, queues, etc.).
+- Keep the MVP local-dev friendly.
+
+## Architecture
+- Frontend: Next.js + React + TypeScript + Tailwind only.
+- Backend: FastAPI + OpenCV + numpy only (plus standard libs and small helpers).
+- Store session outputs on local filesystem under ./data/sessions/{session_id}/
+- Serve masks/outlines/preview via URLs from the backend (no base64 blobs unless necessary).
+
+## Code quality standards
+- Prefer simple, explicit code over clever abstractions.
+- Keep functions short and testable.
+- Add type hints in Python and TypeScript.
+- Add minimal, useful comments (why, not what).
+- No premature optimization.
+
+## Backend rules (FastAPI)
+- Implement deterministic quantization (set random seed).
+- Implement mask cleaning and smart overpaint expansion exactly as spec:
+  - Maintain painted_union
+  - Dilate early layers more than later layers via gamma scaling
+  - Never overwrite earlier painted areas
+- Provide endpoints exactly as described:
+  - POST /api/sessions
+  - GET static session assets
+- Implement a simple cleanup routine (delete sessions older than X hours).
+
+## Frontend rules (Next.js)
+- Implement routes:
+  - / (setup + preview)
+  - /project/[sessionId] (projection mode)
+- Projection mode must support:
+  - Corner crosshairs (default ON) toggle C
+  - Grid toggle G
+  - Invert toggle I
+  - Outline cycle O (off, thin, thick, glow)
+  - Mask opacity control (40–100%) with [ and ]
+  - Registration mode toggle R
+  - Black screen B, white screen W
+  - HUD toggle H
+  - Mouse auto-hide after 2 seconds inactivity
+  - Prev/next layer navigation and marking layers done (store in localStorage)
+- Make controls large and readable from a distance.
+- Default styling: black background, minimal chrome.
+
+## UI/UX guidelines
+- The projection view must be legible on a wall:
+  - Black background
+  - High-contrast mask
+  - Subtle alignment aids (crosshairs/grid)
+  - HUD must be hideable
+
+## Deliverables required
+- A working repo with clear run instructions:
+  - frontend and backend commands
+- Provide a concise README.md with:
+  - setup steps
+  - how to run
+  - keyboard shortcuts in projection mode
+
+## When ambiguous
+- Choose the simplest implementation that still meets the spec.
+- Do not ask the user questions; make a reasonable default and note it in README.
