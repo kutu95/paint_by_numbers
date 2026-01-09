@@ -1,0 +1,16 @@
+[Unit]
+Description=LayerPainter Backend API
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/layerpainter/backend
+Environment="PATH=/opt/layerpainter/backend/venv/bin"
+Environment="CORS_ORIGINS=http://192.168.0.146:3000,http://localhost:3000"
+ExecStart=/opt/layerpainter/backend/venv/bin/python main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
