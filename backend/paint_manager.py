@@ -725,11 +725,11 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
                         break
         
         # Choose best recipe
-        if best_two_pigment and (best_one_pigment is None or best_two_pigment['error'] < best_one_error):
+        if best_multi_pigment and (best_one_pigment is None or best_multi_pigment['error'] < best_one_error):
             recipes.append({
                 'palette_index': color['index'],
-                'recipe': best_two_pigment,
-                'type': 'two_pigment'
+                'recipe': best_multi_pigment,
+                'type': best_multi_pigment.get('type', 'multi_pigment')
             })
         elif best_one_pigment:
             recipes.append({
