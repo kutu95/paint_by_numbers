@@ -12,6 +12,13 @@ interface Paint {
   notes: string
 }
 
+interface LibraryGroup {
+  group: string
+  paint_count: number
+  calibrated_count: number
+  name: string
+}
+
 export default function PaintsPage() {
   const router = useRouter()
   const [paints, setPaints] = useState<Paint[]>([])
@@ -19,14 +26,39 @@ export default function PaintsPage() {
   const [showAddForm, setShowAddForm] = useState(false)
   const [editingPaint, setEditingPaint] = useState<Paint | null>(null)
   const [formData, setFormData] = useState({ name: '', hex_approx: '#000000', notes: '' })
+  const [libraryGroups, setLibraryGroups] = useState<LibraryGroup[]>([])
+  const [selectedGroup, setSelectedGroup] = useState<string>('default')
+  const [showCreateGroup, setShowCreateGroup] = useState(false)
+  const [newGroupName, setNewGroupName] = useState('')
 
   useEffect(() => {
-    loadPaints()
+    loadLibraryGroups()
   }, [])
 
-  const loadPaints = async () => {
+  useEffect(() => {
+    if (selectedGroup) {
+      loadPaints()
+    }
+  }, [selectedGroup])
+
+  const loadLibraryGroups = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/paint/library`)
+      const response = await fetch(`${API_BASE_URL}/api/paint/library/groups`)
+      const data = await response.json()
+      setLibraryGroups(data.groups || [])
+      if (data.groups && data.groups.length > 0 && !selectedGroup) {
+        setSelectedGroup(data.groups[0].group)
+      }
+    } catch (error) {
+      console.error('Failed to load library groups:', error)
+    }
+  }
+
+  const loadPaints = async () => {
+    if (!selectedGroup) return
+    setLoading(true)
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/paint/library?group=${selectedGroup}`)
       const data = await response.json()
       setPaints(data.paints || [])
     } catch (error) {
@@ -43,19 +75,32 @@ export default function PaintsPage() {
       formDataObj.append('name', formData.name)
       formDataObj.append('hex_approx', formData.hex_approx)
       formDataObj.append('notes', formData.notes)
+      formDataObj.append('group', selectedGroup)
 
       if (editingPaint) {
         const response = await fetch(`${API_BASE_URL}/api/paint/library/${editingPaint.id}`, {
           method: 'PUT',
           body: formDataObj,
         })
-        if (!response.ok) throw new Error('Failed to update paint')
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}))
+          throw new Error(errorData.detail || 'Failed to update paint')
+        }
       } else {
         const response = await fetch(`${API_BASE_URL}/api/paint/library`, {
           method: 'POST',
           body: formDataObj,
         })
-        if (!response.ok) throw new Error('Failed to add paint')
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}))
+          const errorMessage = errorData.detail || 'Failed to add paint'
+          if (response.status === 400 && errorMessage.includes('already exists')) {
+            alert(`A paint with the name "${formData.name}" already exists in this library. Please use a different name or edit the existing paint.`)
+          } else {
+            throw new Error(errorMessage)
+          }
+          return
+        }
       }
 
       setShowAddForm(false)
@@ -64,7 +109,8 @@ export default function PaintsPage() {
       loadPaints()
     } catch (error) {
       console.error('Error:', error)
-      alert('Failed to save paint')
+      const errorMessage = error instanceof Error ? error.message : 'Failed to save paint'
+      alert(errorMessage)
     }
   }
 
@@ -78,14 +124,45 @@ export default function PaintsPage() {
     if (!confirm('Delete this paint? This will also delete its calibration data.')) return
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/paint/library/${paintId}`, {
+      const response = await fetch(`${API_BASE_URL}/api/paint/library/${paintId}?group=${selectedGroup}`, {
         method: 'DELETE',
       })
       if (!response.ok) throw new Error('Failed to delete paint')
       loadPaints()
+      loadLibraryGroups() // Refresh group info
     } catch (error) {
       console.error('Error:', error)
       alert('Failed to delete paint')
+    }
+  }
+
+  const handleCreateGroup = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!newGroupName.trim()) return
+
+    try {
+      const formData = new FormData()
+      formData.append('name', newGroupName.trim())
+
+      const response = await fetch(`${API_BASE_URL}/api/paint/library/groups`, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || 'Failed to create library group')
+      }
+
+      setNewGroupName('')
+      setShowCreateGroup(false)
+      loadLibraryGroups()
+      // Switch to the new group
+      const data = await response.json()
+      setSelectedGroup(data.group)
+    } catch (error) {
+      console.error('Error:', error)
+      alert(error instanceof Error ? error.message : 'Failed to create library group')
     }
   }
 
@@ -102,6 +179,9 @@ export default function PaintsPage() {
     ]
 
     try {
+      let added = 0
+      let skipped = 0
+      
       for (const paint of matissePaints) {
         const formDataObj = new FormData()
         formDataObj.append('name', paint.name)
@@ -109,16 +189,37 @@ export default function PaintsPage() {
         formDataObj.append('notes', paint.notes)
 
         try {
-          await fetch(`${API_BASE_URL}/api/paint/library`, {
+          const response = await fetch(`${API_BASE_URL}/api/paint/library`, {
             method: 'POST',
             body: formDataObj,
           })
+          
+          if (response.ok) {
+            added++
+          } else if (response.status === 400) {
+            // Paint already exists, skip it
+            skipped++
+            const errorData = await response.json().catch(() => ({}))
+            console.log(`Paint ${paint.name} already exists, skipping`)
+          } else {
+            // Other error
+            const errorData = await response.json().catch(() => ({}))
+            console.error(`Failed to add ${paint.name}:`, errorData)
+          }
         } catch (error) {
-          // Paint might already exist, continue
-          console.log(`Paint ${paint.name} might already exist`)
+          // Network error
+          console.error(`Network error adding ${paint.name}:`, error)
         }
       }
-      alert('Derivan Matisse paints added to library! Remember to calibrate them for accurate recipe generation.')
+      
+      if (added > 0) {
+        alert(`Added ${added} paint(s) to library. ${skipped > 0 ? `${skipped} paint(s) were already in the library.` : ''} Remember to calibrate them for accurate recipe generation.`)
+      } else if (skipped === matissePaints.length) {
+        alert('All Matisse paints are already in your library.')
+      } else {
+        alert('Failed to add some paints. Check the console for details.')
+      }
+      
       loadPaints()
     } catch (error) {
       console.error('Error:', error)
@@ -164,6 +265,63 @@ export default function PaintsPage() {
             </button>
           </div>
         </div>
+
+        {/* Library Group Selection */}
+        <div className="mb-6 p-4 bg-gray-800 rounded">
+          <div className="flex items-center gap-4 flex-wrap">
+            <label className="font-semibold">Library Group:</label>
+            <select
+              value={selectedGroup}
+              onChange={(e) => setSelectedGroup(e.target.value)}
+              className="px-3 py-2 bg-gray-700 rounded border border-gray-600"
+            >
+              {libraryGroups.map((group) => (
+                <option key={group.group} value={group.group}>
+                  {group.name} ({group.paint_count} paints, {group.calibrated_count} calibrated)
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => setShowCreateGroup(true)}
+              className="px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm"
+            >
+              + New Group
+            </button>
+          </div>
+        </div>
+
+        {/* Create New Group Form */}
+        {showCreateGroup && (
+          <div className="mb-6 p-4 bg-gray-800 rounded">
+            <h3 className="font-bold mb-3">Create New Library Group</h3>
+            <form onSubmit={handleCreateGroup} className="flex gap-3">
+              <input
+                type="text"
+                value={newGroupName}
+                onChange={(e) => setNewGroupName(e.target.value)}
+                placeholder="Library name (e.g., Matisse, Dulux)"
+                className="flex-1 px-3 py-2 bg-gray-700 rounded border border-gray-600"
+                required
+              />
+              <button
+                type="submit"
+                className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded"
+              >
+                Create
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCreateGroup(false)
+                  setNewGroupName('')
+                }}
+                className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded"
+              >
+                Cancel
+              </button>
+            </form>
+          </div>
+        )}
 
         {showAddForm && (
           <div className="mb-6 p-6 bg-gray-800 rounded">

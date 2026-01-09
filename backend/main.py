@@ -12,14 +12,10 @@ from image_processor import process_image
 from paint_manager import (
     load_library, save_library, slugify, atomic_write,
     sample_color_from_image, generate_recipes_for_palette,
-    rgb_to_lab, delta_e_lab, CALIBRATION_DIR, PAINT_DIR
+    rgb_to_lab, delta_e_lab, CALIBRATION_DIR, PAINT_DIR,
+    list_library_groups, get_library_info
 )
 import json
-from paint_manager import (
-    load_library, save_library, slugify, atomic_write,
-    sample_color_from_image, generate_recipes_for_palette,
-    rgb_to_lab, delta_e_lab, CALIBRATION_DIR, PAINT_DIR
-)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -164,25 +160,60 @@ async def get_session_file(session_id: str, filename: str):
 # ===== Paint Management Endpoints =====
 
 @app.get("/api/paint/library")
-async def get_paint_library():
-    """Get the paint library."""
-    return load_library()
+async def get_paint_library(group: str = "default"):
+    """Get the paint library for a specific group."""
+    return load_library(group)
+
+
+@app.get("/api/paint/library/groups")
+async def list_paint_library_groups():
+    """List all available paint library groups."""
+    groups = list_library_groups()
+    return {
+        "groups": [get_library_info(g) for g in groups],
+        "current": "default"  # Default selection
+    }
+
+
+@app.post("/api/paint/library/groups")
+async def create_library_group(
+    name: str = Form(...)
+):
+    """Create a new paint library group."""
+    group_id = slugify(name)
+    
+    # Check if group already exists
+    existing_groups = list_library_groups()
+    if group_id in existing_groups:
+        raise HTTPException(status_code=400, detail=f"Library group '{group_id}' already exists")
+    
+    # Create empty library for the group
+    new_library = {
+        "version": 1,
+        "paints": [],
+        "group": group_id,
+        "name": name
+    }
+    save_library(new_library, group_id)
+    
+    return get_library_info(group_id)
 
 
 @app.post("/api/paint/library")
 async def add_paint(
     name: str = Form(...),
     hex_approx: str = Form(...),
-    notes: str = Form("")
+    notes: str = Form(""),
+    group: str = Form("default")
 ):
     """Add a new paint to the library."""
-    library = load_library()
+    library = load_library(group)
     paint_id = slugify(name)
     
-    # Check if ID already exists
+    # Check if ID already exists in this group
     existing = [p for p in library['paints'] if p['id'] == paint_id]
     if existing:
-        raise HTTPException(status_code=400, detail=f"Paint with ID '{paint_id}' already exists")
+        raise HTTPException(status_code=400, detail=f"Paint with ID '{paint_id}' already exists in this library group")
     
     new_paint = {
         "id": paint_id,
@@ -193,7 +224,7 @@ async def add_paint(
     }
     
     library['paints'].append(new_paint)
-    save_library(library)
+    save_library(library, group)
     
     return new_paint
 
@@ -203,10 +234,11 @@ async def update_paint(
     paint_id: str,
     name: str = Form(...),
     hex_approx: str = Form(...),
-    notes: str = Form("")
+    notes: str = Form(""),
+    group: str = Form("default")
 ):
     """Update an existing paint."""
-    library = load_library()
+    library = load_library(group)
     paint = next((p for p in library['paints'] if p['id'] == paint_id), None)
     if not paint:
         raise HTTPException(status_code=404, detail="Paint not found")
@@ -215,16 +247,16 @@ async def update_paint(
     paint['hex_approx'] = hex_approx
     paint['notes'] = notes
     
-    save_library(library)
+    save_library(library, group)
     return paint
 
 
 @app.delete("/api/paint/library/{paint_id}")
-async def delete_paint(paint_id: str):
+async def delete_paint(paint_id: str, group: str = "default"):
     """Delete a paint from the library."""
-    library = load_library()
+    library = load_library(group)
     library['paints'] = [p for p in library['paints'] if p['id'] != paint_id]
-    save_library(library)
+    save_library(library, group)
     
     # Also delete calibration if it exists
     cal_file = CALIBRATION_DIR / f"{paint_id}.json"
@@ -326,11 +358,12 @@ async def get_calibration(paint_id: str):
 # Recipe generation
 @app.post("/api/paint/recipes/from-palette")
 async def generate_recipes_from_palette(
-    palette: str = Form(...)  # JSON string of palette
+    palette: str = Form(...),  # JSON string of palette
+    library_group: str = Form("default")  # Library group to use
 ):
-    """Generate recipes from a provided palette."""
+    """Generate recipes from a provided palette using the specified library group."""
     palette_list = json.loads(palette)
-    recipes = generate_recipes_for_palette("", palette_list)
+    recipes = generate_recipes_for_palette("", palette_list, library_group)
     return {"recipes": recipes}
 
 

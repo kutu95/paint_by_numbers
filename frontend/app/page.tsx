@@ -282,20 +282,61 @@ export default function Home() {
     }
 
     const recipe = recipeData.recipe
+    const isUncalibrated = recipe.uncalibrated === true
+    const warning = isUncalibrated ? ' (Estimated - not calibrated) ' : ''
+    
     if (recipeData.type === 'one_pigment') {
       const whitePercent = (recipe.white_ratio * 100).toFixed(1)
       const pigmentPercent = (recipe.pigment_ratio * 100).toFixed(1)
-      return `White ${whitePercent}% + ${recipe.pigment_id} ${pigmentPercent}%`
+      return `${warning}White ${whitePercent}% + ${recipe.pigment_id} ${pigmentPercent}%`
     } else if (recipeData.type === 'two_pigment') {
       const whitePercent = (recipe.white_ratio * 100).toFixed(1)
       const p1Percent = (recipe.pigment1_ratio * 100).toFixed(1)
       const p2Percent = (recipe.pigment2_ratio * 100).toFixed(1)
-      return `White ${whitePercent}% + ${recipe.pigment1_id} ${p1Percent}% + ${recipe.pigment2_id} ${p2Percent}%`
+      return `${warning}White ${whitePercent}% + ${recipe.pigment1_id} ${p1Percent}% + ${recipe.pigment2_id} ${p2Percent}%`
     }
     return 'Unknown recipe type'
   }
 
   // Handle generating recipes from palette
+  const [selectedLibraryGroup, setSelectedLibraryGroup] = useState<string>('default')
+  const [libraryGroups, setLibraryGroups] = useState<Array<{group: string, name: string, paint_count: number, calibrated_count: number}>>([])
+
+  // Load library groups on mount
+  useEffect(() => {
+    loadLibraryGroups()
+  }, [])
+
+  // Auto-generate recipes when library group changes and we have session data
+  useEffect(() => {
+    if (sessionData && selectedLibraryGroup && libraryGroups.length > 0 && !loadingRecipes) {
+      // Use a ref or flag to prevent duplicate calls
+      const recipeKey = `${sessionData.session_id}_${selectedLibraryGroup}`
+      const lastGenerated = sessionStorage.getItem(`recipes_${recipeKey}`)
+      
+      if (!lastGenerated) {
+        handleGenerateRecipes()
+        sessionStorage.setItem(`recipes_${recipeKey}`, 'true')
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedLibraryGroup]) // Only regenerate when group changes
+
+  const loadLibraryGroups = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/paint/library/groups`)
+      const data = await response.json()
+      setLibraryGroups(data.groups || [])
+      if (data.groups && data.groups.length > 0) {
+        // Try to find a group with calibrated paints, otherwise use default
+        const calibratedGroup = data.groups.find((g: any) => g.calibrated_count > 0)
+        setSelectedLibraryGroup(calibratedGroup ? calibratedGroup.group : data.groups[0].group)
+      }
+    } catch (error) {
+      console.error('Failed to load library groups:', error)
+    }
+  }
+
   const handleGenerateRecipes = async () => {
     if (!sessionData) return
 
@@ -309,6 +350,7 @@ export default function Home() {
 
       const formData = new FormData()
       formData.append('palette', JSON.stringify(paletteForApi))
+      formData.append('library_group', selectedLibraryGroup)
 
       const response = await fetch(`${API_BASE_URL}/api/paint/recipes/from-palette`, {
         method: 'POST',
@@ -320,10 +362,30 @@ export default function Home() {
       }
 
       const data = await response.json()
-      setRecipes(data.recipes || [])
+      const recipes = data.recipes || []
+      
+      if (recipes.length === 0) {
+        alert('No recipes were generated. Make sure you have paints in the selected library.')
+        return
+      }
+      
+      // Check if any recipes were successfully generated
+      const successfulRecipes = recipes.filter((r: any) => r.recipe !== null)
+      if (successfulRecipes.length === 0) {
+        alert('Could not generate recipes. Make sure you have paints with approximate colors in the selected library.')
+        return
+      }
+      
+      setRecipes(recipes)
+      
+      // Show info about uncalibrated recipes
+      const uncalibratedCount = successfulRecipes.filter((r: any) => r.recipe?.uncalibrated).length
+      if (uncalibratedCount > 0) {
+        console.log(`${uncalibratedCount} recipe(s) use estimated colors (paints not calibrated)`)
+      }
     } catch (error) {
       console.error('Error generating recipes:', error)
-      alert('Failed to generate recipes. Make sure you have calibrated at least one paint.')
+      alert('Failed to generate recipes. Check the console for details.')
     } finally {
       setLoadingRecipes(false)
     }
@@ -332,7 +394,7 @@ export default function Home() {
   // Handle loading Matisse paint library and generating recipes
   const handleLoadMatisseAndGenerate = async () => {
     if (!sessionData) return
-    if (!confirm('This will add Derivan Matisse paints to your library. Continue?')) return
+    if (!confirm('This will add Derivan Matisse paints to your library (if not already present) and generate recipes. Continue?')) return
 
     const matissePaints = [
       { name: 'Titanium White', hex_approx: '#F5F5F5', notes: 'Series 1' },
@@ -346,49 +408,105 @@ export default function Home() {
     try {
       setLoadingRecipes(true)
       
+      let added = 0
+      let skipped = 0
+      
       // Add paints to library
       for (const paint of matissePaints) {
         const formData = new FormData()
         formData.append('name', paint.name)
         formData.append('hex_approx', paint.hex_approx)
         formData.append('notes', paint.notes)
+        formData.append('group', selectedLibraryGroup)
 
         try {
-          await fetch(`${API_BASE_URL}/api/paint/library`, {
+          const response = await fetch(`${API_BASE_URL}/api/paint/library`, {
             method: 'POST',
             body: formData,
           })
+          
+          if (response.ok) {
+            added++
+          } else if (response.status === 400) {
+            // Paint already exists - this is fine, skip it silently
+            skipped++
+            // Don't log this - it's expected behavior
+          } else {
+            // Other error - only log if it's not a 400
+            const errorText = await response.text().catch(() => '')
+            console.error(`Failed to add ${paint.name}:`, response.status, errorText)
+          }
         } catch (error) {
-          // Paint might already exist, continue
-          console.log(`Paint ${paint.name} might already exist`)
+          // Network error - only log actual network failures
+          if (error instanceof TypeError && error.message.includes('fetch')) {
+            console.error(`Network error adding ${paint.name}:`, error)
+          } else {
+            // Might be a 400 response that failed to parse, which is fine
+            skipped++
+          }
         }
       }
       
-      // Wait a bit for paints to be saved
-      await new Promise(resolve => setTimeout(resolve, 500))
+      // Log summary (only if something was added)
+      if (added > 0) {
+        console.log(`Matisse paints: ${added} added, ${skipped} already existed`)
+      } else if (skipped === matissePaints.length) {
+        console.log(`All Matisse paints already exist in library group "${selectedLibraryGroup}"`)
+      }
       
-      // Now generate recipes
+      // Wait a bit for paints to be saved (if any were added)
+      if (added > 0) {
+        await new Promise(resolve => setTimeout(resolve, 500))
+      }
+      
+      // Now generate recipes using the selected library group
       const paletteForApi = sessionData.palette.map((color) => ({
         index: color.index,
         rgb: hexToRgb(color.hex),
       }))
 
-      const formData = new FormData()
-      formData.append('palette', JSON.stringify(paletteForApi))
+      const recipeFormData = new FormData()
+      recipeFormData.append('palette', JSON.stringify(paletteForApi))
+      recipeFormData.append('library_group', selectedLibraryGroup)
 
-      const response = await fetch(`${API_BASE_URL}/api/paint/recipes/from-palette`, {
+      const recipeResponse = await fetch(`${API_BASE_URL}/api/paint/recipes/from-palette`, {
         method: 'POST',
-        body: formData,
+        body: recipeFormData,
       })
 
-      if (!response.ok) {
-        throw new Error('Failed to generate recipes')
+      if (!recipeResponse.ok) {
+        const errorText = await recipeResponse.text().catch(() => '')
+        throw new Error(`Failed to generate recipes: ${recipeResponse.status} ${errorText}`)
       }
 
-      const data = await response.json()
-      setRecipes(data.recipes || [])
+      const recipeData = await recipeResponse.json()
+      const recipes = recipeData.recipes || []
       
-      alert('Matisse paints added! Recipes generated. Note: For accurate recipes, you should calibrate these paints in the Paint Library.')
+      if (recipes.length === 0) {
+        alert('No recipes were generated. Make sure you have paints in the selected library group.')
+        return
+      }
+      
+      // Check if any recipes were successfully generated
+      const successfulRecipes = recipes.filter((r: any) => r.recipe !== null)
+      if (successfulRecipes.length === 0) {
+        alert(`Could not generate recipes. The selected library group "${selectedLibraryGroup}" may not have paints with approximate colors set.`)
+        return
+      }
+      
+      setRecipes(recipes)
+      
+      // Show info about uncalibrated recipes
+      const uncalibratedCount = successfulRecipes.filter((r: any) => r.recipe?.uncalibrated).length
+      const message = added > 0 
+        ? `Matisse paints added! ${successfulRecipes.length} recipe(s) generated.`
+        : `Using existing Matisse paints. ${successfulRecipes.length} recipe(s) generated.`
+      
+      if (uncalibratedCount > 0) {
+        alert(`${message} ${uncalibratedCount} recipe(s) use estimated colors (paints not calibrated). For accurate recipes, calibrate these paints in the Paint Library.`)
+      } else {
+        alert(`${message} Note: For accurate recipes, you should calibrate these paints in the Paint Library.`)
+      }
     } catch (error) {
       console.error('Error:', error)
       alert('Failed to add Matisse paints or generate recipes. Make sure paints are calibrated.')
@@ -557,6 +675,8 @@ export default function Home() {
                 <span>←</span> Back to Settings
               </button>
             </div>
+
+            {/* Step 1: Preview Image */}
             <div>
               <h2 className="text-2xl font-bold mb-4">Quantized Preview</h2>
               <img
@@ -566,9 +686,62 @@ export default function Home() {
               />
             </div>
 
+            {/* Step 2: Paint Group Selection */}
+            <div className="p-6 bg-gray-800 rounded">
+              <h2 className="text-2xl font-bold mb-4">Select Paint Library</h2>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-semibold mb-2">Paint Library Group:</label>
+                  <select
+                    value={selectedLibraryGroup}
+                    onChange={(e) => setSelectedLibraryGroup(e.target.value)}
+                    className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600"
+                  >
+                    {libraryGroups.map((group) => (
+                      <option key={group.group} value={group.group}>
+                        {group.name} ({group.paint_count} paints, {group.calibrated_count} calibrated)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => router.push('/paints')}
+                    className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-sm"
+                  >
+                    Manage Paint Libraries
+                  </button>
+                  <button
+                    onClick={() => {
+                      // Navigate to paint library with the selected group
+                      router.push(`/paints?group=${selectedLibraryGroup}`)
+                    }}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm"
+                  >
+                    Calibrate Paints in {libraryGroups.find(g => g.group === selectedLibraryGroup)?.name || 'Library'}
+                  </button>
+                </div>
+                {libraryGroups.find(g => g.group === selectedLibraryGroup)?.calibrated_count === 0 && (
+                  <p className="text-yellow-400 text-sm">
+                    ⚠️ No calibrated paints in this library. Recipes will use estimated colors. 
+                    <button 
+                      onClick={() => router.push(`/paints?group=${selectedLibraryGroup}`)}
+                      className="underline ml-1"
+                    >
+                      Calibrate paints for accurate recipes.
+                    </button>
+                  </p>
+                )}
+                {loadingRecipes && (
+                  <p className="text-gray-400 text-sm">Generating recipes...</p>
+                )}
+              </div>
+            </div>
+
+            {/* Step 3: Palette with Recipes */}
             <div>
-              <h2 className="text-2xl font-bold mb-4">Palette</h2>
-              <div className="grid grid-cols-8 gap-2">
+              <h2 className="text-2xl font-bold mb-4">Palette & Recipes</h2>
+              <div className="grid grid-cols-8 gap-2 mb-6">
                 {sessionData.palette.map((color) => (
                   <div key={color.index} className="text-center">
                     <div
@@ -589,6 +762,76 @@ export default function Home() {
                   </div>
                 ))}
               </div>
+
+              {/* Recipes Display */}
+              {recipes.length > 0 ? (
+                <div className="space-y-3 mt-6">
+                  <h3 className="text-xl font-bold mb-3">Mixing Recipes</h3>
+                  {recipes.map((recipeData) => {
+                    const color = sessionData.palette.find(p => p.index === recipeData.palette_index)
+                    if (!color) return null
+
+                    const recipe = recipeData.recipe
+                    const errorInfo = recipe ? getErrorLevel(recipe.error) : null
+
+                    return (
+                      <div
+                        key={recipeData.palette_index}
+                        className="flex items-center gap-4 p-4 bg-gray-700 rounded"
+                      >
+                        <div
+                          className="w-16 h-16 rounded border border-gray-600 flex-shrink-0"
+                          style={{ backgroundColor: color.hex }}
+                        />
+                        <div className="flex-1">
+                          <div className="font-bold">Palette Color {recipeData.palette_index}</div>
+                          <div className="text-sm text-gray-300">
+                            {formatRecipe(recipeData)}
+                          </div>
+                          {recipe && (
+                            <div className="text-xs text-gray-400 mt-1 flex items-center gap-2 flex-wrap">
+                              {recipe.uncalibrated && (
+                                <span className="px-2 py-0.5 rounded text-xs bg-yellow-600/30 text-yellow-300 border border-yellow-500/50">
+                                  ⚠️ Estimated (not calibrated)
+                                </span>
+                              )}
+                              <span>Error: {recipe.error.toFixed(2)} ΔE</span>
+                              {errorInfo && (
+                                <span
+                                  className="px-2 py-0.5 rounded text-xs"
+                                  style={{
+                                    backgroundColor:
+                                      errorInfo.color === 'green'
+                                        ? '#16a34a'
+                                        : errorInfo.color === 'yellow'
+                                        ? '#ca8a04'
+                                        : '#dc2626',
+                                  }}
+                                >
+                                  {errorInfo.level}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {!recipe && (
+                            <div className="text-xs text-red-400 mt-1">
+                              {recipeData.error || 'No recipe available'}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="p-4 bg-gray-700 rounded text-gray-400 mt-6">
+                  {loadingRecipes ? (
+                    'Generating recipes...'
+                  ) : (
+                    'Recipes will be generated automatically when you select a paint library group above.'
+                  )}
+                </div>
+              )}
             </div>
 
             <div>
@@ -670,6 +913,25 @@ export default function Home() {
                   </button>
                 </div>
               </div>
+              <div className="mb-4">
+                <label className="block text-sm font-semibold mb-2">Select Paint Library:</label>
+                <select
+                  value={selectedLibraryGroup}
+                  onChange={(e) => setSelectedLibraryGroup(e.target.value)}
+                  className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600 mb-2"
+                >
+                  {libraryGroups.map((group) => (
+                    <option key={group.group} value={group.group}>
+                      {group.name} ({group.paint_count} paints, {group.calibrated_count} calibrated)
+                    </option>
+                  ))}
+                </select>
+                <p className="text-gray-400 text-xs">
+                  Recipes will be generated using paints from the selected library. 
+                  {libraryGroups.find(g => g.group === selectedLibraryGroup)?.calibrated_count === 0 && 
+                    ' No calibrated paints in this library - recipes will use estimated colors.'}
+                </p>
+              </div>
               <p className="text-gray-400 mb-4 text-sm">
                 Generate mixing recipes for each palette color using your calibrated paints.
                 Make sure you have calibrated at least one paint in the Paint Library, or use the Matisse Paint Library option below.
@@ -725,7 +987,12 @@ export default function Home() {
                             {formatRecipe(recipeData)}
                           </div>
                           {recipe && (
-                            <div className="text-xs text-gray-400 mt-1 flex items-center gap-2">
+                            <div className="text-xs text-gray-400 mt-1 flex items-center gap-2 flex-wrap">
+                              {recipe.uncalibrated && (
+                                <span className="px-2 py-0.5 rounded text-xs bg-yellow-600/30 text-yellow-300 border border-yellow-500/50">
+                                  ⚠️ Estimated (not calibrated)
+                                </span>
+                              )}
                               <span>Error: {recipe.error.toFixed(2)} ΔE</span>
                               {errorInfo && (
                                 <span
