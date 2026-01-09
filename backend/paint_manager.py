@@ -410,35 +410,34 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
     if n_pigments < 3:
         return None
     
-    # Try to get calibrated colors first
-    paint_labs = []
+    # Store calibration data and hex colors for each paint
+    # We'll interpolate calibrated colors at the actual ratio being tested
+    paint_calibrations = []
+    paint_hex_colors = []
     calibrated_count = 0
     
     for paint_id, paint_hex in zip(paint_ids, paint_hexes):
         cal_file = CALIBRATION_DIR / f"{paint_id}.json"
+        calibration = None
         if cal_file.exists():
-            # Use a representative ratio (0.1) to get approximate color
             with open(cal_file, 'r') as f:
                 calibration = json.load(f)
-            lab = interpolate_lab_from_calibration(calibration, 0.1)
-            if lab:
-                paint_labs.append(lab)
-                calibrated_count += 1
-                continue
+            calibrated_count += 1
         
-        # Fallback to hex color
+        paint_calibrations.append(calibration)
+        
+        # Store hex color as fallback
         if paint_hex:
             try:
                 hex_clean = paint_hex.lstrip('#')
                 rgb = [int(hex_clean[i:i+2], 16) for i in (0, 2, 4)]
-                lab = rgb_to_lab(rgb)
-                paint_labs.append(lab)
+                paint_hex_colors.append(rgb)
             except:
                 return None
         else:
-            return None
+            paint_hex_colors.append(None)
     
-    if len(paint_labs) != n_pigments:
+    if len(paint_calibrations) != n_pigments:
         return None
     
     # Grid search for best ratios
@@ -472,11 +471,40 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
                 if white_ratio < 0.3:  # Keep at least 30% white
                     continue
                 
-                # Blend the colors
+                # Get actual paint colors at these ratios (for calibrated paints)
+                paint_labs_at_ratio = []
+                for i, (cal, hex_rgb, ratio) in enumerate(zip(
+                    paint_calibrations, 
+                    paint_hex_colors, 
+                    [p1_ratio, p2_ratio, p3_ratio]
+                )):
+                    if cal:
+                        # Use calibrated color at this specific ratio
+                        lab = interpolate_lab_from_calibration(cal, ratio)
+                        if lab:
+                            paint_labs_at_ratio.append(lab)
+                        else:
+                            # Fallback to hex
+                            if hex_rgb:
+                                paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
+                            else:
+                                continue
+                    else:
+                        # Use hex color (uncalibrated)
+                        if hex_rgb:
+                            paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
+                        else:
+                            continue
+                
+                if len(paint_labs_at_ratio) != 3:
+                    continue
+                
+                # Blend the colors using actual ratios
+                # White is approximately Lab(100, 0, 0) but we use 0.9 factor for mixing
                 blended_lab = [
-                    paint_labs[0][0] * p1_ratio + paint_labs[1][0] * p2_ratio + paint_labs[2][0] * p3_ratio + 100.0 * white_ratio * 0.9,
-                    paint_labs[0][1] * p1_ratio + paint_labs[1][1] * p2_ratio + paint_labs[2][1] * p3_ratio,
-                    paint_labs[0][2] * p1_ratio + paint_labs[1][2] * p2_ratio + paint_labs[2][2] * p3_ratio
+                    paint_labs_at_ratio[0][0] * p1_ratio + paint_labs_at_ratio[1][0] * p2_ratio + paint_labs_at_ratio[2][0] * p3_ratio + 100.0 * white_ratio * 0.9,
+                    paint_labs_at_ratio[0][1] * p1_ratio + paint_labs_at_ratio[1][1] * p2_ratio + paint_labs_at_ratio[2][1] * p3_ratio,
+                    paint_labs_at_ratio[0][2] * p1_ratio + paint_labs_at_ratio[1][2] * p2_ratio + paint_labs_at_ratio[2][2] * p3_ratio
                 ]
                 
                 error = delta_e_lab(target_lab, blended_lab)
@@ -564,14 +592,42 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
                     if white_ratio < 0.3:  # Keep at least 30% white
                         continue
                     
-                    # Blend the colors
+                    # Get actual paint colors at these ratios (for calibrated paints)
+                    paint_labs_at_ratio = []
+                    for i, (cal, hex_rgb, ratio) in enumerate(zip(
+                        paint_calibrations, 
+                        paint_hex_colors, 
+                        [p1_ratio, p2_ratio, p3_ratio, p4_ratio]
+                    )):
+                        if cal:
+                            # Use calibrated color at this specific ratio
+                            lab = interpolate_lab_from_calibration(cal, ratio)
+                            if lab:
+                                paint_labs_at_ratio.append(lab)
+                            else:
+                                # Fallback to hex
+                                if hex_rgb:
+                                    paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
+                                else:
+                                    continue
+                        else:
+                            # Use hex color (uncalibrated)
+                            if hex_rgb:
+                                paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
+                            else:
+                                continue
+                    
+                    if len(paint_labs_at_ratio) != 4:
+                        continue
+                    
+                    # Blend the colors using actual ratios
                     blended_lab = [
-                        paint_labs[0][0] * p1_ratio + paint_labs[1][0] * p2_ratio + 
-                        paint_labs[2][0] * p3_ratio + paint_labs[3][0] * p4_ratio + 100.0 * white_ratio * 0.9,
-                        paint_labs[0][1] * p1_ratio + paint_labs[1][1] * p2_ratio + 
-                        paint_labs[2][1] * p3_ratio + paint_labs[3][1] * p4_ratio,
-                        paint_labs[0][2] * p1_ratio + paint_labs[1][2] * p2_ratio + 
-                        paint_labs[2][2] * p3_ratio + paint_labs[3][2] * p4_ratio
+                        paint_labs_at_ratio[0][0] * p1_ratio + paint_labs_at_ratio[1][0] * p2_ratio + 
+                        paint_labs_at_ratio[2][0] * p3_ratio + paint_labs_at_ratio[3][0] * p4_ratio + 100.0 * white_ratio * 0.9,
+                        paint_labs_at_ratio[0][1] * p1_ratio + paint_labs_at_ratio[1][1] * p2_ratio + 
+                        paint_labs_at_ratio[2][1] * p3_ratio + paint_labs_at_ratio[3][1] * p4_ratio,
+                        paint_labs_at_ratio[0][2] * p1_ratio + paint_labs_at_ratio[1][2] * p2_ratio + 
+                        paint_labs_at_ratio[2][2] * p3_ratio + paint_labs_at_ratio[3][2] * p4_ratio
                     ]
                     
                     error = delta_e_lab(target_lab, blended_lab)
