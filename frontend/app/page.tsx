@@ -329,6 +329,74 @@ export default function Home() {
     }
   }
 
+  // Handle loading Matisse paint library and generating recipes
+  const handleLoadMatisseAndGenerate = async () => {
+    if (!sessionData) return
+    if (!confirm('This will add Derivan Matisse paints to your library. Continue?')) return
+
+    const matissePaints = [
+      { name: 'Titanium White', hex_approx: '#F5F5F5', notes: 'Series 1' },
+      { name: 'Red Oxide', hex_approx: '#A0522D', notes: 'Series 1' },
+      { name: 'Phthalo Blue', hex_approx: '#003D82', notes: 'Series 2' },
+      { name: 'Carbon Black', hex_approx: '#1A1A1A', notes: 'Series 1' },
+      { name: 'Yellow Oxide', hex_approx: '#DAA520', notes: 'Series 1' },
+      { name: 'Australian Olive Green', hex_approx: '#6B8E23', notes: 'Series 2' },
+    ]
+
+    try {
+      setLoadingRecipes(true)
+      
+      // Add paints to library
+      for (const paint of matissePaints) {
+        const formData = new FormData()
+        formData.append('name', paint.name)
+        formData.append('hex_approx', paint.hex_approx)
+        formData.append('notes', paint.notes)
+
+        try {
+          await fetch(`${API_BASE_URL}/api/paint/library`, {
+            method: 'POST',
+            body: formData,
+          })
+        } catch (error) {
+          // Paint might already exist, continue
+          console.log(`Paint ${paint.name} might already exist`)
+        }
+      }
+      
+      // Wait a bit for paints to be saved
+      await new Promise(resolve => setTimeout(resolve, 500))
+      
+      // Now generate recipes
+      const paletteForApi = sessionData.palette.map((color) => ({
+        index: color.index,
+        rgb: hexToRgb(color.hex),
+      }))
+
+      const formData = new FormData()
+      formData.append('palette', JSON.stringify(paletteForApi))
+
+      const response = await fetch(`${API_BASE_URL}/api/paint/recipes/from-palette`, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to generate recipes')
+      }
+
+      const data = await response.json()
+      setRecipes(data.recipes || [])
+      
+      alert('Matisse paints added! Recipes generated. Note: For accurate recipes, you should calibrate these paints in the Paint Library.')
+    } catch (error) {
+      console.error('Error:', error)
+      alert('Failed to add Matisse paints or generate recipes. Make sure paints are calibrated.')
+    } finally {
+      setLoadingRecipes(false)
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gray-900 text-white p-8">
       <div className="max-w-6xl mx-auto">
@@ -592,18 +660,46 @@ export default function Home() {
             <div className="mt-8 p-6 bg-gray-800 rounded">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-2xl font-bold">Paint Mixing Recipes</h2>
-                <button
-                  onClick={handleGenerateRecipes}
-                  disabled={loadingRecipes}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50"
-                >
-                  {loadingRecipes ? 'Generating...' : 'Generate Recipes'}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleGenerateRecipes}
+                    disabled={loadingRecipes || !sessionData}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50"
+                  >
+                    {loadingRecipes ? 'Generating...' : 'Generate Recipes'}
+                  </button>
+                </div>
               </div>
               <p className="text-gray-400 mb-4 text-sm">
                 Generate mixing recipes for each palette color using your calibrated paints.
-                Make sure you have calibrated at least one paint in the Paint Library.
+                Make sure you have calibrated at least one paint in the Paint Library, or use the Matisse Paint Library option below.
               </p>
+              
+              <div className="mb-4 p-4 bg-gray-700 rounded">
+                <h3 className="font-bold mb-2">Quick Setup: Derivan Matisse Paint Library</h3>
+                <p className="text-sm text-gray-300 mb-3">
+                  Use our predefined Matisse paint library (Titanium White, Red Oxide, Phthalo Blue, Carbon Black, Yellow Oxide, Australian Olive Green).
+                  These will be added to your paint library and recipes will be generated automatically.
+                </p>
+                <p className="text-xs text-gray-400 mb-3">
+                  Note: For accurate recipes, calibrate these paints in the Paint Library. Uncalibrated paints will use estimated colors.
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleLoadMatisseAndGenerate}
+                    disabled={loadingRecipes || !sessionData}
+                    className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded text-sm disabled:opacity-50"
+                  >
+                    {loadingRecipes ? 'Adding Paints & Generating...' : 'Use Matisse Paint Library & Generate Recipes'}
+                  </button>
+                  <button
+                    onClick={() => router.push('/paints')}
+                    className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-sm"
+                  >
+                    Manage Paints
+                  </button>
+                </div>
+              </div>
 
               {recipes.length > 0 && (
                 <div className="space-y-3">
