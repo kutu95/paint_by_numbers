@@ -47,6 +47,8 @@ export default function ProjectionViewer() {
   const [showDoneLayers, setShowDoneLayers] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const mouseTimerRef = useRef<NodeJS.Timeout>()
+  const colorCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const [colorCanvasUrl, setColorCanvasUrl] = useState<string | null>(null)
 
   // Load session data
   useEffect(() => {
@@ -242,6 +244,41 @@ export default function ProjectionViewer() {
   // Get the color for this layer
   const layerColor = sessionData.palette.find(p => p.index === currentLayerData.palette_index)
 
+  // Generate colored mask image when showColor is enabled
+  useEffect(() => {
+    if (showColor && layerColor && currentLayerData && !currentLayerData.is_finished) {
+      const canvas = document.createElement('canvas')
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+
+      const img = new Image()
+      img.crossOrigin = 'anonymous'
+      img.onload = () => {
+        canvas.width = img.width
+        canvas.height = img.height
+        
+        // Fill with the palette color
+        ctx.fillStyle = layerColor.hex
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        
+        // Use the mask image as an alpha mask (white areas show color, black areas are transparent)
+        ctx.globalCompositeOperation = 'destination-in'
+        ctx.drawImage(img, 0, 0)
+        
+        // Convert to data URL for display
+        setColorCanvasUrl(canvas.toDataURL())
+      }
+      img.onerror = () => {
+        console.error('Failed to load mask image for color display')
+        setColorCanvasUrl(null)
+      }
+      img.src = `${API_BASE_URL}${currentLayerData.mask_url}`
+      colorCanvasRef.current = canvas
+    } else {
+      setColorCanvasUrl(null)
+    }
+  }, [showColor, layerColor, currentLayer, currentLayerData, sessionData])
+
   const baseUrl = API_BASE_URL
   const outlineUrl =
     currentLayerData.is_finished || outlineMode === 'off'
@@ -298,43 +335,44 @@ export default function ProjectionViewer() {
             ) : (
               <>
                 {/* Mask image - with color or monochrome */}
-                {showColor && layerColor ? (
-                  <>
-                    {/* Load the mask image first, then apply color using CSS mask */}
-                    <img
-                      src={`${baseUrl}${currentLayerData.mask_url}`}
-                      alt=""
-                      style={{ display: 'none' }}
-                      onLoad={(e) => {
-                        // Image loaded, mask should work now
+                {showColor && layerColor && colorCanvasUrl ? (
+                  <img
+                    src={colorCanvasUrl}
+                    alt={`Layer ${currentLayer + 1} - Color`}
+                    className="absolute"
+                    style={{
+                      opacity: registrationMode ? 0 : maskOpacity / 100,
+                      maxWidth: '100%',
+                      maxHeight: '100%',
+                      objectFit: 'contain',
+                    }}
+                  />
+                ) : showColor && layerColor ? (
+                  // Fallback: show loading or use CSS mask if canvas fails
+                  <div
+                    className="absolute inset-0 flex items-center justify-center"
+                    style={{
+                      opacity: registrationMode ? 0 : maskOpacity / 100,
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        maxWidth: '100%',
+                        maxHeight: '100%',
+                        backgroundColor: layerColor.hex,
+                        WebkitMaskImage: `url("${baseUrl}${currentLayerData.mask_url}")`,
+                        WebkitMaskSize: 'contain',
+                        WebkitMaskRepeat: 'no-repeat',
+                        WebkitMaskPosition: 'center',
+                        maskImage: `url("${baseUrl}${currentLayerData.mask_url}")`,
+                        maskSize: 'contain',
+                        maskRepeat: 'no-repeat',
+                        maskPosition: 'center',
                       }}
                     />
-                    {/* Colored div with mask applied */}
-                    <div
-                      className="absolute inset-0 flex items-center justify-center"
-                      style={{
-                        opacity: registrationMode ? 0 : maskOpacity / 100,
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: '100%',
-                          height: '100%',
-                          maxWidth: '100%',
-                          maxHeight: '100%',
-                          backgroundColor: layerColor.hex,
-                          WebkitMaskImage: `url("${baseUrl}${currentLayerData.mask_url}")`,
-                          WebkitMaskSize: 'contain',
-                          WebkitMaskRepeat: 'no-repeat',
-                          WebkitMaskPosition: 'center',
-                          maskImage: `url("${baseUrl}${currentLayerData.mask_url}")`,
-                          maskSize: 'contain',
-                          maskRepeat: 'no-repeat',
-                          maskPosition: 'center',
-                        }}
-                      />
-                    </div>
-                  </>
+                  </div>
                 ) : (
                   <img
                     src={`${baseUrl}${currentLayerData.mask_url}`}
