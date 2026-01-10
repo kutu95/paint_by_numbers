@@ -312,6 +312,18 @@ export default function ProjectionViewer() {
                       justifyContent: 'center',
                     }}
                   >
+                    {/* Colored background */}
+                    <div
+                      className="absolute"
+                      style={{
+                        backgroundColor: layerColor.hex,
+                        maxWidth: '100%',
+                        maxHeight: '100%',
+                        width: '100%',
+                        height: '100%',
+                      }}
+                    />
+                    {/* Mask applied on top with blend mode to show only the colored area */}
                     <img
                       src={`${baseUrl}${currentLayerData.mask_url}`}
                       alt={`Layer ${currentLayer}`}
@@ -323,13 +335,6 @@ export default function ProjectionViewer() {
                         maxHeight: '100%',
                         objectFit: 'contain',
                         mixBlendMode: 'multiply',
-                      }}
-                    />
-                    <div
-                      className="absolute inset-0"
-                      style={{
-                        backgroundColor: layerColor.hex,
-                        mixBlendMode: 'screen',
                       }}
                     />
                   </div>
