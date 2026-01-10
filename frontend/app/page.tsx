@@ -865,7 +865,7 @@ export default function Home() {
                       key={layerIdx}
                       className="flex items-center gap-4 p-4 bg-gray-800 rounded"
                     >
-                      <div className="text-lg font-mono">{layerIdx}</div>
+                      <div className="text-lg font-mono">{layerIdx + 1}</div>
                       <div
                         className="w-16 h-16 rounded border border-gray-600"
                         style={{ backgroundColor: color.hex }}
