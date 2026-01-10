@@ -299,43 +299,46 @@ export default function ProjectionViewer() {
               <>
                 {/* Mask image - with color or monochrome */}
                 {showColor && layerColor ? (
-                  <div
-                    className="absolute"
-                    style={{
-                      opacity: registrationMode ? 0 : maskOpacity / 100,
-                      maxWidth: '100%',
-                      maxHeight: '100%',
-                      width: '100%',
-                      height: '100%',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    {/* Colored div with mask applied - mask-image makes white areas show color */}
-                    <div
-                      className="absolute"
-                      style={{
-                        backgroundColor: layerColor.hex,
-                        maskImage: `url(${baseUrl}${currentLayerData.mask_url})`,
-                        WebkitMaskImage: `url(${baseUrl}${currentLayerData.mask_url})`,
-                        maskSize: 'contain',
-                        WebkitMaskSize: 'contain',
-                        maskRepeat: 'no-repeat',
-                        WebkitMaskRepeat: 'no-repeat',
-                        maskPosition: 'center',
-                        WebkitMaskPosition: 'center',
-                        maxWidth: '100%',
-                        maxHeight: '100%',
-                        width: '100%',
-                        height: '100%',
+                  <>
+                    {/* Load the mask image first, then apply color using CSS mask */}
+                    <img
+                      src={`${baseUrl}${currentLayerData.mask_url}`}
+                      alt=""
+                      style={{ display: 'none' }}
+                      onLoad={(e) => {
+                        // Image loaded, mask should work now
                       }}
                     />
-                  </div>
+                    {/* Colored div with mask applied */}
+                    <div
+                      className="absolute inset-0 flex items-center justify-center"
+                      style={{
+                        opacity: registrationMode ? 0 : maskOpacity / 100,
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          maxWidth: '100%',
+                          maxHeight: '100%',
+                          backgroundColor: layerColor.hex,
+                          WebkitMaskImage: `url("${baseUrl}${currentLayerData.mask_url}")`,
+                          WebkitMaskSize: 'contain',
+                          WebkitMaskRepeat: 'no-repeat',
+                          WebkitMaskPosition: 'center',
+                          maskImage: `url("${baseUrl}${currentLayerData.mask_url}")`,
+                          maskSize: 'contain',
+                          maskRepeat: 'no-repeat',
+                          maskPosition: 'center',
+                        }}
+                      />
+                    </div>
+                  </>
                 ) : (
                   <img
                     src={`${baseUrl}${currentLayerData.mask_url}`}
-                    alt={`Layer ${currentLayer}`}
+                    alt={`Layer ${currentLayer + 1}`}
                     className="absolute"
                     style={{
                       opacity: registrationMode ? 0 : maskOpacity / 100,
