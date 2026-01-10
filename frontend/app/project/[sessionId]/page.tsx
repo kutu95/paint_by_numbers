@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { API_BASE_URL } from '@/lib/config'
 
@@ -244,21 +244,25 @@ export default function ProjectionViewer() {
   // Get the color for this layer
   const layerColor = sessionData.palette.find(p => p.index === currentLayerData.palette_index)
   
-  // Extract stable values for useEffect dependencies
+  // Extract stable primitive values for dependencies
   const layerColorHex = layerColor?.hex || null
   const maskUrl = currentLayerData?.mask_url || null
   const isFinished = currentLayerData?.is_finished || false
+  
+  // Create a stable key that only changes when the actual values change (not object references)
+  const colorCanvasKey = useMemo(() => {
+    if (!showColor || isFinished || !layerColorHex || !maskUrl) return null
+    return `${currentLayer}-${layerColorHex}-${maskUrl}`
+  }, [showColor, currentLayer, layerColorHex, maskUrl, isFinished])
 
   // Generate colored mask image when showColor is enabled
   useEffect(() => {
-    // Early return if conditions not met
-    if (!showColor || !layerColorHex || !maskUrl || isFinished || !currentLayerData) {
+    // Early return if conditions not met - use primitive values from useMemo dependencies
+    if (!colorCanvasKey || !layerColorHex || !maskUrl) {
       setColorCanvasUrl(null)
       return
     }
 
-    // Prevent infinite loops - check if we already have a canvas URL for this combination
-    const cacheKey = `${currentLayer}-${layerColorHex}-${maskUrl}`
     let cancelled = false
 
     const canvas = document.createElement('canvas')
@@ -316,7 +320,7 @@ export default function ProjectionViewer() {
       cancelled = true
       // Note: data URLs don't need to be revoked (only blob URLs do)
     }
-  }, [showColor, layerColorHex, currentLayer, maskUrl, isFinished, API_BASE_URL])
+  }, [colorCanvasKey, layerColorHex, maskUrl, API_BASE_URL]) // Only use stable primitive values
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
