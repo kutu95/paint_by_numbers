@@ -246,14 +246,26 @@ export default function ProjectionViewer() {
   // Generate colored canvas URL when needed (only for showColor mode)
   const [colorCanvasUrl, setColorCanvasUrl] = useState<string | null>(null)
   
-  // Generate colored canvas when showColor is enabled - use useEffect with proper dependencies
+  // Generate colored canvas when showColor is enabled - extract values inside effect to avoid dependency issues
   useEffect(() => {
-    if (!showColor || !sessionData || !currentLayerData || currentLayerData.is_finished || !layerColor) {
+    if (!showColor || !sessionData || currentLayer < 0 || currentLayer >= sessionData.layers.length) {
       setColorCanvasUrl(null)
       return
     }
 
-    const cacheKey = `${currentLayer}-${layerColor.hex}-${currentLayerData.mask_url}`
+    const layerData = sessionData.layers[currentLayer]
+    if (!layerData || layerData.is_finished) {
+      setColorCanvasUrl(null)
+      return
+    }
+
+    const paletteColor = sessionData.palette.find(p => p.index === layerData.palette_index)
+    if (!paletteColor || !paletteColor.hex || !layerData.mask_url) {
+      setColorCanvasUrl(null)
+      return
+    }
+
+    const cacheKey = `${currentLayer}-${paletteColor.hex}-${layerData.mask_url}`
     
     // Check cache first
     if (colorCanvasCacheRef.current.has(cacheKey)) {
@@ -271,7 +283,7 @@ export default function ProjectionViewer() {
 
     const img = new Image()
     img.crossOrigin = 'anonymous'
-    const maskUrl = `${API_BASE_URL}${currentLayerData.mask_url}`
+    const maskUrl = `${API_BASE_URL}${layerData.mask_url}`
     
     img.onload = () => {
       try {
@@ -279,7 +291,7 @@ export default function ProjectionViewer() {
         canvas.height = img.height
         
         // Fill with palette color
-        ctx.fillStyle = layerColor.hex
+        ctx.fillStyle = paletteColor.hex
         ctx.fillRect(0, 0, canvas.width, canvas.height)
         
         // Use mask as alpha
@@ -301,7 +313,8 @@ export default function ProjectionViewer() {
     }
     
     img.src = maskUrl
-  }, [showColor, currentLayer, sessionData?.session_id, layerColor?.hex, currentLayerData?.mask_url, currentLayerData?.is_finished, API_BASE_URL])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showColor, currentLayer, API_BASE_URL]) // Only depend on primitives - extract sessionData values inside
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
