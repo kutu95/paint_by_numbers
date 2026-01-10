@@ -220,7 +220,7 @@ export default function ProjectionViewer() {
 
     window.addEventListener('keydown', handleKeyPress)
     return () => window.removeEventListener('keydown', handleKeyPress)
-  }, [navigateLayer, toggleDone, router])
+  }, [navigateLayer, toggleDone, router, showDoneLayers])
 
   if (!sessionData) {
     return (
