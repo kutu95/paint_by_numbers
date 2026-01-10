@@ -144,6 +144,31 @@ async def create_session(
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 
+@app.options("/api/sessions/{session_id}/{filename}")
+async def options_session_file(session_id: str, filename: str, request: Request):
+    """Handle CORS preflight for session files."""
+    origin = request.headers.get("origin")
+    if origin:
+        origin_lower = origin.lower()
+        if (origin in allowed_origins or 
+            "layerpainter.margies.app" in origin_lower or 
+            "margies.app" in origin_lower or
+            origin_lower.startswith("https://layerpainter") or
+            origin_lower.startswith("http://localhost")):
+            from fastapi.responses import Response
+            return Response(
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Credentials": "true",
+                    "Access-Control-Allow-Methods": "GET, OPTIONS",
+                    "Access-Control-Allow-Headers": "*",
+                }
+            )
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
 @app.get("/api/sessions/{session_id}/{filename}")
 async def get_session_file(session_id: str, filename: str, request: Request):
     """Serve session files with CORS headers for canvas/image loading."""
