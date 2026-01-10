@@ -16,7 +16,6 @@ from paint_manager import (
     list_library_groups, get_library_info
 )
 import json
-import os
 from openai import OpenAI
 
 # Set up logging
