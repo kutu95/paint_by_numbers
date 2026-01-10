@@ -47,6 +47,7 @@ export default function ProjectionViewer() {
   const [showDoneLayers, setShowDoneLayers] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const mouseTimerRef = useRef<NodeJS.Timeout>()
+  const colorCanvasCacheRef = useRef<Map<string, string>>(new Map())
   
   // Load session data
   useEffect(() => {
@@ -242,6 +243,65 @@ export default function ProjectionViewer() {
   // Get the color for this layer (for display purposes only)
   const layerColor = sessionData?.palette?.find(p => p.index === currentLayerData?.palette_index)
   
+  // Generate colored canvas URL when needed (only for showColor mode)
+  const [colorCanvasUrl, setColorCanvasUrl] = useState<string | null>(null)
+  
+  // Generate colored canvas when showColor is enabled - use useEffect with proper dependencies
+  useEffect(() => {
+    if (!showColor || !sessionData || !currentLayerData || currentLayerData.is_finished || !layerColor) {
+      setColorCanvasUrl(null)
+      return
+    }
+
+    const cacheKey = `${currentLayer}-${layerColor.hex}-${currentLayerData.mask_url}`
+    
+    // Check cache first
+    if (colorCanvasCacheRef.current.has(cacheKey)) {
+      setColorCanvasUrl(colorCanvasCacheRef.current.get(cacheKey) || null)
+      return
+    }
+
+    // Generate new canvas
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      setColorCanvasUrl(null)
+      return
+    }
+
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    const maskUrl = `${API_BASE_URL}${currentLayerData.mask_url}`
+    
+    img.onload = () => {
+      try {
+        canvas.width = img.width
+        canvas.height = img.height
+        
+        // Fill with palette color
+        ctx.fillStyle = layerColor.hex
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        
+        // Use mask as alpha
+        ctx.globalCompositeOperation = 'destination-in'
+        ctx.drawImage(img, 0, 0)
+        
+        const dataUrl = canvas.toDataURL()
+        colorCanvasCacheRef.current.set(cacheKey, dataUrl)
+        setColorCanvasUrl(dataUrl)
+      } catch (error) {
+        console.error('Error creating colored canvas:', error)
+        setColorCanvasUrl(null)
+      }
+    }
+    
+    img.onerror = () => {
+      console.error('Failed to load mask image for color display:', maskUrl)
+      setColorCanvasUrl(null)
+    }
+    
+    img.src = maskUrl
+  }, [showColor, currentLayer, sessionData?.session_id, layerColor?.hex, currentLayerData?.mask_url, currentLayerData?.is_finished, API_BASE_URL])
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
@@ -299,25 +359,16 @@ export default function ProjectionViewer() {
             ) : (
               <>
                 {/* Mask image - with color or monochrome */}
-                {showColor && layerColor ? (
-                  // Use CSS mask for color display (simpler, no canvas needed)
-                  <div
-                    className="absolute inset-0"
+                {showColor && layerColor && colorCanvasUrl ? (
+                  <img
+                    src={colorCanvasUrl}
+                    alt={`Layer ${currentLayer + 1} - Color`}
+                    className="absolute"
                     style={{
-                      width: '100%',
-                      height: '100%',
-                      backgroundColor: layerColor.hex,
-                      WebkitMaskImage: `url("${baseUrl}${currentLayerData.mask_url}")`,
-                      WebkitMaskSize: 'contain',
-                      WebkitMaskRepeat: 'no-repeat',
-                      WebkitMaskPosition: 'center',
-                      maskImage: `url("${baseUrl}${currentLayerData.mask_url}")`,
-                      maskSize: 'contain',
-                      maskRepeat: 'no-repeat',
-                      maskPosition: 'center',
                       opacity: registrationMode ? 0 : maskOpacity / 100,
                       maxWidth: '100%',
                       maxHeight: '100%',
+                      objectFit: 'contain',
                     }}
                   />
                 ) : (
@@ -325,6 +376,7 @@ export default function ProjectionViewer() {
                     src={`${baseUrl}${currentLayerData.mask_url}`}
                     alt={`Layer ${currentLayer + 1}`}
                     className="absolute"
+                    crossOrigin="anonymous"
                     style={{
                       opacity: registrationMode ? 0 : maskOpacity / 100,
                       filter: inverted ? 'invert(1)' : 'none',

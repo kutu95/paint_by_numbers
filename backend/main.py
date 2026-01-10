@@ -147,26 +147,31 @@ async def create_session(
 @app.options("/api/sessions/{session_id}/{filename}")
 async def options_session_file(session_id: str, filename: str, request: Request):
     """Handle CORS preflight for session files."""
-    origin = request.headers.get("origin")
-    if origin:
-        origin_lower = origin.lower()
-        if (origin in allowed_origins or 
-            "layerpainter.margies.app" in origin_lower or 
-            "margies.app" in origin_lower or
-            origin_lower.startswith("https://layerpainter") or
-            origin_lower.startswith("http://localhost")):
-            from fastapi.responses import Response
-            return Response(
-                status_code=200,
-                headers={
-                    "Access-Control-Allow-Origin": origin,
-                    "Access-Control-Allow-Credentials": "true",
-                    "Access-Control-Allow-Methods": "GET, OPTIONS",
-                    "Access-Control-Allow-Headers": "*",
-                }
-            )
+    origin = request.headers.get("origin", "https://layerpainter.margies.app")
+    
+    # Always allow our domain - set CORS headers unconditionally
+    origin_lower = origin.lower() if origin else ""
+    if (not origin or 
+        "layerpainter.margies.app" in origin_lower or 
+        "margies.app" in origin_lower or
+        origin in allowed_origins or
+        origin_lower.startswith("https://layerpainter") or
+        origin_lower.startswith("http://localhost")):
+        cors_origin = origin if origin else "https://layerpainter.margies.app"
+    else:
+        cors_origin = "https://layerpainter.margies.app"
+    
     from fastapi.responses import Response
-    return Response(status_code=204)
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": cors_origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, OPTIONS, HEAD",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+        }
+    )
 
 
 @app.get("/api/sessions/{session_id}/{filename}")
@@ -183,31 +188,35 @@ async def get_session_file(session_id: str, filename: str, request: Request):
     except ValueError:
         raise HTTPException(status_code=403, detail="Access denied")
     
-    # Return FileResponse with explicit CORS headers for canvas loading
+    # Return FileResponse with explicit CORS headers - ALWAYS set for our domain
+    # This is required for CSS mask-image and canvas loading to work across origins
     response = FileResponse(file_path)
+    
+    # Get origin from request header
     origin = request.headers.get("origin")
     
-    # Always set CORS headers for our domains (needed for CSS mask-image)
-    # Check if request is from our domain or allowed origins
+    # Always set CORS headers - use origin if it's from our domain, otherwise default to our domain
     if origin:
         origin_lower = origin.lower()
-        if (origin in allowed_origins or 
-            "layerpainter.margies.app" in origin_lower or 
+        if ("layerpainter.margies.app" in origin_lower or 
             "margies.app" in origin_lower or
+            origin in allowed_origins or
             origin_lower.startswith("https://layerpainter") or
             origin_lower.startswith("http://localhost")):
             response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "*"
-            response.headers["Access-Control-Expose-Headers"] = "*"
+        else:
+            # Default to our domain if origin doesn't match
+            response.headers["Access-Control-Allow-Origin"] = "https://layerpainter.margies.app"
     else:
-        # If no origin header (e.g., CSS mask-image from our domain), 
-        # allow our specific domain explicitly
+        # No origin header (common with CSS mask-image) - allow our domain
         response.headers["Access-Control-Allow-Origin"] = "https://layerpainter.margies.app"
-        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-        response.headers["Access-Control-Expose-Headers"] = "*"
+    
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS, HEAD"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Expose-Headers"] = "*"
+    response.headers["Access-Control-Max-Age"] = "86400"
+    
     return response
 
 
