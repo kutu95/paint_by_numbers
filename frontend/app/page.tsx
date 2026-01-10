@@ -718,46 +718,54 @@ export default function Home() {
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-semibold mb-2">Paint Library Group:</label>
-                  <select
-                    value={selectedLibraryGroup}
-                    onChange={(e) => setSelectedLibraryGroup(e.target.value)}
-                    className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600"
-                  >
-                    {libraryGroups.map((group) => (
-                      <option key={group.group} value={group.group}>
-                        {group.name} ({group.paint_count} paints, {group.calibrated_count} calibrated)
-                      </option>
-                    ))}
-                  </select>
+                  {mounted && libraryGroupsLoaded && libraryGroups.length > 0 ? (
+                    <>
+                      <select
+                        value={selectedLibraryGroup}
+                        onChange={(e) => setSelectedLibraryGroup(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600"
+                      >
+                        {libraryGroups.map((group) => (
+                          <option key={group.group} value={group.group}>
+                            {group.name} ({group.paint_count} paints, {group.calibrated_count} calibrated)
+                          </option>
+                        ))}
+                      </select>
+                      <div className="flex gap-3 mt-3">
+                        <button
+                          onClick={() => router.push('/paints')}
+                          className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-sm"
+                        >
+                          Manage Paint Libraries
+                        </button>
+                        <button
+                          onClick={() => {
+                            // Navigate to paint library with the selected group
+                            router.push(`/paints?group=${selectedLibraryGroup}`)
+                          }}
+                          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm"
+                        >
+                          Calibrate Paints in {libraryGroups.find(g => g.group === selectedLibraryGroup)?.name || 'Library'}
+                        </button>
+                      </div>
+                      {libraryGroups.find(g => g.group === selectedLibraryGroup)?.calibrated_count === 0 && (
+                        <p className="text-yellow-400 text-sm mt-2">
+                          ⚠️ No calibrated paints in this library. Recipes will use estimated colors. 
+                          <button 
+                            onClick={() => router.push(`/paints?group=${selectedLibraryGroup}`)}
+                            className="underline ml-1"
+                          >
+                            Calibrate paints for accurate recipes.
+                          </button>
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <div className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600 text-gray-400">
+                      Loading library groups...
+                    </div>
+                  )}
                 </div>
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => router.push('/paints')}
-                    className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-sm"
-                  >
-                    Manage Paint Libraries
-                  </button>
-                  <button
-                    onClick={() => {
-                      // Navigate to paint library with the selected group
-                      router.push(`/paints?group=${selectedLibraryGroup}`)
-                    }}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm"
-                  >
-                    Calibrate Paints in {libraryGroups.find(g => g.group === selectedLibraryGroup)?.name || 'Library'}
-                  </button>
-                </div>
-                {libraryGroupsLoaded && libraryGroups.find(g => g.group === selectedLibraryGroup)?.calibrated_count === 0 && (
-                  <p className="text-yellow-400 text-sm">
-                    ⚠️ No calibrated paints in this library. Recipes will use estimated colors. 
-                    <button 
-                      onClick={() => router.push(`/paints?group=${selectedLibraryGroup}`)}
-                      className="underline ml-1"
-                    >
-                      Calibrate paints for accurate recipes.
-                    </button>
-                  </p>
-                )}
                 {loadingRecipes && (
                   <p className="text-gray-400 text-sm">Generating recipes...</p>
                 )}
