@@ -424,13 +424,19 @@ async def generate_recipes_from_palette(
             if not force:
                 cached = get_cached_recipe(library_group, target_hex)
                 if cached:
-                    logger.info(f"Using cached recipe for color {target_hex} in group {library_group}")
-                    recipes.append({
-                        "palette_index": color['index'],
-                        "recipe": cached.get("recipe"),
-                        "type": cached.get("type", "chatgpt")
-                    })
-                    continue
+                    # Validate that cached recipe is from ChatGPT (not old algorithm)
+                    cached_type = cached.get("type", "")
+                    if cached_type == "chatgpt" and cached.get("recipe", {}).get("type") == "chatgpt":
+                        logger.info(f"Using cached ChatGPT recipe for color {target_hex} in group {library_group}")
+                        recipes.append({
+                            "palette_index": color['index'],
+                            "recipe": cached.get("recipe"),
+                            "type": "chatgpt"
+                        })
+                        continue
+                    else:
+                        # Old cached recipe from previous algorithm - ignore and regenerate
+                        logger.warning(f"Found old cached recipe (type: {cached_type}) for color {target_hex}, regenerating with ChatGPT")
             
             # Recipe not in cache (or force regenerate), generate new one with ChatGPT
             if force:
@@ -447,66 +453,96 @@ async def generate_recipes_from_palette(
             
             paints_text = "\n".join(paint_list)
             
-            # Create prompt for ChatGPT
-            prompt = f"""You are an expert paint mixing specialist. Given a target color and a list of available paints, provide precise mixing instructions.
+            # Create prompt for ChatGPT - more explicit and detailed
+            prompt = f"""You are an expert paint mixing specialist. I need you to create a paint mixing recipe to match a specific target color.
 
-Target color: {target_hex}
+TARGET COLOR: {target_hex}
 
-Available paints:
+AVAILABLE PAINTS:
 {paints_text}
 
-Please provide mixing instructions using ONLY the paints from the list above. Format your response as:
-- Use 2-4 colors maximum (plus white if needed)
-- Provide exact percentages for each paint
-- Total should equal 100%
-- Format: "White X% + PaintName1 Y% + PaintName2 Z% + ..."
-- Explain the mixing approach briefly if helpful
+INSTRUCTIONS:
+1. Analyze the target color {target_hex} and determine which paints from the list above should be mixed
+2. Use ONLY the paints listed above - do not suggest paints that are not in the list
+3. Provide a mixing recipe with exact percentages
+4. The total of all percentages must equal 100%
+5. Use 2-4 colors maximum (plus white if needed for lightening)
+6. Format your response EXACTLY as: "White X% + PaintName1 Y% + PaintName2 Z% + PaintName3 W%"
+7. Use the EXACT paint names as listed above (case-sensitive)
+8. If white is not needed, omit it from the recipe
+9. Be precise - this is for actual paint mixing, not approximations
 
-Be precise and practical. If white is needed, include it. Use the exact paint names from the list provided."""
+Provide your recipe now:"""
 
-            # Call ChatGPT
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",  # Use cheaper model
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an expert paint mixing specialist. Provide precise, practical mixing instructions in a clear format."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                max_tokens=300,
-                temperature=0.3
-            )
-            
-            instructions = response.choices[0].message.content.strip()
-            
-            # Store the ChatGPT response as a chatgpt recipe type
-            recipe_data = {
-                "instructions": instructions,
-                "type": "chatgpt"
-            }
-            
-            # Cache the recipe for future use
-            cache_recipe(library_group, target_hex, {
-                "recipe": recipe_data,
-                "type": "chatgpt"
-            })
-            
-            recipes.append({
-                "palette_index": color['index'],
-                "recipe": recipe_data,
-                "type": "chatgpt"
-            })
+            # Call ChatGPT with better error handling
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are an expert paint mixing specialist. You provide precise, practical paint mixing recipes with exact percentages. You only use paints from the provided list and always ensure percentages total 100%."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    max_tokens=500,
+                    temperature=0.2  # Lower temperature for more consistent results
+                )
+                
+                if not response or not response.choices or len(response.choices) == 0:
+                    raise ValueError("ChatGPT returned empty response")
+                
+                if not response.choices[0].message or not response.choices[0].message.content:
+                    raise ValueError("ChatGPT response has no content")
+                
+                instructions = response.choices[0].message.content.strip()
+                
+                if not instructions or len(instructions) < 10:
+                    raise ValueError(f"ChatGPT returned invalid/short response: {instructions[:50]}")
+                
+                logger.info(f"ChatGPT response for {target_hex}: {instructions[:100]}...")
+                
+                # Store the ChatGPT response as a chatgpt recipe type
+                recipe_data = {
+                    "instructions": instructions,
+                    "type": "chatgpt"
+                }
+                
+                # Cache the recipe for future use
+                cache_recipe(library_group, target_hex, {
+                    "recipe": recipe_data,
+                    "type": "chatgpt"
+                })
+                
+                recipes.append({
+                    "palette_index": color['index'],
+                    "recipe": recipe_data,
+                    "type": "chatgpt"
+                })
+                
+            except Exception as chatgpt_error:
+                error_msg = str(chatgpt_error)
+                logger.error(f"ChatGPT API error for color {target_hex}: {error_msg}")
+                logger.error(traceback.format_exc())
+                
+                # NO FALLBACK - throw clear error to user
+                recipes.append({
+                    "palette_index": color['index'],
+                    "recipe": None,
+                    "error": f"ChatGPT API error: {error_msg}. Please check OpenAI API key and try again."
+                })
             
         except Exception as e:
-            logger.error(f"Error generating recipe for color {color.get('hex', 'unknown')}: {e}")
+            error_msg = str(e)
+            logger.error(f"Error generating recipe for color {color.get('hex', 'unknown')}: {error_msg}")
+            logger.error(traceback.format_exc())
             recipes.append({
                 "palette_index": color['index'],
                 "recipe": None,
-                "error": f"Failed to generate recipe: {str(e)}"
+                "error": f"Recipe generation failed: {error_msg}"
             })
     
     return {"recipes": recipes}
