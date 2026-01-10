@@ -797,7 +797,7 @@ export default function Home() {
                     if (!color) return null
 
                     const recipe = recipeData.recipe
-                    const errorInfo = recipe ? getErrorLevel(recipe.error) : null
+                    const errorInfo = (recipe && recipeData.type !== 'chatgpt' && recipe.error !== undefined) ? getErrorLevel(recipe.error) : null
 
                     return (
                       <div
@@ -997,7 +997,7 @@ export default function Home() {
                     if (!color) return null
 
                     const recipe = recipeData.recipe
-                    const errorInfo = recipe ? getErrorLevel(recipe.error) : null
+                    const errorInfo = (recipe && recipeData.type !== 'chatgpt' && recipe.error !== undefined) ? getErrorLevel(recipe.error) : null
 
                     return (
                       <div
