@@ -362,20 +362,23 @@ export default function Home() {
     }
   }
 
-  const handleGenerateRecipes = async () => {
+  const handleGenerateRecipes = async (forceRegenerate: boolean = false) => {
     if (!sessionData) return
 
     setLoadingRecipes(true)
     try {
-      // Convert palette from hex to RGB format expected by API
+      // Send palette with hex values (backend expects hex for ChatGPT)
       const paletteForApi = sessionData.palette.map((color) => ({
         index: color.index,
-        rgb: hexToRgb(color.hex),
+        hex: color.hex,  // Backend expects hex for ChatGPT API
       }))
 
       const formData = new FormData()
       formData.append('palette', JSON.stringify(paletteForApi))
       formData.append('library_group', selectedLibraryGroup)
+      if (forceRegenerate) {
+        formData.append('force_regenerate', 'true')
+      }
 
       const response = await fetch(`${API_BASE_URL}/api/paint/recipes/from-palette`, {
         method: 'POST',
@@ -932,11 +935,19 @@ export default function Home() {
                 <h2 className="text-2xl font-bold">Paint Mixing Recipes</h2>
                 <div className="flex gap-2">
                   <button
-                    onClick={handleGenerateRecipes}
+                    onClick={() => handleGenerateRecipes(false)}
                     disabled={loadingRecipes || !sessionData}
                     className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50"
                   >
                     {loadingRecipes ? 'Generating...' : 'Generate Recipes'}
+                  </button>
+                  <button
+                    onClick={() => handleGenerateRecipes(true)}
+                    disabled={loadingRecipes || !sessionData}
+                    className="px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded disabled:opacity-50"
+                    title="Force regenerate recipes from ChatGPT (ignores cache)"
+                  >
+                    {loadingRecipes ? 'Regenerating...' : 'Force Regenerate'}
                   </button>
                 </div>
               </div>
@@ -989,69 +1000,6 @@ export default function Home() {
                   </button>
                 </div>
               </div>
-
-              {recipes.length > 0 && (
-                <div className="space-y-3">
-                  {recipes.map((recipeData) => {
-                    const color = sessionData.palette.find(p => p.index === recipeData.palette_index)
-                    if (!color) return null
-
-                    const recipe = recipeData.recipe
-                    const errorInfo = (recipe && recipeData.type !== 'chatgpt' && recipe.error !== undefined) ? getErrorLevel(recipe.error) : null
-
-                    return (
-                      <div
-                        key={recipeData.palette_index}
-                        className="flex items-center gap-4 p-4 bg-gray-700 rounded"
-                      >
-                        <div
-                          className="w-16 h-16 rounded border border-gray-600 flex-shrink-0"
-                          style={{ backgroundColor: color.hex }}
-                        />
-                        <div className="flex-1">
-                          <div className="font-bold">Palette Color {recipeData.palette_index}</div>
-                          <div className="text-sm text-gray-300">
-                            {formatRecipe(recipeData)}
-                          </div>
-                          {recipe && recipeData.type !== 'chatgpt' && (
-                            <div className="text-xs text-gray-400 mt-1 flex items-center gap-2 flex-wrap">
-                              {recipe.uncalibrated && (
-                                <span className="px-2 py-0.5 rounded text-xs bg-yellow-600/30 text-yellow-300 border border-yellow-500/50">
-                                  ⚠️ Estimated (not calibrated)
-                                </span>
-                              )}
-                              {recipe.error !== undefined && (
-                                <span>Error: {recipe.error.toFixed(2)} ΔE</span>
-                              )}
-                              {errorInfo && (
-                                <span
-                                  className="px-2 py-0.5 rounded text-xs"
-                                  style={{
-                                    backgroundColor:
-                                      errorInfo.color === 'green'
-                                        ? '#16a34a'
-                                        : errorInfo.color === 'yellow'
-                                        ? '#ca8a04'
-                                        : '#dc2626',
-                                  }}
-                                >
-                                  {errorInfo.level}
-                                </span>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-
-              {recipes.length === 0 && !loadingRecipes && (
-                <div className="text-center py-8 text-gray-400">
-                  Click "Generate Recipes" to create mixing recipes for each palette color.
-                </div>
-              )}
             </div>
           </div>
         )}

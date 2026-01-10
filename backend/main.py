@@ -361,10 +361,12 @@ async def get_calibration(paint_id: str):
 @app.post("/api/paint/recipes/from-palette")
 async def generate_recipes_from_palette(
     palette: str = Form(...),  # JSON string of palette
-    library_group: str = Form("default")  # Library group to use
+    library_group: str = Form("default"),  # Library group to use
+    force_regenerate: str = Form("false")  # Force regeneration, ignore cache
 ):
     """Generate recipes from a provided palette using ChatGPT."""
     palette_list = json.loads(palette)
+    force = force_regenerate.lower() == "true"
     
     # Load paints from the specified library group
     library = load_library(library_group)
@@ -402,21 +404,39 @@ async def generate_recipes_from_palette(
     recipes = []
     for color in palette_list:
         try:
-            target_hex = color['hex']
-            
-            # Check if recipe is already cached
-            cached = get_cached_recipe(library_group, target_hex)
-            if cached:
-                logger.info(f"Using cached recipe for color {target_hex} in group {library_group}")
+            # Support both 'hex' and 'rgb' format (for backward compatibility)
+            if 'hex' in color:
+                target_hex = color['hex']
+            elif 'rgb' in color:
+                # Convert RGB to hex
+                r, g, b = color['rgb']
+                target_hex = f"#{r:02x}{g:02x}{b:02x}"
+            else:
+                logger.error(f"No hex or rgb in color data: {color}")
                 recipes.append({
                     "palette_index": color['index'],
-                    "recipe": cached.get("recipe"),
-                    "type": cached.get("type", "chatgpt")
+                    "recipe": None,
+                    "error": "Color format error: missing hex or rgb"
                 })
                 continue
             
-            # Recipe not in cache, generate new one with ChatGPT
-            logger.info(f"Generating new recipe for color {target_hex} in group {library_group}")
+            # Check if recipe is already cached (unless forcing regeneration)
+            if not force:
+                cached = get_cached_recipe(library_group, target_hex)
+                if cached:
+                    logger.info(f"Using cached recipe for color {target_hex} in group {library_group}")
+                    recipes.append({
+                        "palette_index": color['index'],
+                        "recipe": cached.get("recipe"),
+                        "type": cached.get("type", "chatgpt")
+                    })
+                    continue
+            
+            # Recipe not in cache (or force regenerate), generate new one with ChatGPT
+            if force:
+                logger.info(f"Force regenerating recipe for color {target_hex} in group {library_group}")
+            else:
+                logger.info(f"Generating new recipe for color {target_hex} in group {library_group}")
             
             # Build list of available paints with their colors
             paint_list = []
