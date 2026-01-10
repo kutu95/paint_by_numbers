@@ -241,33 +241,48 @@ export default function ProjectionViewer() {
     )
   }
 
-  // Get the color for this layer
+  // Get the color for this layer (for display purposes only, not used in effect dependencies)
   const layerColor = sessionData.palette.find(p => p.index === currentLayerData.palette_index)
   
+  // Extract stable primitive values for the canvas key
+  const maskUrlStr = currentLayerData?.mask_url || ''
+  const paletteIndex = currentLayerData?.palette_index ?? -1
+  const layerColorHex = layerColor?.hex || ''
+  const isFinished = currentLayerData?.is_finished || false
+  
+  // Create a stable key string from primitives
+  const canvasKey = showColor && !isFinished && maskUrlStr && layerColorHex 
+    ? `${currentLayer}-${layerColorHex}-${maskUrlStr}`
+    : null
+
   // Use a ref to track the previous key and prevent duplicate canvas generation
   const prevCanvasKeyRef = useRef<string | null>(null)
 
   // Generate colored mask image when showColor is enabled
   useEffect(() => {
     // Early return if conditions not met
-    if (!showColor || !currentLayerData || !layerColor || currentLayerData.is_finished) {
+    if (!canvasKey) {
       setColorCanvasUrl(null)
       prevCanvasKeyRef.current = null
       return
     }
 
-    // Extract primitive values inside useEffect to ensure we have current values
-    const layerColorHex = layerColor.hex
-    const maskUrl = currentLayerData.mask_url
-    const canvasKey = `${currentLayer}-${layerColorHex}-${maskUrl}`
-
     // Skip if we already generated canvas for this key
-    if (prevCanvasKeyRef.current === canvasKey && colorCanvasUrl) {
+    if (prevCanvasKeyRef.current === canvasKey) {
       return
     }
 
     prevCanvasKeyRef.current = canvasKey
     let cancelled = false
+
+    // Re-extract values to ensure we're using current data (safe since key matches)
+    const layerData = sessionData.layers[currentLayer]
+    const paletteColor = sessionData.palette.find(p => p.index === layerData.palette_index)
+    
+    if (!layerData || !paletteColor) {
+      setColorCanvasUrl(null)
+      return
+    }
 
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')
@@ -279,7 +294,7 @@ export default function ProjectionViewer() {
     const img = new Image()
     // Always use crossOrigin for images loaded into canvas (required for CORS)
     img.crossOrigin = 'anonymous'
-    const fullMaskUrl = `${API_BASE_URL}${maskUrl}`
+    const fullMaskUrl = `${API_BASE_URL}${layerData.mask_url}`
     
     img.onload = () => {
       if (cancelled) return
@@ -289,7 +304,7 @@ export default function ProjectionViewer() {
         canvas.height = img.height
         
         // Fill with the palette color
-        ctx.fillStyle = layerColorHex
+        ctx.fillStyle = paletteColor.hex
         ctx.fillRect(0, 0, canvas.width, canvas.height)
         
         // Use the mask image as an alpha mask (white areas show color, black areas are transparent)
@@ -325,7 +340,7 @@ export default function ProjectionViewer() {
       // Note: data URLs don't need to be revoked (only blob URLs do)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showColor, currentLayer, API_BASE_URL]) // Only depend on primitive values that actually change
+  }, [canvasKey, API_BASE_URL]) // Only depend on the stable key string, not objects
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
