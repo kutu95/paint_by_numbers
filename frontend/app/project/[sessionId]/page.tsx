@@ -406,7 +406,7 @@ export default function ProjectionViewer() {
                 <div>
                   {currentLayerData.is_finished 
                     ? 'Finished Image' 
-                    : `Layer: ${currentLayer + 1} / ${sessionData.layers.length - 1}`}
+                    : `Layer: ${currentLayer + 1} / ${sessionData.layers.length}`}
                 </div>
                 {!currentLayerData.is_finished && (
                   <>

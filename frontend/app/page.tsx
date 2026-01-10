@@ -872,7 +872,7 @@ export default function Home() {
                       />
                       <img
                         src={`${API_BASE_URL}${layer.mask_url}`}
-                        alt={`Layer ${layerIdx}`}
+                        alt={`Layer ${layerIdx + 1}`}
                         className="w-16 h-16 object-contain bg-gray-700 rounded"
                       />
                       {orderMode === 'manual' && (
