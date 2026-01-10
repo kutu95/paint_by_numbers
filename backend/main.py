@@ -11,11 +11,13 @@ import logging
 from image_processor import process_image
 from paint_manager import (
     load_library, save_library, slugify, atomic_write,
-    sample_color_from_image, generate_recipes_for_palette,
+    sample_color_from_image,
     rgb_to_lab, delta_e_lab, CALIBRATION_DIR, PAINT_DIR,
     list_library_groups, get_library_info
 )
 import json
+import os
+from openai import OpenAI
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -361,9 +363,114 @@ async def generate_recipes_from_palette(
     palette: str = Form(...),  # JSON string of palette
     library_group: str = Form("default")  # Library group to use
 ):
-    """Generate recipes from a provided palette using the specified library group."""
+    """Generate recipes from a provided palette using ChatGPT."""
     palette_list = json.loads(palette)
-    recipes = generate_recipes_for_palette("", palette_list, library_group)
+    
+    # Load paints from the specified library group
+    library = load_library(library_group)
+    paints = library.get('paints', [])
+    
+    if not paints:
+        return {
+            "recipes": [
+                {
+                    "palette_index": color['index'],
+                    "recipe": None,
+                    "error": f"No paints available in library group '{library_group}'"
+                }
+                for color in palette_list
+            ]
+        }
+    
+    # Initialize OpenAI client
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        logger.error("OPENAI_API_KEY environment variable not set")
+        return {
+            "recipes": [
+                {
+                    "palette_index": color['index'],
+                    "recipe": None,
+                    "error": "OpenAI API key not configured"
+                }
+                for color in palette_list
+            ]
+        }
+    
+    client = OpenAI(api_key=api_key)
+    
+    recipes = []
+    for color in palette_list:
+        try:
+            target_hex = color['hex']
+            
+            # Build list of available paints with their colors
+            paint_list = []
+            for paint in paints:
+                paint_name = paint.get('name', paint.get('id', 'Unknown'))
+                paint_hex = paint.get('hex_approx', '#000000')
+                paint_list.append(f"- {paint_name} (hex: {paint_hex})")
+            
+            paints_text = "\n".join(paint_list)
+            
+            # Create prompt for ChatGPT
+            prompt = f"""You are an expert paint mixing specialist. Given a target color and a list of available paints, provide precise mixing instructions.
+
+Target color: {target_hex}
+
+Available paints:
+{paints_text}
+
+Please provide mixing instructions using ONLY the paints from the list above. Format your response as:
+- Use 2-4 colors maximum (plus white if needed)
+- Provide exact percentages for each paint
+- Total should equal 100%
+- Format: "White X% + PaintName1 Y% + PaintName2 Z% + ..."
+- Explain the mixing approach briefly if helpful
+
+Be precise and practical. If white is needed, include it. Use the exact paint names from the list provided."""
+
+            # Call ChatGPT
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",  # Use cheaper model
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert paint mixing specialist. Provide precise, practical mixing instructions in a clear format."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                max_tokens=300,
+                temperature=0.3
+            )
+            
+            instructions = response.choices[0].message.content.strip()
+            
+            # Parse the response to extract recipe structure
+            # Try to extract percentages from the text
+            recipe_text = instructions
+            
+            # Store the ChatGPT response as a chatgpt recipe type
+            recipes.append({
+                "palette_index": color['index'],
+                "recipe": {
+                    "instructions": recipe_text,
+                    "type": "chatgpt"
+                },
+                "type": "chatgpt"
+            })
+            
+        except Exception as e:
+            logger.error(f"Error generating recipe for color {color.get('hex', 'unknown')}: {e}")
+            recipes.append({
+                "palette_index": color['index'],
+                "recipe": None,
+                "error": f"Failed to generate recipe: {str(e)}"
+            })
+    
     return {"recipes": recipes}
 
 

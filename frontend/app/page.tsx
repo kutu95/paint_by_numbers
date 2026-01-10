@@ -282,6 +282,13 @@ export default function Home() {
     }
 
     const recipe = recipeData.recipe
+    
+    // Handle ChatGPT-generated recipes
+    if (recipeData.type === 'chatgpt' || recipe.type === 'chatgpt') {
+      return recipe.instructions || 'Recipe instructions from ChatGPT'
+    }
+    
+    // Legacy recipe formats (for backwards compatibility)
     const isUncalibrated = recipe.uncalibrated === true
     const warning = isUncalibrated ? ' (Estimated - not calibrated) ' : ''
     
@@ -806,14 +813,16 @@ export default function Home() {
                           <div className="text-sm text-gray-300">
                             {formatRecipe(recipeData)}
                           </div>
-                          {recipe && (
+                          {recipe && recipeData.type !== 'chatgpt' && (
                             <div className="text-xs text-gray-400 mt-1 flex items-center gap-2 flex-wrap">
                               {recipe.uncalibrated && (
                                 <span className="px-2 py-0.5 rounded text-xs bg-yellow-600/30 text-yellow-300 border border-yellow-500/50">
                                   ⚠️ Estimated (not calibrated)
                                 </span>
                               )}
-                              <span>Error: {recipe.error.toFixed(2)} ΔE</span>
+                              {recipe.error !== undefined && (
+                                <span>Error: {recipe.error.toFixed(2)} ΔE</span>
+                              )}
                               {errorInfo && (
                                 <span
                                   className="px-2 py-0.5 rounded text-xs"
@@ -1004,14 +1013,16 @@ export default function Home() {
                           <div className="text-sm text-gray-300">
                             {formatRecipe(recipeData)}
                           </div>
-                          {recipe && (
+                          {recipe && recipeData.type !== 'chatgpt' && (
                             <div className="text-xs text-gray-400 mt-1 flex items-center gap-2 flex-wrap">
                               {recipe.uncalibrated && (
                                 <span className="px-2 py-0.5 rounded text-xs bg-yellow-600/30 text-yellow-300 border border-yellow-500/50">
                                   ⚠️ Estimated (not calibrated)
                                 </span>
                               )}
-                              <span>Error: {recipe.error.toFixed(2)} ΔE</span>
+                              {recipe.error !== undefined && (
+                                <span>Error: {recipe.error.toFixed(2)} ΔE</span>
+                              )}
                               {errorInfo && (
                                 <span
                                   className="px-2 py-0.5 rounded text-xs"
