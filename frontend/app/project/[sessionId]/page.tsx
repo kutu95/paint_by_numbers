@@ -246,14 +246,24 @@ export default function ProjectionViewer() {
 
   // Generate colored mask image when showColor is enabled
   useEffect(() => {
-    if (showColor && layerColor && currentLayerData && !currentLayerData.is_finished) {
-      const canvas = document.createElement('canvas')
-      const ctx = canvas.getContext('2d')
-      if (!ctx) return
+    if (!showColor || !layerColor || !currentLayerData || currentLayerData.is_finished) {
+      setColorCanvasUrl(null)
+      return
+    }
 
-      const img = new Image()
-      img.crossOrigin = 'anonymous'
-      img.onload = () => {
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      setColorCanvasUrl(null)
+      return
+    }
+
+    const img = new Image()
+    // Try without crossOrigin first (same-origin), fallback if needed
+    const maskUrl = `${API_BASE_URL}${currentLayerData.mask_url}`
+    
+    img.onload = () => {
+      try {
         canvas.width = img.width
         canvas.height = img.height
         
@@ -267,17 +277,33 @@ export default function ProjectionViewer() {
         
         // Convert to data URL for display
         setColorCanvasUrl(canvas.toDataURL())
-      }
-      img.onerror = () => {
-        console.error('Failed to load mask image for color display')
+      } catch (error) {
+        console.error('Error creating colored mask canvas:', error)
         setColorCanvasUrl(null)
       }
-      img.src = `${API_BASE_URL}${currentLayerData.mask_url}`
-      colorCanvasRef.current = canvas
-    } else {
-      setColorCanvasUrl(null)
     }
-  }, [showColor, layerColor, currentLayer, currentLayerData, sessionData])
+    
+    img.onerror = () => {
+      console.error('Failed to load mask image for color display:', maskUrl)
+      // Fallback: try with crossOrigin if same-origin fails
+      if (!img.crossOrigin) {
+        img.crossOrigin = 'anonymous'
+        img.src = maskUrl
+      } else {
+        setColorCanvasUrl(null)
+      }
+    }
+    
+    img.src = maskUrl
+    colorCanvasRef.current = canvas
+    
+    // Cleanup
+    return () => {
+      if (colorCanvasRef.current) {
+        URL.revokeObjectURL(canvas.toDataURL())
+      }
+    }
+  }, [showColor, layerColor?.hex, currentLayer, currentLayerData?.mask_url, API_BASE_URL])
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
