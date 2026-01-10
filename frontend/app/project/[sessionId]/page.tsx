@@ -56,6 +56,12 @@ export default function ProjectionViewer() {
     maskUrl: string
     hex: string
   } | null>(null)
+  
+  // Store sessionData in ref to avoid dependency issues
+  const sessionDataRef = useRef<SessionData | null>(null)
+  useEffect(() => {
+    sessionDataRef.current = sessionData
+  }, [sessionData])
 
   // Load session data
   useEffect(() => {
@@ -258,21 +264,24 @@ export default function ProjectionViewer() {
 
   // Generate colored mask image when showColor is enabled
   useEffect(() => {
-    // Early return if conditions not met - check sessionData directly to avoid object reference issues
-    if (!showColor || !sessionData || currentLayer < 0 || currentLayer >= sessionData.layers.length) {
+    // Use ref to get current sessionData to avoid dependency issues
+    const currentSessionData = sessionDataRef.current
+    
+    // Early return if conditions not met
+    if (!showColor || !currentSessionData || currentLayer < 0 || currentLayer >= currentSessionData.layers.length) {
       setColorCanvasUrl((prev) => prev !== null ? null : prev)
       colorCanvasParamsRef.current = null
       return
     }
 
-    const layerData = sessionData.layers[currentLayer]
+    const layerData = currentSessionData.layers[currentLayer]
     if (!layerData || layerData.is_finished) {
       setColorCanvasUrl((prev) => prev !== null ? null : prev)
       colorCanvasParamsRef.current = null
       return
     }
 
-    const paletteColor = sessionData.palette.find(p => p.index === layerData.palette_index)
+    const paletteColor = currentSessionData.palette.find(p => p.index === layerData.palette_index)
     if (!paletteColor || !paletteColor.hex || !layerData.mask_url) {
       setColorCanvasUrl((prev) => prev !== null ? null : prev)
       colorCanvasParamsRef.current = null
