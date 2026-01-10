@@ -1,5 +1,5 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import uuid
@@ -27,13 +27,15 @@ app = FastAPI()
 
 # CORS middleware - allow origins from environment or default to localhost
 # Default includes common ports for compatibility
-allowed_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003").split(",")
+cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003")
+allowed_origins = [origin.strip() for origin in cors_origins_str.split(",")]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],  # Expose all headers for CORS
 )
 
 # Data directory relative to backend folder, go up one level to project root
@@ -143,8 +145,8 @@ async def create_session(
 
 
 @app.get("/api/sessions/{session_id}/{filename}")
-async def get_session_file(session_id: str, filename: str):
-    """Serve session files."""
+async def get_session_file(session_id: str, filename: str, request: Request):
+    """Serve session files with CORS headers for canvas/image loading."""
     file_path = DATA_DIR / session_id / filename
     
     if not file_path.exists() or not file_path.is_file():
@@ -156,7 +158,24 @@ async def get_session_file(session_id: str, filename: str):
     except ValueError:
         raise HTTPException(status_code=403, detail="Access denied")
     
-    return FileResponse(file_path)
+    # Return FileResponse with explicit CORS headers for canvas loading
+    response = FileResponse(file_path)
+    origin = request.headers.get("origin")
+    # Always set CORS headers if origin is provided and matches our domains
+    if origin:
+        # Allow if origin is in allowed list or matches our domain patterns
+        origin_lower = origin.lower()
+        if (origin in allowed_origins or 
+            "layerpainter.margies.app" in origin_lower or 
+            "margies.app" in origin_lower or
+            origin_lower.startswith("https://layerpainter") or
+            origin_lower.startswith("http://localhost")):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+            response.headers["Access-Control-Expose-Headers"] = "*"
+    return response
 
 
 # ===== Paint Management Endpoints =====
@@ -293,12 +312,27 @@ async def upload_calibration_photo(
 
 
 @app.get("/api/paint/calibration/temp/{image_id}.jpg")
-async def get_calibration_temp_image(image_id: str):
-    """Serve temporary calibration image."""
+async def get_calibration_temp_image(image_id: str, request: Request):
+    """Serve temporary calibration image with CORS headers."""
     image_path = CALIBRATION_DIR / "temp" / f"{image_id}.jpg"
     if not image_path.exists():
         raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(image_path)
+    
+    response = FileResponse(image_path)
+    origin = request.headers.get("origin")
+    if origin:
+        origin_lower = origin.lower()
+        if (origin in allowed_origins or 
+            "layerpainter.margies.app" in origin_lower or 
+            "margies.app" in origin_lower or
+            origin_lower.startswith("https://layerpainter") or
+            origin_lower.startswith("http://localhost")):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+            response.headers["Access-Control-Expose-Headers"] = "*"
+    return response
 
 
 @app.post("/api/paint/calibration/sample")
@@ -577,12 +611,27 @@ async def upload_verification_photo(
 
 
 @app.get("/api/sessions/{session_id}/verify/{filename}")
-async def get_verification_image(session_id: str, filename: str):
-    """Serve verification image."""
+async def get_verification_image(session_id: str, filename: str, request: Request):
+    """Serve verification image with CORS headers."""
     file_path = DATA_DIR / session_id / "verify" / filename
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    return FileResponse(file_path)
+    
+    # Security check
+    try:
+        file_path.resolve().relative_to(DATA_DIR.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    response = FileResponse(file_path)
+    origin = request.headers.get("origin")
+    if origin:
+        if origin in allowed_origins or "layerpainter.margies.app" in origin or "margies.app" in origin:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
 
 
 @app.post("/api/paint/verify/sample")

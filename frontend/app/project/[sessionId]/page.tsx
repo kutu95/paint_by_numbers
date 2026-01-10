@@ -259,7 +259,8 @@ export default function ProjectionViewer() {
     }
 
     const img = new Image()
-    // Try without crossOrigin first (same-origin), fallback if needed
+    // Always use crossOrigin for images loaded into canvas (required for CORS)
+    img.crossOrigin = 'anonymous'
     const maskUrl = `${API_BASE_URL}${currentLayerData.mask_url}`
     
     img.onload = () => {
@@ -283,15 +284,9 @@ export default function ProjectionViewer() {
       }
     }
     
-    img.onerror = () => {
-      console.error('Failed to load mask image for color display:', maskUrl)
-      // Fallback: try with crossOrigin if same-origin fails
-      if (!img.crossOrigin) {
-        img.crossOrigin = 'anonymous'
-        img.src = maskUrl
-      } else {
-        setColorCanvasUrl(null)
-      }
+    img.onerror = (error) => {
+      console.error('Failed to load mask image for color display:', maskUrl, error)
+      setColorCanvasUrl(null)
     }
     
     img.src = maskUrl
