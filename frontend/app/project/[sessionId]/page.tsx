@@ -363,7 +363,8 @@ export default function ProjectionViewer() {
       cancelled = true
       // Note: data URLs don't need to be revoked (only blob URLs do)
     }
-  }, [showColor, currentLayer, sessionDataId, API_BASE_URL, sessionData]) // Use sessionDataId to track when data loads, but also include sessionData for latest data
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showColor, currentLayer, sessionDataId, API_BASE_URL]) // Use sessionDataId to track when data loads - sessionData accessed inside is current at execution time
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
