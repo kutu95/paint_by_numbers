@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { API_BASE_URL } from '@/lib/config'
 
@@ -244,25 +244,29 @@ export default function ProjectionViewer() {
   // Get the color for this layer
   const layerColor = sessionData.palette.find(p => p.index === currentLayerData.palette_index)
   
-  // Extract stable primitive values for dependencies
-  const layerColorHex = layerColor?.hex || null
-  const maskUrl = currentLayerData?.mask_url || null
-  const isFinished = currentLayerData?.is_finished || false
-  
-  // Create a stable key that only changes when the actual values change (not object references)
-  const colorCanvasKey = useMemo(() => {
-    if (!showColor || isFinished || !layerColorHex || !maskUrl) return null
-    return `${currentLayer}-${layerColorHex}-${maskUrl}`
-  }, [showColor, currentLayer, layerColorHex, maskUrl, isFinished])
+  // Use a ref to track the previous key and prevent duplicate canvas generation
+  const prevCanvasKeyRef = useRef<string | null>(null)
 
   // Generate colored mask image when showColor is enabled
   useEffect(() => {
-    // Early return if conditions not met - use primitive values from useMemo dependencies
-    if (!colorCanvasKey || !layerColorHex || !maskUrl) {
+    // Early return if conditions not met
+    if (!showColor || !currentLayerData || !layerColor || currentLayerData.is_finished) {
       setColorCanvasUrl(null)
+      prevCanvasKeyRef.current = null
       return
     }
 
+    // Extract primitive values inside useEffect to ensure we have current values
+    const layerColorHex = layerColor.hex
+    const maskUrl = currentLayerData.mask_url
+    const canvasKey = `${currentLayer}-${layerColorHex}-${maskUrl}`
+
+    // Skip if we already generated canvas for this key
+    if (prevCanvasKeyRef.current === canvasKey && colorCanvasUrl) {
+      return
+    }
+
+    prevCanvasKeyRef.current = canvasKey
     let cancelled = false
 
     const canvas = document.createElement('canvas')
@@ -320,7 +324,8 @@ export default function ProjectionViewer() {
       cancelled = true
       // Note: data URLs don't need to be revoked (only blob URLs do)
     }
-  }, [colorCanvasKey, layerColorHex, maskUrl, API_BASE_URL]) // Only use stable primitive values
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showColor, currentLayer, API_BASE_URL]) // Only depend on primitive values that actually change
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
