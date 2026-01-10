@@ -242,15 +242,6 @@ export default function ProjectionViewer() {
   // Get the color for this layer (for display purposes only)
   const layerColor = sessionData?.palette?.find(p => p.index === currentLayerData?.palette_index)
   
-  // Generate colored canvas on-demand using useMemo instead of useEffect to avoid infinite loops
-  const colorCanvasUrlMemo = (() => {
-    if (!showColor || !currentLayerData || currentLayerData.is_finished || !layerColor || !layerColor.hex) {
-      return null
-    }
-    
-    // Return a placeholder - actual generation happens in render with CSS mask
-    return 'generating'
-  })()
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
@@ -308,44 +299,27 @@ export default function ProjectionViewer() {
             ) : (
               <>
                 {/* Mask image - with color or monochrome */}
-                {showColor && layerColor && colorCanvasUrl ? (
-                  <img
-                    src={colorCanvasUrl}
-                    alt={`Layer ${currentLayer + 1} - Color`}
-                    className="absolute"
+                {showColor && layerColor ? (
+                  // Use CSS mask for color display (simpler, no canvas needed)
+                  <div
+                    className="absolute inset-0"
                     style={{
+                      width: '100%',
+                      height: '100%',
+                      backgroundColor: layerColor.hex,
+                      WebkitMaskImage: `url("${baseUrl}${currentLayerData.mask_url}")`,
+                      WebkitMaskSize: 'contain',
+                      WebkitMaskRepeat: 'no-repeat',
+                      WebkitMaskPosition: 'center',
+                      maskImage: `url("${baseUrl}${currentLayerData.mask_url}")`,
+                      maskSize: 'contain',
+                      maskRepeat: 'no-repeat',
+                      maskPosition: 'center',
                       opacity: registrationMode ? 0 : maskOpacity / 100,
                       maxWidth: '100%',
                       maxHeight: '100%',
-                      objectFit: 'contain',
                     }}
                   />
-                ) : showColor && layerColor ? (
-                  // Fallback: show loading or use CSS mask if canvas fails
-                  <div
-                    className="absolute inset-0 flex items-center justify-center"
-                    style={{
-                      opacity: registrationMode ? 0 : maskOpacity / 100,
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: '100%',
-                        height: '100%',
-                        maxWidth: '100%',
-                        maxHeight: '100%',
-                        backgroundColor: layerColor.hex,
-                        WebkitMaskImage: `url("${baseUrl}${currentLayerData.mask_url}")`,
-                        WebkitMaskSize: 'contain',
-                        WebkitMaskRepeat: 'no-repeat',
-                        WebkitMaskPosition: 'center',
-                        maskImage: `url("${baseUrl}${currentLayerData.mask_url}")`,
-                        maskSize: 'contain',
-                        maskRepeat: 'no-repeat',
-                        maskPosition: 'center',
-                      }}
-                    />
-                  </div>
                 ) : (
                   <img
                     src={`${baseUrl}${currentLayerData.mask_url}`}
