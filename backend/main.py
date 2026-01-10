@@ -186,9 +186,8 @@ async def get_session_file(session_id: str, filename: str, request: Request):
     # Return FileResponse with explicit CORS headers for canvas loading
     response = FileResponse(file_path)
     origin = request.headers.get("origin")
-    # Always set CORS headers if origin is provided and matches our domains
+    # Always set CORS headers - allow our domains or any origin if in allowed list
     if origin:
-        # Allow if origin is in allowed list or matches our domain patterns
         origin_lower = origin.lower()
         if (origin in allowed_origins or 
             "layerpainter.margies.app" in origin_lower or 
@@ -200,6 +199,11 @@ async def get_session_file(session_id: str, filename: str, request: Request):
             response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
             response.headers["Access-Control-Allow-Headers"] = "*"
             response.headers["Access-Control-Expose-Headers"] = "*"
+    else:
+        # If no origin header (e.g., CSS mask-image), allow all origins for our domain
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
 
@@ -241,6 +245,29 @@ async def create_library_group(
         "name": name
     }
     save_library(new_library, group_id)
+    
+    return get_library_info(group_id)
+
+
+@app.put("/api/paint/library/groups/{group_id}")
+async def rename_library_group(
+    group_id: str,
+    name: str = Form(...)
+):
+    """Rename a paint library group."""
+    # Check if group exists
+    existing_groups = list_library_groups()
+    if group_id not in existing_groups:
+        raise HTTPException(status_code=404, detail=f"Library group '{group_id}' not found")
+    
+    # Load current library
+    library = load_library(group_id)
+    
+    # Update the name
+    library["name"] = name
+    
+    # Save the updated library
+    save_library(library, group_id)
     
     return get_library_info(group_id)
 

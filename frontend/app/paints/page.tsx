@@ -30,6 +30,8 @@ export default function PaintsPage() {
   const [selectedGroup, setSelectedGroup] = useState<string>('default')
   const [showCreateGroup, setShowCreateGroup] = useState(false)
   const [newGroupName, setNewGroupName] = useState('')
+  const [renamingGroup, setRenamingGroup] = useState<string | null>(null)
+  const [renameGroupName, setRenameGroupName] = useState('')
 
   useEffect(() => {
     loadLibraryGroups()

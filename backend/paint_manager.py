@@ -186,11 +186,14 @@ def get_library_info(group: str) -> Dict:
     calibrated_count = sum(1 for p in library.get('paints', []) 
                           if (CALIBRATION_DIR / f"{p.get('id', '')}.json").exists())
     
+    # Use stored name if available, otherwise generate from group ID
+    name = library.get('name', group.replace("-", " ").title())
+    
     return {
         "group": group,
         "paint_count": paint_count,
         "calibrated_count": calibrated_count,
-        "name": group.replace("-", " ").title()
+        "name": name
     }
 
 
