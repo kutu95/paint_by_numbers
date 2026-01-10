@@ -242,74 +242,89 @@ export default function ProjectionViewer() {
   // Get the color for this layer
   const layerColor = sessionData?.palette?.find(p => p.index === currentLayerData?.palette_index)
   
-  // Generate colored version of mask: replace white pixels with palette color
-  // Use a simple callback approach to avoid useEffect infinite loops
-  const generateColoredMask = useCallback((maskImageUrl: string, colorHex: string, callback: (dataUrl: string) => void) => {
-    const img = new Image()
-    img.crossOrigin = 'anonymous'
-    
-    img.onload = () => {
-      const canvas = document.createElement('canvas')
-      canvas.width = img.width
-      canvas.height = img.height
-      const ctx = canvas.getContext('2d')
-      if (!ctx) return
-      
-      // Draw the mask image
-      ctx.drawImage(img, 0, 0)
-      
-      // Get image data and replace white pixels with palette color
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-      const data = imageData.data
-      
-      // Convert hex to RGB
-      const r = parseInt(colorHex.slice(1, 3), 16)
-      const g = parseInt(colorHex.slice(3, 5), 16)
-      const b = parseInt(colorHex.slice(5, 7), 16)
-      
-      // Replace white pixels (RGB > 200) with palette color, keep black transparent
-      for (let i = 0; i < data.length; i += 4) {
-        const pixelR = data[i]
-        const pixelG = data[i + 1]
-        const pixelB = data[i + 2]
-        const pixelA = data[i + 3]
-        
-        // If pixel is white (or light gray), replace with palette color
-        if (pixelR > 200 && pixelG > 200 && pixelB > 200 && pixelA > 0) {
-          data[i] = r
-          data[i + 1] = g
-          data[i + 2] = b
-          // Keep alpha as is (or make it fully opaque if needed)
-          data[i + 3] = pixelA
-        }
-      }
-      
-      ctx.putImageData(imageData, 0, 0)
-      callback(canvas.toDataURL())
-    }
-    
-    img.onerror = () => {
-      console.error('Failed to load mask image:', maskImageUrl)
-    }
-    
-    img.src = maskImageUrl
-  }, [])
-  
   // Store colored mask data URL
   const [coloredMaskUrl, setColoredMaskUrl] = useState<string | null>(null)
   
-  // Generate colored mask when showColor, currentLayer, or color changes
+  // Generate colored mask: replace white pixels with palette color
+  // Simple approach - only regenerate when showColor or currentLayer changes
   useEffect(() => {
-    if (!showColor || !currentLayerData || currentLayerData.is_finished || !layerColor) {
+    if (!showColor || !sessionData || currentLayer < 0 || currentLayer >= sessionData.layers.length) {
       setColoredMaskUrl(null)
       return
     }
+
+    const layerData = sessionData.layers[currentLayer]
+    if (!layerData || layerData.is_finished) {
+      setColoredMaskUrl(null)
+      return
+    }
+
+    const paletteColor = sessionData.palette.find(p => p.index === layerData.palette_index)
+    if (!paletteColor || !paletteColor.hex || !layerData.mask_url) {
+      setColoredMaskUrl(null)
+      return
+    }
+
+    // Load mask image and replace white pixels with palette color
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    const maskUrl = `${API_BASE_URL}${layerData.mask_url}`
     
-    const maskUrl = `${API_BASE_URL}${currentLayerData.mask_url}`
-    generateColoredMask(maskUrl, layerColor.hex, (dataUrl) => {
-      setColoredMaskUrl(dataUrl)
-    })
-  }, [showColor, currentLayer, layerColor?.hex, currentLayerData?.mask_url, currentLayerData?.is_finished, API_BASE_URL, generateColoredMask])
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = img.width
+        canvas.height = img.height
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          setColoredMaskUrl(null)
+          return
+        }
+        
+        // Draw the mask image (white on black)
+        ctx.drawImage(img, 0, 0)
+        
+        // Get image data and replace white pixels with palette color
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+        const data = imageData.data
+        
+        // Convert hex to RGB
+        const r = parseInt(paletteColor.hex.slice(1, 3), 16)
+        const g = parseInt(paletteColor.hex.slice(3, 5), 16)
+        const b = parseInt(paletteColor.hex.slice(5, 7), 16)
+        
+        // Replace white pixels (RGB > 200) with palette color, keep black areas transparent
+        for (let i = 0; i < data.length; i += 4) {
+          const pixelR = data[i]
+          const pixelG = data[i + 1]
+          const pixelB = data[i + 2]
+          
+          // If pixel is white/light (area to paint), replace with palette color
+          if (pixelR > 200 && pixelG > 200 && pixelB > 200) {
+            data[i] = r
+            data[i + 1] = g
+            data[i + 2] = b
+            // Keep alpha as is (white areas stay opaque)
+          }
+          // Black areas remain black (transparent in final display)
+        }
+        
+        ctx.putImageData(imageData, 0, 0)
+        setColoredMaskUrl(canvas.toDataURL())
+      } catch (error) {
+        console.error('Error creating colored mask:', error)
+        setColoredMaskUrl(null)
+      }
+    }
+    
+    img.onerror = () => {
+      console.error('Failed to load mask image for color display:', maskUrl)
+      setColoredMaskUrl(null)
+    }
+    
+    img.src = maskUrl
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showColor, currentLayer, API_BASE_URL]) // Only depend on primitives - extract values inside effect
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
