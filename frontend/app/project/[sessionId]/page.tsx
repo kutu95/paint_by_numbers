@@ -312,29 +312,23 @@ export default function ProjectionViewer() {
                       justifyContent: 'center',
                     }}
                   >
-                    {/* Colored background */}
+                    {/* Colored div with mask applied - mask-image makes white areas show color */}
                     <div
                       className="absolute"
                       style={{
                         backgroundColor: layerColor.hex,
+                        maskImage: `url(${baseUrl}${currentLayerData.mask_url})`,
+                        WebkitMaskImage: `url(${baseUrl}${currentLayerData.mask_url})`,
+                        maskSize: 'contain',
+                        WebkitMaskSize: 'contain',
+                        maskRepeat: 'no-repeat',
+                        WebkitMaskRepeat: 'no-repeat',
+                        maskPosition: 'center',
+                        WebkitMaskPosition: 'center',
                         maxWidth: '100%',
                         maxHeight: '100%',
                         width: '100%',
                         height: '100%',
-                      }}
-                    />
-                    {/* Mask applied on top with blend mode to show only the colored area */}
-                    <img
-                      src={`${baseUrl}${currentLayerData.mask_url}`}
-                      alt={`Layer ${currentLayer}`}
-                      className="absolute"
-                      style={{
-                        opacity: 1,
-                        filter: 'none',
-                        maxWidth: '100%',
-                        maxHeight: '100%',
-                        objectFit: 'contain',
-                        mixBlendMode: 'multiply',
                       }}
                     />
                   </div>
