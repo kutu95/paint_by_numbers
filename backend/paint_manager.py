@@ -18,8 +18,6 @@ LIBRARIES_DIR = PAINT_DIR / "libraries"
 LIBRARIES_DIR.mkdir(parents=True, exist_ok=True)
 RECIPES_CACHE_DIR = PAINT_DIR / "recipes_cache"
 RECIPES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-RECIPES_CACHE_DIR = PAINT_DIR / "recipes_cache"
-RECIPES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def slugify(text: str) -> str:
