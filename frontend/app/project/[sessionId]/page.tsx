@@ -56,12 +56,6 @@ export default function ProjectionViewer() {
     maskUrl: string
     hex: string
   } | null>(null)
-  
-  // Store sessionData in ref to avoid dependency issues
-  const sessionDataRef = useRef<SessionData | null>(null)
-  useEffect(() => {
-    sessionDataRef.current = sessionData
-  }, [sessionData])
 
   // Load session data
   useEffect(() => {
@@ -79,6 +73,9 @@ export default function ProjectionViewer() {
       }
     }
   }, [sessionId])
+  
+  // Extract stable identifier from sessionData for dependency tracking
+  const sessionDataId = sessionData?.session_id || null
 
   // Load done layers from localStorage
   useEffect(() => {
@@ -264,24 +261,21 @@ export default function ProjectionViewer() {
 
   // Generate colored mask image when showColor is enabled
   useEffect(() => {
-    // Use ref to get current sessionData to avoid dependency issues
-    const currentSessionData = sessionDataRef.current
-    
-    // Early return if conditions not met
-    if (!showColor || !currentSessionData || currentLayer < 0 || currentLayer >= currentSessionData.layers.length) {
+    // Early return if conditions not met - use sessionData directly (it's stable once loaded)
+    if (!showColor || !sessionData || !sessionDataId || currentLayer < 0 || currentLayer >= sessionData.layers.length) {
       setColorCanvasUrl((prev) => prev !== null ? null : prev)
       colorCanvasParamsRef.current = null
       return
     }
 
-    const layerData = currentSessionData.layers[currentLayer]
+    const layerData = sessionData.layers[currentLayer]
     if (!layerData || layerData.is_finished) {
       setColorCanvasUrl((prev) => prev !== null ? null : prev)
       colorCanvasParamsRef.current = null
       return
     }
 
-    const paletteColor = currentSessionData.palette.find(p => p.index === layerData.palette_index)
+    const paletteColor = sessionData.palette.find(p => p.index === layerData.palette_index)
     if (!paletteColor || !paletteColor.hex || !layerData.mask_url) {
       setColorCanvasUrl((prev) => prev !== null ? null : prev)
       colorCanvasParamsRef.current = null
@@ -369,8 +363,7 @@ export default function ProjectionViewer() {
       cancelled = true
       // Note: data URLs don't need to be revoked (only blob URLs do)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showColor, currentLayer, API_BASE_URL]) // Only depend on showColor, currentLayer, and API_BASE_URL - extract sessionData values inside effect
+  }, [showColor, currentLayer, sessionDataId, API_BASE_URL, sessionData]) // Use sessionDataId to track when data loads, but also include sessionData for latest data
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
