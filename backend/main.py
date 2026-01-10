@@ -13,7 +13,8 @@ from paint_manager import (
     load_library, save_library, slugify, atomic_write,
     sample_color_from_image,
     rgb_to_lab, delta_e_lab, CALIBRATION_DIR, PAINT_DIR,
-    list_library_groups, get_library_info
+    list_library_groups, get_library_info,
+    get_cached_recipe, cache_recipe
 )
 import json
 from openai import OpenAI
@@ -403,6 +404,20 @@ async def generate_recipes_from_palette(
         try:
             target_hex = color['hex']
             
+            # Check if recipe is already cached
+            cached = get_cached_recipe(library_group, target_hex)
+            if cached:
+                logger.info(f"Using cached recipe for color {target_hex} in group {library_group}")
+                recipes.append({
+                    "palette_index": color['index'],
+                    "recipe": cached.get("recipe"),
+                    "type": cached.get("type", "chatgpt")
+                })
+                continue
+            
+            # Recipe not in cache, generate new one with ChatGPT
+            logger.info(f"Generating new recipe for color {target_hex} in group {library_group}")
+            
             # Build list of available paints with their colors
             paint_list = []
             for paint in paints:
@@ -448,17 +463,21 @@ Be precise and practical. If white is needed, include it. Use the exact paint na
             
             instructions = response.choices[0].message.content.strip()
             
-            # Parse the response to extract recipe structure
-            # Try to extract percentages from the text
-            recipe_text = instructions
-            
             # Store the ChatGPT response as a chatgpt recipe type
+            recipe_data = {
+                "instructions": instructions,
+                "type": "chatgpt"
+            }
+            
+            # Cache the recipe for future use
+            cache_recipe(library_group, target_hex, {
+                "recipe": recipe_data,
+                "type": "chatgpt"
+            })
+            
             recipes.append({
                 "palette_index": color['index'],
-                "recipe": {
-                    "instructions": recipe_text,
-                    "type": "chatgpt"
-                },
+                "recipe": recipe_data,
                 "type": "chatgpt"
             })
             
