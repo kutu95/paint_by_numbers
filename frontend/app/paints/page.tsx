@@ -168,6 +168,38 @@ export default function PaintsPage() {
     }
   }
 
+  const handleRenameGroup = async (group: string, currentName: string) => {
+    setRenamingGroup(group)
+    setRenameGroupName(currentName)
+  }
+
+  const handleRenameGroupSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!renamingGroup || !renameGroupName.trim()) return
+
+    try {
+      const formData = new FormData()
+      formData.append('name', renameGroupName.trim())
+
+      const response = await fetch(`${API_BASE_URL}/api/paint/library/groups/${renamingGroup}`, {
+        method: 'PUT',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || 'Failed to rename library group')
+      }
+
+      setRenamingGroup(null)
+      setRenameGroupName('')
+      loadLibraryGroups()
+    } catch (error) {
+      console.error('Error:', error)
+      alert(error instanceof Error ? error.message : 'Failed to rename library group')
+    }
+  }
+
   const handleLoadMatisseLibrary = async () => {
     if (!confirm('Add Derivan Matisse paints to your library? Existing paints with the same name will be skipped.')) return
 
