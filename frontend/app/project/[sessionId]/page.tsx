@@ -49,6 +49,13 @@ export default function ProjectionViewer() {
   const mouseTimerRef = useRef<NodeJS.Timeout>()
   const colorCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const [colorCanvasUrl, setColorCanvasUrl] = useState<string | null>(null)
+  
+  // Store values in ref to avoid stale closures (must be declared before any conditional returns)
+  const colorCanvasParamsRef = useRef<{
+    key: string
+    maskUrl: string
+    hex: string
+  } | null>(null)
 
   // Load session data
   useEffect(() => {
@@ -242,19 +249,12 @@ export default function ProjectionViewer() {
   }
 
   // Get the color for this layer (for display purposes only)
-  const layerColor = sessionData.palette.find(p => p.index === currentLayerData.palette_index)
+  const layerColor = sessionData?.palette?.find(p => p.index === currentLayerData?.palette_index)
   
   // Extract stable primitive values
   const maskUrlStr = currentLayerData?.mask_url || ''
   const layerColorHex = layerColor?.hex || ''
   const isFinished = currentLayerData?.is_finished || false
-  
-  // Store values in ref to avoid stale closures
-  const colorCanvasParamsRef = useRef<{
-    key: string
-    maskUrl: string
-    hex: string
-  } | null>(null)
 
   // Generate colored mask image when showColor is enabled
   useEffect(() => {
