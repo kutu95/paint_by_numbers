@@ -32,37 +32,15 @@ interface SessionResponse {
 export default function Home() {
   const [image, setImage] = useState<File | null>(null)
   const [preview, setPreview] = useState<string | null>(null)
-  // Load settings from localStorage or use defaults
-  const loadSettings = () => {
-    if (typeof window === 'undefined') return null
-    try {
-      const saved = localStorage.getItem('layerpainter_settings')
-      if (saved) {
-        const parsed = JSON.parse(saved)
-        return {
-          nColors: parsed.nColors ?? 16,
-          overpaintMm: parsed.overpaintMm ?? 5,
-          orderMode: parsed.orderMode ?? 'largest',
-          maxSide: parsed.maxSide ?? 1920,
-          saturationBoost: parsed.saturationBoost ?? 1.0,
-          detailLevel: parsed.detailLevel ?? 0.5,
-        }
-      }
-    } catch (e) {
-      console.error('Failed to load settings from localStorage:', e)
-    }
-    return null
-  }
-
-  const savedSettings = loadSettings()
-  const [nColors, setNColors] = useState(savedSettings?.nColors ?? 16)
-  const [overpaintMm, setOverpaintMm] = useState(savedSettings?.overpaintMm ?? 5)
-  const [orderMode, setOrderMode] = useState<'largest' | 'smallest' | 'manual' | 'lightest'>(
-    savedSettings?.orderMode ?? 'largest'
-  )
-  const [maxSide, setMaxSide] = useState(savedSettings?.maxSide ?? 1920)
-  const [saturationBoost, setSaturationBoost] = useState(savedSettings?.saturationBoost ?? 1.0)
-  const [detailLevel, setDetailLevel] = useState(savedSettings?.detailLevel ?? 0.5)
+  
+  // Always use default values for initial state to prevent hydration mismatches
+  // Load from localStorage in useEffect after mount
+  const [nColors, setNColors] = useState(16)
+  const [overpaintMm, setOverpaintMm] = useState(5)
+  const [orderMode, setOrderMode] = useState<'largest' | 'smallest' | 'manual' | 'lightest'>('largest')
+  const [maxSide, setMaxSide] = useState(1920)
+  const [saturationBoost, setSaturationBoost] = useState(1.0)
+  const [detailLevel, setDetailLevel] = useState(0.5)
   const [processing, setProcessing] = useState(false)
   const [sessionData, setSessionData] = useState<SessionResponse | null>(null)
   const [manualOrder, setManualOrder] = useState<number[]>([])
@@ -120,9 +98,27 @@ export default function Home() {
     }
   }, [nColors, overpaintMm, orderMode, maxSide, saturationBoost, detailLevel])
 
-  // Set mounted flag after component mounts (client-side only)
+  // Set mounted flag and load settings from localStorage after component mounts (client-side only)
   useEffect(() => {
     setMounted(true)
+    
+    // Load settings from localStorage after mount to prevent hydration mismatches
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('layerpainter_settings')
+        if (saved) {
+          const parsed = JSON.parse(saved)
+          if (parsed.nColors !== undefined) setNColors(parsed.nColors)
+          if (parsed.overpaintMm !== undefined) setOverpaintMm(parsed.overpaintMm)
+          if (parsed.orderMode !== undefined) setOrderMode(parsed.orderMode)
+          if (parsed.maxSide !== undefined) setMaxSide(parsed.maxSide)
+          if (parsed.saturationBoost !== undefined) setSaturationBoost(parsed.saturationBoost)
+          if (parsed.detailLevel !== undefined) setDetailLevel(parsed.detailLevel)
+        }
+      } catch (e) {
+        console.error('Failed to load settings from localStorage:', e)
+      }
+    }
   }, [])
 
   // Handle ESC key to close modal
@@ -137,8 +133,10 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handleEsc)
   }, [selectedColor, mounted])
 
-  // Restore image preview and session data from localStorage on mount
+  // Restore image preview and session data from localStorage on mount (client-side only)
   useEffect(() => {
+    if (typeof window === 'undefined') return
+    
     const savedPreview = localStorage.getItem('current_image_preview')
     const savedFileName = localStorage.getItem('current_image_name')
     if (savedPreview) {
@@ -953,22 +951,30 @@ export default function Home() {
               </div>
               <div className="mb-4">
                 <label className="block text-sm font-semibold mb-2">Select Paint Library:</label>
-                <select
-                  value={selectedLibraryGroup}
-                  onChange={(e) => setSelectedLibraryGroup(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600 mb-2"
-                >
-                  {libraryGroups.map((group) => (
-                    <option key={group.group} value={group.group}>
-                      {group.name} ({group.paint_count} paints, {group.calibrated_count} calibrated)
-                    </option>
-                  ))}
-                </select>
-                <p className="text-gray-400 text-xs">
-                  Recipes will be generated using paints from the selected library. 
-                  {libraryGroups.find(g => g.group === selectedLibraryGroup)?.calibrated_count === 0 && 
-                    ' No calibrated paints in this library - recipes will use estimated colors.'}
-                </p>
+                {mounted && libraryGroupsLoaded && libraryGroups.length > 0 ? (
+                  <>
+                    <select
+                      value={selectedLibraryGroup}
+                      onChange={(e) => setSelectedLibraryGroup(e.target.value)}
+                      className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600 mb-2"
+                    >
+                      {libraryGroups.map((group) => (
+                        <option key={group.group} value={group.group}>
+                          {group.name} ({group.paint_count} paints, {group.calibrated_count} calibrated)
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-gray-400 text-xs">
+                      Recipes will be generated using paints from the selected library. 
+                      {libraryGroups.find(g => g.group === selectedLibraryGroup)?.calibrated_count === 0 && 
+                        ' No calibrated paints in this library - recipes will use estimated colors.'}
+                    </p>
+                  </>
+                ) : (
+                  <div className="w-full px-3 py-2 bg-gray-700 rounded border border-gray-600 mb-2 text-gray-400">
+                    Loading library groups...
+                  </div>
+                )}
               </div>
               <p className="text-gray-400 mb-4 text-sm">
                 Generate mixing recipes for each palette color using your calibrated paints.
