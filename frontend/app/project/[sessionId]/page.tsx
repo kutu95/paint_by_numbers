@@ -47,16 +47,7 @@ export default function ProjectionViewer() {
   const [showDoneLayers, setShowDoneLayers] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const mouseTimerRef = useRef<NodeJS.Timeout>()
-  const colorCanvasRef = useRef<HTMLCanvasElement | null>(null)
-  const [colorCanvasUrl, setColorCanvasUrl] = useState<string | null>(null)
   
-  // Store values in ref to avoid stale closures (must be declared before any conditional returns)
-  const colorCanvasParamsRef = useRef<{
-    key: string
-    maskUrl: string
-    hex: string
-  } | null>(null)
-
   // Load session data
   useEffect(() => {
     const stored = localStorage.getItem(`session_${sessionId}`)
@@ -73,9 +64,6 @@ export default function ProjectionViewer() {
       }
     }
   }, [sessionId])
-  
-  // Extract stable identifier from sessionData for dependency tracking
-  const sessionDataId = sessionData?.session_id || null
 
   // Load done layers from localStorage
   useEffect(() => {
@@ -254,117 +242,15 @@ export default function ProjectionViewer() {
   // Get the color for this layer (for display purposes only)
   const layerColor = sessionData?.palette?.find(p => p.index === currentLayerData?.palette_index)
   
-  // Extract stable primitive values
-  const maskUrlStr = currentLayerData?.mask_url || ''
-  const layerColorHex = layerColor?.hex || ''
-  const isFinished = currentLayerData?.is_finished || false
-
-  // Generate colored mask image when showColor is enabled
-  useEffect(() => {
-    // Early return if conditions not met - use sessionData directly (it's stable once loaded)
-    if (!showColor || !sessionData || !sessionDataId || currentLayer < 0 || currentLayer >= sessionData.layers.length) {
-      setColorCanvasUrl((prev) => prev !== null ? null : prev)
-      colorCanvasParamsRef.current = null
-      return
-    }
-
-    const layerData = sessionData.layers[currentLayer]
-    if (!layerData || layerData.is_finished) {
-      setColorCanvasUrl((prev) => prev !== null ? null : prev)
-      colorCanvasParamsRef.current = null
-      return
-    }
-
-    const paletteColor = sessionData.palette.find(p => p.index === layerData.palette_index)
-    if (!paletteColor || !paletteColor.hex || !layerData.mask_url) {
-      setColorCanvasUrl((prev) => prev !== null ? null : prev)
-      colorCanvasParamsRef.current = null
-      return
-    }
-
-    // Extract primitives from current data
-    const layerColorHex = paletteColor.hex
-    const maskUrlStr = layerData.mask_url
-    
-    // Create key from stable primitives
-    const canvasKey = `${currentLayer}-${layerColorHex}-${maskUrlStr}`
-
-    // Skip if we already generated canvas for this exact key
-    if (colorCanvasParamsRef.current?.key === canvasKey) {
-      return
-    }
-
-    // Store params in ref
-    colorCanvasParamsRef.current = {
-      key: canvasKey,
-      maskUrl: maskUrlStr,
-      hex: layerColorHex
-    }
-
-    let cancelled = false
-
-    const canvas = document.createElement('canvas')
-    const ctx = canvas.getContext('2d')
-    if (!ctx) {
-      setColorCanvasUrl(null)
-      return
-    }
-
-    const img = new Image()
-    // Always use crossOrigin for images loaded into canvas (required for CORS)
-    img.crossOrigin = 'anonymous'
-    const fullMaskUrl = `${API_BASE_URL}${maskUrlStr}`
-    
-    img.onload = () => {
-      if (cancelled) return
-      
-      // Double-check we're still on the same key (prevent race conditions)
-      if (colorCanvasParamsRef.current?.key !== canvasKey) {
-        return
-      }
-      
-      try {
-        canvas.width = img.width
-        canvas.height = img.height
-        
-        // Fill with the palette color (from ref to avoid stale closure)
-        ctx.fillStyle = layerColorHex
-        ctx.fillRect(0, 0, canvas.width, canvas.height)
-        
-        // Use the mask image as an alpha mask (white areas show color, black areas are transparent)
-        ctx.globalCompositeOperation = 'destination-in'
-        ctx.drawImage(img, 0, 0)
-        
-        // Convert to data URL for display
-        const dataUrl = canvas.toDataURL()
-        if (!cancelled && colorCanvasParamsRef.current?.key === canvasKey) {
-          setColorCanvasUrl(dataUrl)
-        }
-      } catch (error) {
-        console.error('Error creating colored mask canvas:', error)
-        if (!cancelled) {
-          setColorCanvasUrl(null)
-        }
-      }
+  // Generate colored canvas on-demand using useMemo instead of useEffect to avoid infinite loops
+  const colorCanvasUrlMemo = (() => {
+    if (!showColor || !currentLayerData || currentLayerData.is_finished || !layerColor || !layerColor.hex) {
+      return null
     }
     
-    img.onerror = (error) => {
-      console.error('Failed to load mask image for color display:', fullMaskUrl, error)
-      if (!cancelled) {
-        setColorCanvasUrl(null)
-      }
-    }
-    
-    img.src = fullMaskUrl
-    colorCanvasRef.current = canvas
-    
-    // Cleanup function
-    return () => {
-      cancelled = true
-      // Note: data URLs don't need to be revoked (only blob URLs do)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showColor, currentLayer, sessionDataId, API_BASE_URL]) // Use sessionDataId to track when data loads - sessionData accessed inside is current at execution time
+    // Return a placeholder - actual generation happens in render with CSS mask
+    return 'generating'
+  })()
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
