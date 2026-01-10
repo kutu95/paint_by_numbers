@@ -243,13 +243,23 @@ export default function ProjectionViewer() {
 
   // Get the color for this layer
   const layerColor = sessionData.palette.find(p => p.index === currentLayerData.palette_index)
+  
+  // Extract stable values for useEffect dependencies
+  const layerColorHex = layerColor?.hex || null
+  const maskUrl = currentLayerData?.mask_url || null
+  const isFinished = currentLayerData?.is_finished || false
 
   // Generate colored mask image when showColor is enabled
   useEffect(() => {
-    if (!showColor || !layerColor || !currentLayerData || currentLayerData.is_finished) {
+    // Early return if conditions not met
+    if (!showColor || !layerColorHex || !maskUrl || isFinished || !currentLayerData) {
       setColorCanvasUrl(null)
       return
     }
+
+    // Prevent infinite loops - check if we already have a canvas URL for this combination
+    const cacheKey = `${currentLayer}-${layerColorHex}-${maskUrl}`
+    let cancelled = false
 
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')
@@ -261,15 +271,17 @@ export default function ProjectionViewer() {
     const img = new Image()
     // Always use crossOrigin for images loaded into canvas (required for CORS)
     img.crossOrigin = 'anonymous'
-    const maskUrl = `${API_BASE_URL}${currentLayerData.mask_url}`
+    const fullMaskUrl = `${API_BASE_URL}${maskUrl}`
     
     img.onload = () => {
+      if (cancelled) return
+      
       try {
         canvas.width = img.width
         canvas.height = img.height
         
         // Fill with the palette color
-        ctx.fillStyle = layerColor.hex
+        ctx.fillStyle = layerColorHex
         ctx.fillRect(0, 0, canvas.width, canvas.height)
         
         // Use the mask image as an alpha mask (white areas show color, black areas are transparent)
@@ -277,28 +289,34 @@ export default function ProjectionViewer() {
         ctx.drawImage(img, 0, 0)
         
         // Convert to data URL for display
-        setColorCanvasUrl(canvas.toDataURL())
+        const dataUrl = canvas.toDataURL()
+        if (!cancelled) {
+          setColorCanvasUrl(dataUrl)
+        }
       } catch (error) {
         console.error('Error creating colored mask canvas:', error)
-        setColorCanvasUrl(null)
+        if (!cancelled) {
+          setColorCanvasUrl(null)
+        }
       }
     }
     
     img.onerror = (error) => {
-      console.error('Failed to load mask image for color display:', maskUrl, error)
-      setColorCanvasUrl(null)
-    }
-    
-    img.src = maskUrl
-    colorCanvasRef.current = canvas
-    
-    // Cleanup
-    return () => {
-      if (colorCanvasRef.current) {
-        URL.revokeObjectURL(canvas.toDataURL())
+      console.error('Failed to load mask image for color display:', fullMaskUrl, error)
+      if (!cancelled) {
+        setColorCanvasUrl(null)
       }
     }
-  }, [showColor, layerColor?.hex, currentLayer, currentLayerData?.mask_url, API_BASE_URL])
+    
+    img.src = fullMaskUrl
+    colorCanvasRef.current = canvas
+    
+    // Cleanup function
+    return () => {
+      cancelled = true
+      // Note: data URLs don't need to be revoked (only blob URLs do)
+    }
+  }, [showColor, layerColorHex, currentLayer, maskUrl, isFinished, API_BASE_URL])
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
