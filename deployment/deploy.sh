@@ -48,7 +48,7 @@ echo "Installing dependencies..."
 npm install
 
 echo "Building production bundle..."
-export NEXT_PUBLIC_API_BASE_URL=http://192.168.0.146:8000
+export NEXT_PUBLIC_API_BASE_URL=https://layerpainter-api.margies.app
 npm run build
 ENDSSH
 
