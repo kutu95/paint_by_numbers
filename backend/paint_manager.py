@@ -18,6 +18,8 @@ LIBRARIES_DIR = PAINT_DIR / "libraries"
 LIBRARIES_DIR.mkdir(parents=True, exist_ok=True)
 RECIPES_CACHE_DIR = PAINT_DIR / "recipes_cache"
 RECIPES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+RECIPES_CACHE_DIR = PAINT_DIR / "recipes_cache"
+RECIPES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def slugify(text: str) -> str:
@@ -91,6 +93,92 @@ def list_library_groups() -> List[str]:
             groups.append(group_name)
     
     return sorted(groups)
+
+
+def get_recipe_cache_file(group: str) -> Path:
+    """Get the recipe cache file path for a library group.
+    
+    Args:
+        group: Library group name
+    
+    Returns:
+        Path to the recipe cache file
+    """
+    return RECIPES_CACHE_DIR / f"{group}_recipes.json"
+
+
+def load_recipe_cache(group: str) -> Dict[str, Dict]:
+    """Load recipe cache for a library group.
+    
+    Recipes are cached by hex color (normalized to uppercase).
+    
+    Args:
+        group: Library group name
+    
+    Returns:
+        Dictionary mapping hex color to cached recipe data
+    """
+    cache_file = get_recipe_cache_file(group)
+    if not cache_file.exists():
+        return {}
+    
+    try:
+        with open(cache_file, 'r') as f:
+            data = json.load(f)
+            # Ensure it's a dict with hex keys
+            if isinstance(data, dict):
+                return data
+            return {}
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+def save_recipe_cache(group: str, cache: Dict[str, Dict]):
+    """Save recipe cache for a library group.
+    
+    Args:
+        group: Library group name
+        cache: Dictionary mapping hex color to recipe data
+    """
+    cache_file = get_recipe_cache_file(group)
+    atomic_write(cache_file, cache)
+
+
+def get_cached_recipe(group: str, hex_color: str) -> Optional[Dict]:
+    """Get a cached recipe for a color and library group.
+    
+    Args:
+        group: Library group name
+        hex_color: Target color hex (e.g., "#FF0000" or "FF0000")
+    
+    Returns:
+        Cached recipe dictionary, or None if not found
+    """
+    # Normalize hex color to uppercase with #
+    hex_normalized = hex_color.upper().lstrip('#')
+    if not hex_normalized.startswith('#'):
+        hex_normalized = '#' + hex_normalized
+    
+    cache = load_recipe_cache(group)
+    return cache.get(hex_normalized)
+
+
+def cache_recipe(group: str, hex_color: str, recipe: Dict):
+    """Cache a recipe for a color and library group.
+    
+    Args:
+        group: Library group name
+        hex_color: Target color hex (e.g., "#FF0000" or "FF0000")
+        recipe: Recipe data dictionary to cache
+    """
+    # Normalize hex color to uppercase with #
+    hex_normalized = hex_color.upper().lstrip('#')
+    if not hex_normalized.startswith('#'):
+        hex_normalized = '#' + hex_normalized
+    
+    cache = load_recipe_cache(group)
+    cache[hex_normalized] = recipe
+    save_recipe_cache(group, cache)
 
 
 def get_library_info(group: str) -> Dict:
