@@ -241,48 +241,46 @@ export default function ProjectionViewer() {
     )
   }
 
-  // Get the color for this layer (for display purposes only, not used in effect dependencies)
+  // Get the color for this layer (for display purposes only)
   const layerColor = sessionData.palette.find(p => p.index === currentLayerData.palette_index)
   
-  // Extract stable primitive values for the canvas key
+  // Extract stable primitive values
   const maskUrlStr = currentLayerData?.mask_url || ''
-  const paletteIndex = currentLayerData?.palette_index ?? -1
   const layerColorHex = layerColor?.hex || ''
   const isFinished = currentLayerData?.is_finished || false
   
-  // Create a stable key string from primitives
-  const canvasKey = showColor && !isFinished && maskUrlStr && layerColorHex 
-    ? `${currentLayer}-${layerColorHex}-${maskUrlStr}`
-    : null
-
-  // Use a ref to track the previous key and prevent duplicate canvas generation
-  const prevCanvasKeyRef = useRef<string | null>(null)
+  // Store values in ref to avoid stale closures
+  const colorCanvasParamsRef = useRef<{
+    key: string
+    maskUrl: string
+    hex: string
+  } | null>(null)
 
   // Generate colored mask image when showColor is enabled
   useEffect(() => {
     // Early return if conditions not met
-    if (!canvasKey) {
+    if (!showColor || isFinished || !maskUrlStr || !layerColorHex) {
       setColorCanvasUrl(null)
-      prevCanvasKeyRef.current = null
+      colorCanvasParamsRef.current = null
       return
     }
 
-    // Skip if we already generated canvas for this key
-    if (prevCanvasKeyRef.current === canvasKey) {
+    // Create key from stable primitives
+    const canvasKey = `${currentLayer}-${layerColorHex}-${maskUrlStr}`
+
+    // Skip if we already generated canvas for this exact key
+    if (colorCanvasParamsRef.current?.key === canvasKey) {
       return
     }
 
-    prevCanvasKeyRef.current = canvasKey
+    // Store params in ref
+    colorCanvasParamsRef.current = {
+      key: canvasKey,
+      maskUrl: maskUrlStr,
+      hex: layerColorHex
+    }
+
     let cancelled = false
-
-    // Re-extract values to ensure we're using current data (safe since key matches)
-    const layerData = sessionData.layers[currentLayer]
-    const paletteColor = sessionData.palette.find(p => p.index === layerData.palette_index)
-    
-    if (!layerData || !paletteColor) {
-      setColorCanvasUrl(null)
-      return
-    }
 
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')
@@ -294,17 +292,22 @@ export default function ProjectionViewer() {
     const img = new Image()
     // Always use crossOrigin for images loaded into canvas (required for CORS)
     img.crossOrigin = 'anonymous'
-    const fullMaskUrl = `${API_BASE_URL}${layerData.mask_url}`
+    const fullMaskUrl = `${API_BASE_URL}${maskUrlStr}`
     
     img.onload = () => {
       if (cancelled) return
+      
+      // Double-check we're still on the same key (prevent race conditions)
+      if (colorCanvasParamsRef.current?.key !== canvasKey) {
+        return
+      }
       
       try {
         canvas.width = img.width
         canvas.height = img.height
         
-        // Fill with the palette color
-        ctx.fillStyle = paletteColor.hex
+        // Fill with the palette color (from ref to avoid stale closure)
+        ctx.fillStyle = layerColorHex
         ctx.fillRect(0, 0, canvas.width, canvas.height)
         
         // Use the mask image as an alpha mask (white areas show color, black areas are transparent)
@@ -313,7 +316,7 @@ export default function ProjectionViewer() {
         
         // Convert to data URL for display
         const dataUrl = canvas.toDataURL()
-        if (!cancelled) {
+        if (!cancelled && colorCanvasParamsRef.current?.key === canvasKey) {
           setColorCanvasUrl(dataUrl)
         }
       } catch (error) {
@@ -339,8 +342,7 @@ export default function ProjectionViewer() {
       cancelled = true
       // Note: data URLs don't need to be revoked (only blob URLs do)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canvasKey, API_BASE_URL]) // Only depend on the stable key string, not objects
+  }, [showColor, currentLayer, maskUrlStr, layerColorHex, isFinished, API_BASE_URL]) // Only stable primitives
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
