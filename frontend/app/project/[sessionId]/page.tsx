@@ -258,13 +258,31 @@ export default function ProjectionViewer() {
 
   // Generate colored mask image when showColor is enabled
   useEffect(() => {
-    // Early return if conditions not met
-    if (!showColor || isFinished || !maskUrlStr || !layerColorHex) {
-      setColorCanvasUrl(null)
+    // Early return if conditions not met - check sessionData directly to avoid object reference issues
+    if (!showColor || !sessionData || currentLayer < 0 || currentLayer >= sessionData.layers.length) {
+      setColorCanvasUrl((prev) => prev !== null ? null : prev)
       colorCanvasParamsRef.current = null
       return
     }
 
+    const layerData = sessionData.layers[currentLayer]
+    if (!layerData || layerData.is_finished) {
+      setColorCanvasUrl((prev) => prev !== null ? null : prev)
+      colorCanvasParamsRef.current = null
+      return
+    }
+
+    const paletteColor = sessionData.palette.find(p => p.index === layerData.palette_index)
+    if (!paletteColor || !paletteColor.hex || !layerData.mask_url) {
+      setColorCanvasUrl((prev) => prev !== null ? null : prev)
+      colorCanvasParamsRef.current = null
+      return
+    }
+
+    // Extract primitives from current data
+    const layerColorHex = paletteColor.hex
+    const maskUrlStr = layerData.mask_url
+    
     // Create key from stable primitives
     const canvasKey = `${currentLayer}-${layerColorHex}-${maskUrlStr}`
 
@@ -342,7 +360,8 @@ export default function ProjectionViewer() {
       cancelled = true
       // Note: data URLs don't need to be revoked (only blob URLs do)
     }
-  }, [showColor, currentLayer, maskUrlStr, layerColorHex, isFinished, API_BASE_URL]) // Only stable primitives
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showColor, currentLayer, API_BASE_URL]) // Only depend on showColor, currentLayer, and API_BASE_URL - extract sessionData values inside effect
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
