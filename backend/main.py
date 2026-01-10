@@ -186,7 +186,9 @@ async def get_session_file(session_id: str, filename: str, request: Request):
     # Return FileResponse with explicit CORS headers for canvas loading
     response = FileResponse(file_path)
     origin = request.headers.get("origin")
-    # Always set CORS headers - allow our domains or any origin if in allowed list
+    
+    # Always set CORS headers for our domains (needed for CSS mask-image)
+    # Check if request is from our domain or allowed origins
     if origin:
         origin_lower = origin.lower()
         if (origin in allowed_origins or 
@@ -200,10 +202,12 @@ async def get_session_file(session_id: str, filename: str, request: Request):
             response.headers["Access-Control-Allow-Headers"] = "*"
             response.headers["Access-Control-Expose-Headers"] = "*"
     else:
-        # If no origin header (e.g., CSS mask-image), allow all origins for our domain
-        response.headers["Access-Control-Allow-Origin"] = "*"
+        # If no origin header (e.g., CSS mask-image from our domain), 
+        # allow our specific domain explicitly
+        response.headers["Access-Control-Allow-Origin"] = "https://layerpainter.margies.app"
         response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Expose-Headers"] = "*"
     return response
 
 
