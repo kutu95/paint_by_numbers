@@ -35,6 +35,7 @@ export default function ProjectionViewer() {
   const [crosshairs, setCrosshairs] = useState(true)
   const [grid, setGrid] = useState(false)
   const [inverted, setInverted] = useState(false)
+  const [showColor, setShowColor] = useState(false)
   const [outlineMode, setOutlineMode] = useState<OutlineMode>('thin')
   const [maskOpacity, setMaskOpacity] = useState(85)
   const [registrationMode, setRegistrationMode] = useState(false)
@@ -43,6 +44,7 @@ export default function ProjectionViewer() {
   const [showHUD, setShowHUD] = useState(true)
   const [mouseActive, setMouseActive] = useState(true)
   const [doneLayers, setDoneLayers] = useState<Set<number>>(new Set())
+  const [showDoneLayers, setShowDoneLayers] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const mouseTimerRef = useRef<NodeJS.Timeout>()
 
@@ -82,15 +84,17 @@ export default function ProjectionViewer() {
     let next = currentLayer + direction
     const maxLayer = sessionData.layers.length - 1
 
-    // Skip done layers (but don't skip the finished layer)
-    while (next >= 0 && next <= maxLayer && doneLayers.has(next)) {
-      next += direction
+    // Skip done layers only if showDoneLayers is false (but don't skip the finished layer)
+    if (!showDoneLayers) {
+      while (next >= 0 && next <= maxLayer && doneLayers.has(next) && !sessionData.layers[next]?.is_finished) {
+        next += direction
+      }
     }
 
     if (next >= 0 && next <= maxLayer) {
       setCurrentLayer(next)
     }
-  }, [sessionData, currentLayer, doneLayers])
+  }, [sessionData, currentLayer, doneLayers, showDoneLayers])
 
   const toggleDone = useCallback(() => {
     // Don't allow marking the finished layer as done
@@ -141,7 +145,25 @@ export default function ProjectionViewer() {
           setGrid((prev) => !prev)
           break
         case 'i':
-          setInverted((prev) => !prev)
+          setInverted((prev) => {
+            const newInverted = !prev
+            // When enabling invert, turn off color mode
+            if (newInverted) {
+              setShowColor(false)
+            }
+            return newInverted
+          })
+          break
+        case 'k':
+          // K for color (Kolor) - toggle actual color display
+          setShowColor((prev) => {
+            const newShowColor = !prev
+            // When enabling color, turn off invert
+            if (newShowColor) {
+              setInverted(false)
+            }
+            return newShowColor
+          })
           break
         case 'o':
           setOutlineMode((prev) => {
@@ -183,6 +205,10 @@ export default function ProjectionViewer() {
         case 'd':
           toggleDone()
           break
+        case 's':
+          // S for Show - toggle showing done layers
+          setShowDoneLayers((prev) => !prev)
+          break
         case 'escape':
         case 'Escape':
           // Save current session ID before navigating back
@@ -212,6 +238,9 @@ export default function ProjectionViewer() {
       </div>
     )
   }
+
+  // Get the color for this layer
+  const layerColor = sessionData.palette.find(p => p.index === currentLayerData.palette_index)
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
@@ -268,19 +297,56 @@ export default function ProjectionViewer() {
               />
             ) : (
               <>
-                {/* Mask image */}
-                <img
-                  src={`${baseUrl}${currentLayerData.mask_url}`}
-                  alt={`Layer ${currentLayer}`}
-                  className="absolute"
-                  style={{
-                    opacity: registrationMode ? 0 : maskOpacity / 100,
-                    filter: inverted ? 'invert(1)' : 'none',
-                    maxWidth: '100%',
-                    maxHeight: '100%',
-                    objectFit: 'contain',
-                  }}
-                />
+                {/* Mask image - with color or monochrome */}
+                {showColor && layerColor ? (
+                  <div
+                    className="absolute"
+                    style={{
+                      opacity: registrationMode ? 0 : maskOpacity / 100,
+                      maxWidth: '100%',
+                      maxHeight: '100%',
+                      width: '100%',
+                      height: '100%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <img
+                      src={`${baseUrl}${currentLayerData.mask_url}`}
+                      alt={`Layer ${currentLayer}`}
+                      className="absolute"
+                      style={{
+                        opacity: 1,
+                        filter: 'none',
+                        maxWidth: '100%',
+                        maxHeight: '100%',
+                        objectFit: 'contain',
+                        mixBlendMode: 'multiply',
+                      }}
+                    />
+                    <div
+                      className="absolute inset-0"
+                      style={{
+                        backgroundColor: layerColor.hex,
+                        mixBlendMode: 'screen',
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <img
+                    src={`${baseUrl}${currentLayerData.mask_url}`}
+                    alt={`Layer ${currentLayer}`}
+                    className="absolute"
+                    style={{
+                      opacity: registrationMode ? 0 : maskOpacity / 100,
+                      filter: inverted ? 'invert(1)' : 'none',
+                      maxWidth: '100%',
+                      maxHeight: '100%',
+                      objectFit: 'contain',
+                    }}
+                  />
+                )}
 
                 {/* Outline overlay */}
                 {outlineUrl && (
@@ -412,18 +478,19 @@ export default function ProjectionViewer() {
                   <>
                     <div>Opacity: {maskOpacity}%</div>
                     <div>Outline: {outlineMode}</div>
+                    <div>{showColor ? 'Color ON' : inverted ? 'Inverted' : 'Normal'}</div>
                   </>
                 )}
-                <div>{inverted ? 'Inverted' : 'Normal'}</div>
                 <div>{crosshairs ? 'Crosshairs ON' : 'Crosshairs OFF'}</div>
                 <div>{grid ? 'Grid ON' : 'Grid OFF'}</div>
                 <div>{registrationMode ? 'Registration ON' : 'Registration OFF'}</div>
+                <div>{showDoneLayers ? 'Show Done: ON' : 'Show Done: OFF'}</div>
                 {!currentLayerData.is_finished && (
                   <div>{doneLayers.has(currentLayer) ? '✓ Done' : ''}</div>
                 )}
               </div>
               <div className="mt-2 text-xs text-gray-400">
-                ← → / Space: Navigate | D: Toggle Done | C: Crosshairs | G: Grid | I: Invert | O: Outline | [ ]: Opacity | R: Registration | B: Black | W: White | H: HUD | Esc: Back
+                ← → / Space: Navigate | D: Toggle Done | C: Crosshairs | G: Grid | I: Invert | K: Color | O: Outline | [ ]: Opacity | R: Registration | B: Black | W: White | S: Show Done | H: HUD | Esc: Back
               </div>
             </div>
           )}
