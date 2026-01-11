@@ -47,7 +47,7 @@ def load_library(group: str = "default") -> Dict:
     """
     # For backward compatibility, check old library.json first
     if group == "default" and LIBRARY_FILE.exists():
-    with open(LIBRARY_FILE, 'r') as f:
+        with open(LIBRARY_FILE, 'r') as f:
             data = json.load(f)
             # Migrate to new structure if needed
             if "groups" not in data:
@@ -77,7 +77,7 @@ def save_library(data: Dict, group: str = "default"):
     
     # For backward compatibility, also save to old location if default
     if group == "default":
-    atomic_write(LIBRARY_FILE, data)
+        atomic_write(LIBRARY_FILE, data)
 
 
 def list_library_groups() -> List[str]:
