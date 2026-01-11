@@ -281,8 +281,19 @@ export default function Home() {
 
     const recipe = recipeData.recipe
     
-    // Handle ChatGPT-generated recipes
+    // Handle ChatGPT-generated recipes (structured format)
     if (recipeData.type === 'chatgpt' || recipe.type === 'chatgpt') {
+      // New structured format with ingredients
+      if (recipe.ingredients && Array.isArray(recipe.ingredients)) {
+        const ingredientParts = recipe.ingredients.map((ing: any) => {
+          if (ing.grams !== undefined) {
+            return `${ing.paint_name} ${ing.percentage.toFixed(2)}% (${ing.grams.toFixed(2)}g)`
+          }
+          return `${ing.paint_name} ${ing.percentage.toFixed(2)}%`
+        })
+        return ingredientParts.join(' + ')
+      }
+      // Fallback to old instructions format for backward compatibility
       return recipe.instructions || 'Recipe instructions from ChatGPT'
     }
     
