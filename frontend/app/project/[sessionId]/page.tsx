@@ -48,6 +48,9 @@ export default function ProjectionViewer() {
   const containerRef = useRef<HTMLDivElement>(null)
   const mouseTimerRef = useRef<NodeJS.Timeout>()
   
+  // Store colored mask data URL - MUST be before any early returns
+  const [coloredMaskUrl, setColoredMaskUrl] = useState<string | null>(null)
+  
   // Load session data
   useEffect(() => {
     const stored = localStorage.getItem(`session_${sessionId}`)
