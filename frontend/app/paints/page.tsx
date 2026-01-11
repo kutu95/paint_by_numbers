@@ -200,66 +200,6 @@ export default function PaintsPage() {
     }
   }
 
-  const handleLoadMatisseLibrary = async () => {
-    if (!confirm('Add Derivan Matisse paints to your library? Existing paints with the same name will be skipped.')) return
-
-    const matissePaints = [
-      { name: 'Titanium White', hex_approx: '#F5F5F5', notes: 'Series 1' },
-      { name: 'Red Oxide', hex_approx: '#A0522D', notes: 'Series 1' },
-      { name: 'Phthalo Blue', hex_approx: '#003D82', notes: 'Series 2' },
-      { name: 'Carbon Black', hex_approx: '#1A1A1A', notes: 'Series 1' },
-      { name: 'Yellow Oxide', hex_approx: '#DAA520', notes: 'Series 1' },
-      { name: 'Australian Olive Green', hex_approx: '#6B8E23', notes: 'Series 2' },
-    ]
-
-    try {
-      let added = 0
-      let skipped = 0
-      
-      for (const paint of matissePaints) {
-        const formDataObj = new FormData()
-        formDataObj.append('name', paint.name)
-        formDataObj.append('hex_approx', paint.hex_approx)
-        formDataObj.append('notes', paint.notes)
-
-        try {
-          const response = await fetch(`${API_BASE_URL}/api/paint/library`, {
-            method: 'POST',
-            body: formDataObj,
-          })
-          
-          if (response.ok) {
-            added++
-          } else if (response.status === 400) {
-            // Paint already exists, skip it
-            skipped++
-            const errorData = await response.json().catch(() => ({}))
-            console.log(`Paint ${paint.name} already exists, skipping`)
-          } else {
-            // Other error
-            const errorData = await response.json().catch(() => ({}))
-            console.error(`Failed to add ${paint.name}:`, errorData)
-          }
-        } catch (error) {
-          // Network error
-          console.error(`Network error adding ${paint.name}:`, error)
-        }
-      }
-      
-      if (added > 0) {
-        alert(`Added ${added} paint(s) to library. ${skipped > 0 ? `${skipped} paint(s) were already in the library.` : ''} Remember to calibrate them for accurate recipe generation.`)
-      } else if (skipped === matissePaints.length) {
-        alert('All Matisse paints are already in your library.')
-      } else {
-        alert('Failed to add some paints. Check the console for details.')
-      }
-      
-      loadPaints()
-    } catch (error) {
-      console.error('Error:', error)
-      alert('Failed to add Matisse paints')
-    }
-  }
 
   if (loading) {
     return (
@@ -291,12 +231,6 @@ export default function PaintsPage() {
             >
               + Add Paint
             </button>
-            <button
-              onClick={handleLoadMatisseLibrary}
-              className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded"
-            >
-              Load Matisse Library
-            </button>
           </div>
         </div>
 
@@ -316,6 +250,17 @@ export default function PaintsPage() {
               ))}
             </select>
             <button
+              onClick={() => {
+                const currentGroup = libraryGroups.find(g => g.group === selectedGroup)
+                if (currentGroup) {
+                  handleRenameGroup(selectedGroup, currentGroup.name)
+                }
+              }}
+              className="px-3 py-2 bg-gray-600 hover:bg-gray-500 rounded text-sm"
+            >
+              Rename Group
+            </button>
+            <button
               onClick={() => setShowCreateGroup(true)}
               className="px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm"
             >
@@ -323,6 +268,40 @@ export default function PaintsPage() {
             </button>
           </div>
         </div>
+
+        {/* Rename Group Form */}
+        {renamingGroup && (
+          <div className="mb-6 p-4 bg-gray-800 rounded">
+            <h3 className="font-bold mb-3">Rename Library Group</h3>
+            <form onSubmit={handleRenameGroupSubmit} className="flex gap-3">
+              <input
+                type="text"
+                value={renameGroupName}
+                onChange={(e) => setRenameGroupName(e.target.value)}
+                placeholder="New library name"
+                className="flex-1 px-3 py-2 bg-gray-700 rounded border border-gray-600"
+                required
+                autoFocus
+              />
+              <button
+                type="submit"
+                className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded"
+              >
+                Rename
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRenamingGroup(null)
+                  setRenameGroupName('')
+                }}
+                className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded"
+              >
+                Cancel
+              </button>
+            </form>
+          </div>
+        )}
 
         {/* Create New Group Form */}
         {showCreateGroup && (
