@@ -520,6 +520,8 @@ async def generate_recipes_from_palette(
                 continue
             
             # Check if recipe is already cached (unless forcing regeneration)
+            # Recipes are cached by COLOR (hex value), not by layer/palette index
+            # This ensures recipes are reused across images when colors match
             if not force:
                 cached = get_cached_recipe(library_group, target_hex)
                 if cached:
