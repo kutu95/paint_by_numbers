@@ -543,82 +543,189 @@ async def generate_recipes_from_palette(
             else:
                 logger.info(f"Generating new recipe for color {target_hex} in group {library_group}")
             
-            # Build list of available paints with their colors
-            paint_list = []
+            # Build paint set structure for function calling
+            paint_set_paints = []
             for paint in paints:
-                paint_name = paint.get('name', paint.get('id', 'Unknown'))
-                paint_hex = paint.get('hex_approx', '#000000')
-                paint_list.append(f"- {paint_name} (hex: {paint_hex})")
+                paint_set_paints.append({
+                    "id": paint.get('id', paint.get('name', 'Unknown').upper()[:1]),
+                    "name": paint.get('name', paint.get('id', 'Unknown')),
+                    "pigments": paint.get('notes', 'Unknown')
+                })
             
-            paints_text = "\n".join(paint_list)
+            # Build paint set info (get library name if available)
+            library_name = library.get('name', library_group.replace("-", " ").title())
+            paint_set = {
+                "brand": library_name,  # Use library name as brand
+                "range": f"{library_name} Acrylics",
+                "paints": paint_set_paints
+            }
             
-            # Create prompt for ChatGPT - more explicit and detailed
-            prompt = f"""You are an expert paint mixing specialist. I need you to create a paint mixing recipe to match a specific target color.
+            # System prompt
+            system_prompt = """You are an expert paint mixer for artist acrylics and mural work.
 
-TARGET COLOR: {target_hex}
+Your task is to generate practical, repeatable paint mixing recipes that approximate given target colors using ONLY the provided paint set.
 
-AVAILABLE PAINTS:
-{paints_text}
+You MUST call the provided function `return_paint_recipes` exactly once and return structured data that conforms strictly to the function schema. Do not output any prose or explanation outside the function call.
 
-INSTRUCTIONS:
-1. Analyze the target color {target_hex} and determine which paints from the list above should be mixed
-2. Use ONLY the paints listed above - do not suggest paints that are not in the list
-3. Provide a mixing recipe with exact percentages
-4. The total of all percentages must equal 100%
-5. Use 2-4 colors maximum (plus white if needed for lightening)
-6. Format your response EXACTLY as: "White X% + PaintName1 Y% + PaintName2 Z% + PaintName3 W%"
-7. Use the EXACT paint names as listed above (case-sensitive)
-8. If white is not needed, omit it from the recipe
-9. Be precise - this is for actual paint mixing, not approximations
+Rules and constraints:
+- Use ONLY the paints provided. Never invent or substitute paints.
+- Default output is percentages that sum to 100.00 (±0.05).
+- If `total_grams` is provided and greater than zero, also calculate grams for each ingredient such that the total equals `total_grams` (±0.05g). Percentages must still be included.
+- Assume subtractive paint mixing; HEX values are approximations.
+- Prefer tints (mostly Titanium White) for light colors.
+- Use Carbon Black sparingly unless the target is near-black.
+- Neutralize saturation primarily with oxides rather than black.
+- Keep procedures practical and step-based; mixing order matters.
+- Provide a clear mixing strategy, expected result, adjustment ladder (micro tweaks), and practical tips.
+- Ingredient percentages and grams must be internally consistent and validated.
 
-Provide your recipe now:"""
+Quality guidelines:
+- Light colors should be predominantly white.
+- Dark colors should start from black or deep blue-black.
+- Muted colors should be neutralized carefully to avoid muddiness.
+- Adjustment ladders must use very small increments (e.g. 0.01–0.05 parts).
 
-            # Call ChatGPT with better error handling
+Now generate the recipes using the following inputs and return them via the function call only."""
+            
+            # Define function schema
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "return_paint_recipes",
+                        "description": "Return paint mixing recipes for target HEX colors",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "recipes": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "target_hex": {
+                                                "type": "string",
+                                                "description": "Target color in HEX format (e.g., #FF0000)"
+                                            },
+                                            "ingredients": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "paint_name": {
+                                                            "type": "string",
+                                                            "description": "Exact name of the paint as provided in the paint set"
+                                                        },
+                                                        "percentage": {
+                                                            "type": "number",
+                                                            "description": "Percentage of this ingredient (0-100)"
+                                                        },
+                                                        "grams": {
+                                                            "type": "number",
+                                                            "description": "Grams of this ingredient (only if total_grams was provided)"
+                                                        }
+                                                    },
+                                                    "required": ["paint_name", "percentage"]
+                                                },
+                                                "description": "List of paint ingredients with percentages"
+                                            },
+                                            "mixing_strategy": {
+                                                "type": "string",
+                                                "description": "Step-by-step mixing procedure"
+                                            },
+                                            "expected_result": {
+                                                "type": "string",
+                                                "description": "Description of the expected mixed color"
+                                            },
+                                            "adjustment_ladder": {
+                                                "type": "string",
+                                                "description": "Micro adjustments for fine-tuning (small increments)"
+                                            },
+                                            "tips": {
+                                                "type": "string",
+                                                "description": "Practical tips for mixing this color"
+                                            }
+                                        },
+                                        "required": ["target_hex", "ingredients", "mixing_strategy", "expected_result", "adjustment_ladder", "tips"]
+                                    }
+                                }
+                            },
+                            "required": ["recipes"]
+                        }
+                    }
+                }
+            ]
+            
+            # Build user message
+            user_message = json.dumps({
+                "paint_set": paint_set,
+                "targets": [target_hex]
+            })
+            
+            # Call ChatGPT with function calling
             try:
                 response = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
                         {
                             "role": "system",
-                            "content": "You are an expert paint mixing specialist. You provide precise, practical paint mixing recipes with exact percentages. You only use paints from the provided list and always ensure percentages total 100%."
+                            "content": system_prompt
                         },
                         {
                             "role": "user",
-                            "content": prompt
+                            "content": user_message
                         }
                     ],
-                    max_tokens=500,
-                    temperature=0.2  # Lower temperature for more consistent results
+                    tools=tools,
+                    tool_choice={"type": "function", "function": {"name": "return_paint_recipes"}},
+                    temperature=0.2
                 )
                 
                 if not response or not response.choices or len(response.choices) == 0:
                     raise ValueError("ChatGPT returned empty response")
                 
-                if not response.choices[0].message or not response.choices[0].message.content:
-                    raise ValueError("ChatGPT response has no content")
+                message = response.choices[0].message
+                if not message:
+                    raise ValueError("ChatGPT response has no message")
                 
-                instructions = response.choices[0].message.content.strip()
+                # Check for function call
+                if not message.tool_calls or len(message.tool_calls) == 0:
+                    raise ValueError("ChatGPT did not call the required function")
                 
-                if not instructions or len(instructions) < 10:
-                    raise ValueError(f"ChatGPT returned invalid/short response: {instructions[:50]}")
+                tool_call = message.tool_calls[0]
+                if tool_call.function.name != "return_paint_recipes":
+                    raise ValueError(f"ChatGPT called wrong function: {tool_call.function.name}")
                 
-                logger.info(f"ChatGPT response for {target_hex}: {instructions[:100]}...")
+                # Parse function arguments
+                function_args = json.loads(tool_call.function.arguments)
+                recipes_data = function_args.get("recipes", [])
                 
-                # Store the ChatGPT response as a chatgpt recipe type
-                recipe_data = {
-                    "instructions": instructions,
+                if not recipes_data or len(recipes_data) == 0:
+                    raise ValueError("ChatGPT returned no recipes")
+                
+                recipe_data = recipes_data[0]  # Get first (and only) recipe
+                
+                # Format recipe for storage (keep structured data)
+                recipe_storage = {
+                    "target_hex": recipe_data.get("target_hex", target_hex),
+                    "ingredients": recipe_data.get("ingredients", []),
+                    "mixing_strategy": recipe_data.get("mixing_strategy", ""),
+                    "expected_result": recipe_data.get("expected_result", ""),
+                    "adjustment_ladder": recipe_data.get("adjustment_ladder", ""),
+                    "tips": recipe_data.get("tips", ""),
                     "type": "chatgpt"
                 }
                 
+                logger.info(f"ChatGPT generated recipe for {target_hex} with {len(recipe_data.get('ingredients', []))} ingredients")
+                
                 # Cache the recipe for future use
                 cache_recipe(library_group, target_hex, {
-                    "recipe": recipe_data,
+                    "recipe": recipe_storage,
                     "type": "chatgpt"
                 })
                 
                 recipes.append({
                     "palette_index": color['index'],
-                    "recipe": recipe_data,
+                    "recipe": recipe_storage,
                     "type": "chatgpt"
                 })
                 
