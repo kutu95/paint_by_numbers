@@ -284,14 +284,25 @@ export default function Home() {
     // Handle ChatGPT-generated recipes (structured format)
     if (recipeData.type === 'chatgpt' || recipe.type === 'chatgpt') {
       // New structured format with ingredients
-      if (recipe.ingredients && Array.isArray(recipe.ingredients)) {
+      if (recipe.ingredients && Array.isArray(recipe.ingredients) && recipe.ingredients.length > 0) {
         const ingredientParts = recipe.ingredients.map((ing: any) => {
-          if (ing.grams !== undefined) {
-            return `${ing.paint_name} ${ing.percentage.toFixed(2)}% (${ing.grams.toFixed(2)}g)`
+          if (!ing || !ing.paint_name) {
+            console.warn('Invalid ingredient in recipe:', ing)
+            return null
           }
-          return `${ing.paint_name} ${ing.percentage.toFixed(2)}%`
-        })
-        return ingredientParts.join(' + ')
+          const percentage = ing.percentage !== undefined ? ing.percentage : 0
+          if (ing.grams !== undefined) {
+            return `${ing.paint_name} ${percentage.toFixed(2)}% (${ing.grams.toFixed(2)}g)`
+          }
+          return `${ing.paint_name} ${percentage.toFixed(2)}%`
+        }).filter((part: string | null) => part !== null)
+        if (ingredientParts.length > 0) {
+          return ingredientParts.join(' + ')
+        }
+      }
+      // Log if we have recipe but no valid ingredients
+      if (recipe.ingredients) {
+        console.warn('Recipe has ingredients array but no valid ingredients:', recipe)
       }
       // Fallback to old instructions format for backward compatibility
       return recipe.instructions || 'Recipe instructions from ChatGPT'
