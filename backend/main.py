@@ -689,25 +689,46 @@ Now generate the recipes using the following inputs and return them via the func
                 
                 # Check for function call
                 if not message.tool_calls or len(message.tool_calls) == 0:
+                    # Log the full message to see what we got
+                    logger.error(f"ChatGPT did not call function. Message content: {message.content if hasattr(message, 'content') else 'N/A'}")
+                    logger.error(f"Full message: {message}")
                     raise ValueError("ChatGPT did not call the required function")
                 
                 tool_call = message.tool_calls[0]
                 if tool_call.function.name != "return_paint_recipes":
+                    logger.error(f"ChatGPT called wrong function: {tool_call.function.name}")
                     raise ValueError(f"ChatGPT called wrong function: {tool_call.function.name}")
                 
                 # Parse function arguments
-                function_args = json.loads(tool_call.function.arguments)
+                try:
+                    function_args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse function arguments: {tool_call.function.arguments}")
+                    logger.error(f"JSON decode error: {e}")
+                    raise ValueError(f"Invalid JSON in function arguments: {e}")
+                
                 recipes_data = function_args.get("recipes", [])
                 
                 if not recipes_data or len(recipes_data) == 0:
+                    logger.error(f"ChatGPT returned no recipes. Function args: {function_args}")
                     raise ValueError("ChatGPT returned no recipes")
                 
                 recipe_data = recipes_data[0]  # Get first (and only) recipe
                 
+                # Validate recipe data
+                if not recipe_data:
+                    logger.error(f"Recipe data is None or empty: {recipe_data}")
+                    raise ValueError("Recipe data is empty")
+                
+                ingredients = recipe_data.get("ingredients", [])
+                if not ingredients or len(ingredients) == 0:
+                    logger.error(f"Recipe has no ingredients. Recipe data: {recipe_data}")
+                    raise ValueError("Recipe has no ingredients")
+                
                 # Format recipe for storage (keep structured data)
                 recipe_storage = {
                     "target_hex": recipe_data.get("target_hex", target_hex),
-                    "ingredients": recipe_data.get("ingredients", []),
+                    "ingredients": ingredients,
                     "mixing_strategy": recipe_data.get("mixing_strategy", ""),
                     "expected_result": recipe_data.get("expected_result", ""),
                     "adjustment_ladder": recipe_data.get("adjustment_ladder", ""),
@@ -715,7 +736,7 @@ Now generate the recipes using the following inputs and return them via the func
                     "type": "chatgpt"
                 }
                 
-                logger.info(f"ChatGPT generated recipe for {target_hex} with {len(recipe_data.get('ingredients', []))} ingredients")
+                logger.info(f"ChatGPT generated recipe for {target_hex} with {len(ingredients)} ingredients: {[ing.get('paint_name') for ing in ingredients]}")
                 
                 # Cache the recipe for future use
                 cache_recipe(library_group, target_hex, {
