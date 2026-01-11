@@ -710,7 +710,15 @@ export default function Home() {
                           <div className="text-sm text-gray-300">
                             {formatRecipe(recipeData)}
                           </div>
-                          {recipe && recipeData.type !== 'chatgpt' && (
+                          {recipe && (recipeData.type === 'chatgpt' || recipe.type === 'chatgpt') && recipe.ingredients && (
+                            <div className="text-xs text-gray-400 mt-2 space-y-1">
+                              {recipe.mixing_strategy && <div><strong>Strategy:</strong> {recipe.mixing_strategy}</div>}
+                              {recipe.expected_result && <div><strong>Expected:</strong> {recipe.expected_result}</div>}
+                              {recipe.adjustment_ladder && <div><strong>Adjustments:</strong> {recipe.adjustment_ladder}</div>}
+                              {recipe.tips && <div><strong>Tips:</strong> {recipe.tips}</div>}
+                            </div>
+                          )}
+                          {recipe && recipeData.type !== 'chatgpt' && recipe.type !== 'chatgpt' && (
                             <div className="text-xs text-gray-400 mt-1 flex items-center gap-2 flex-wrap">
                               {recipe.uncalibrated && (
                                 <span className="px-2 py-0.5 rounded text-xs bg-yellow-600/30 text-yellow-300 border border-yellow-500/50">
