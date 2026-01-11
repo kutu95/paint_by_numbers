@@ -300,31 +300,31 @@ def find_best_one_pigment_recipe(target_lab: List[float], paint_id: str, paint_h
     
     # If calibration exists, use it (more accurate)
     if calibration_file.exists():
-    with open(calibration_file, 'r') as f:
-        calibration = json.load(f)
-    
-    samples = calibration.get('samples', [])
+        with open(calibration_file, 'r') as f:
+            calibration = json.load(f)
+        
+        samples = calibration.get('samples', [])
         if samples:
-    # Search for best ratio
-    best_ratio = None
-    best_error = float('inf')
-    
-    # Test ratios from 0 to 0.5 in small steps
-    for test_ratio in np.arange(0.0, 0.51, 0.01):
-        predicted_lab = interpolate_lab_from_calibration(calibration, test_ratio)
-        if predicted_lab:
-            error = delta_e_lab(target_lab, predicted_lab)
-            if error < best_error:
-                best_error = error
-                best_ratio = test_ratio
-    
+            # Search for best ratio
+            best_ratio = None
+            best_error = float('inf')
+            
+            # Test ratios from 0 to 0.5 in small steps
+            for test_ratio in np.arange(0.0, 0.51, 0.01):
+                predicted_lab = interpolate_lab_from_calibration(calibration, test_ratio)
+                if predicted_lab:
+                    error = delta_e_lab(target_lab, predicted_lab)
+                    if error < best_error:
+                        best_error = error
+                        best_ratio = test_ratio
+            
             if best_ratio is not None:
-    return {
-        'pigment_id': paint_id,
-        'pigment_ratio': best_ratio,
-        'white_ratio': 1.0 - best_ratio,
-        'error': best_error
-    }
+                return {
+                    'pigment_id': paint_id,
+                    'pigment_ratio': best_ratio,
+                    'white_ratio': 1.0 - best_ratio,
+                    'error': best_error
+                }
 
     # Fallback: Use approximate color if no calibration (less accurate but better than nothing)
     if paint_hex:
@@ -396,15 +396,15 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
     
     # Try calibrated first if both exist
     if cal1_file.exists() and cal2_file.exists():
-    with open(cal1_file, 'r') as f:
-        cal1 = json.load(f)
-    with open(cal2_file, 'r') as f:
-        cal2 = json.load(f)
-    
+        with open(cal1_file, 'r') as f:
+            cal1 = json.load(f)
+        with open(cal2_file, 'r') as f:
+            cal2 = json.load(f)
+        
         # Fine grid search for better accuracy
-    best_error = float('inf')
-    best_recipe = None
-    
+        best_error = float('inf')
+        best_recipe = None
+        
         # Allow up to 60% total pigment (40% white minimum)
         max_total_pigment = 0.6
         for p1_ratio in np.arange(0.02, 0.35, 0.02):
@@ -413,33 +413,33 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
                     continue
                 # Ensure minimum ratio for each pigment (at least 2% each)
                 if p1_ratio < 0.02 or p2_ratio < 0.02:
-                continue
-            
-            # Approximate: blend the two single-pigment Labs at their ratios
-            lab1 = interpolate_lab_from_calibration(cal1, p1_ratio)
-            lab2 = interpolate_lab_from_calibration(cal2, p2_ratio)
-            
-            if lab1 and lab2:
-                # Simple weighted blend (approximation)
-                white_ratio = 1.0 - p1_ratio - p2_ratio
-                blended_lab = [
-                    lab1[0] * p1_ratio + lab2[0] * p2_ratio + 100.0 * white_ratio * 0.9,  # Approximate white Lab
-                    lab1[1] * p1_ratio + lab2[1] * p2_ratio,
-                    lab1[2] * p1_ratio + lab2[2] * p2_ratio
-                ]
+                    continue
                 
-                error = delta_e_lab(target_lab, blended_lab)
-                if error < best_error:
-                    best_error = error
-                    best_recipe = {
-                        'pigment1_id': paint_id1,
-                        'pigment1_ratio': p1_ratio,
-                        'pigment2_id': paint_id2,
-                        'pigment2_ratio': p2_ratio,
-                        'white_ratio': white_ratio,
+                # Approximate: blend the two single-pigment Labs at their ratios
+                lab1 = interpolate_lab_from_calibration(cal1, p1_ratio)
+                lab2 = interpolate_lab_from_calibration(cal2, p2_ratio)
+                
+                if lab1 and lab2:
+                    # Simple weighted blend (approximation)
+                    white_ratio = 1.0 - p1_ratio - p2_ratio
+                    blended_lab = [
+                        lab1[0] * p1_ratio + lab2[0] * p2_ratio + 100.0 * white_ratio * 0.9,  # Approximate white Lab
+                        lab1[1] * p1_ratio + lab2[1] * p2_ratio,
+                        lab1[2] * p1_ratio + lab2[2] * p2_ratio
+                    ]
+                    
+                    error = delta_e_lab(target_lab, blended_lab)
+                    if error < best_error:
+                        best_error = error
+                        best_recipe = {
+                            'pigment1_id': paint_id1,
+                            'pigment1_ratio': p1_ratio,
+                            'pigment2_id': paint_id2,
+                            'pigment2_ratio': p2_ratio,
+                            'white_ratio': white_ratio,
                             'error': best_error,
                             'type': 'two_pigment'
-                    }
+                        }
         
         if best_recipe:
             return best_recipe
@@ -997,7 +997,7 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
                             if not target_is_achromatic:
                                 achromatic_count = sum([is_achromatic(p) for p in [paint1, paint2, paint3, paint4]])
                                 if achromatic_count >= 2:
-                    continue
+                                    continue
                             
                             recipe = find_best_multi_pigment_recipe(
                                 target_lab,
@@ -1034,7 +1034,7 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
                         if not target_is_achromatic:
                             achromatic_count = sum([is_achromatic(p) for p in [paint1, paint2, paint3]])
                             if achromatic_count >= 2:  # Don't allow 2+ achromatic in 3-pigment mix
-                        continue
+                                continue
                         
                         recipe = find_best_multi_pigment_recipe(
                             target_lab,
