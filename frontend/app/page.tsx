@@ -412,6 +412,16 @@ export default function Home() {
       const data = await response.json()
       const recipes = data.recipes || []
       
+      // Debug logging
+      console.log('Received recipes from API:', recipes)
+      if (recipes.length > 0) {
+        console.log('First recipe structure:', recipes[0])
+        if (recipes[0].recipe) {
+          console.log('First recipe data:', recipes[0].recipe)
+          console.log('First recipe ingredients:', recipes[0].recipe.ingredients)
+        }
+      }
+      
       if (recipes.length === 0) {
         alert('No recipes were generated. Make sure you have paints in the selected library.')
         return

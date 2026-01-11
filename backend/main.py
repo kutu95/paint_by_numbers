@@ -737,6 +737,7 @@ Now generate the recipes using the following inputs and return them via the func
                 }
                 
                 logger.info(f"ChatGPT generated recipe for {target_hex} with {len(ingredients)} ingredients: {[ing.get('paint_name') for ing in ingredients]}")
+                logger.debug(f"Full recipe storage: {json.dumps(recipe_storage, indent=2)}")
                 
                 # Cache the recipe for future use
                 cache_recipe(library_group, target_hex, {
