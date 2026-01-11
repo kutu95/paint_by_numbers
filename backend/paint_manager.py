@@ -47,7 +47,7 @@ def load_library(group: str = "default") -> Dict:
     """
     # For backward compatibility, check old library.json first
     if group == "default" and LIBRARY_FILE.exists():
-        with open(LIBRARY_FILE, 'r') as f:
+    with open(LIBRARY_FILE, 'r') as f:
             data = json.load(f)
             # Migrate to new structure if needed
             if "groups" not in data:
