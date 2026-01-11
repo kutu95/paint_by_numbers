@@ -257,15 +257,32 @@ def smart_overpaint_expansion(
     max_side: int,
     gamma: float = 1.5
 ) -> Dict[int, np.ndarray]:
-    """Apply smart overpaint expansion with gamma scaling."""
+    """Apply smart overpaint expansion with gamma scaling.
+    
+    Improved algorithm: Final edges (won't be overpainted by later layers) are pixel-perfect.
+    Only internal edges (will be overpainted by later layers) get expansion.
+    """
     # Estimate px_per_mm (assume longest side ≈ 1000mm)
     px_per_mm = max_side / 1000.0
     r_px_base = max(1, round(overpaint_mm * px_per_mm))
     
-    painted_union = np.zeros_like(list(base_masks.values())[0], dtype=np.uint8)
+    mask_shape = list(base_masks.values())[0].shape
+    painted_union = np.zeros(mask_shape, dtype=np.uint8)
     expanded_masks = {}
     N = len(order)
     
+    # First pass: Build future painted union (what will be painted by all later layers)
+    # This tells us which areas will be covered by future layers (internal edges)
+    future_painted_unions = {}
+    for idx in range(N):
+        future_union = np.zeros(mask_shape, dtype=np.uint8)
+        # Union of all layers after this one
+        for future_idx in range(idx + 1, N):
+            future_palette_idx = order[future_idx]
+            future_union = cv2.bitwise_or(future_union, base_masks[future_palette_idx])
+        future_painted_unions[idx] = future_union
+    
+    # Second pass: Expand each layer, but only keep expansion on internal edges
     for idx, palette_idx in enumerate(order):
         base = base_masks[palette_idx].copy()
         
@@ -278,14 +295,27 @@ def smart_overpaint_expansion(
         scale = (1 - idx / max(1, N - 1)) ** gamma
         r_px = max(1, round(r_px_base * scale))
         
-        # Dilate
+        # Dilate to create expansion
         kernel = np.ones((r_px * 2 + 1, r_px * 2 + 1), np.uint8)
         expanded = cv2.dilate(base, kernel, iterations=1)
         
-        # Remove already painted areas
-        paint_mask = cv2.bitwise_and(expanded, cv2.bitwise_not(painted_union))
+        # Find the expansion area (pixels added by dilation)
+        expansion_area = cv2.bitwise_and(expanded, cv2.bitwise_not(base))
         
-        # If expanded mask becomes empty after removing painted areas, use the base mask
+        # Get future painted union for this layer (what will be painted by later layers)
+        future_union = future_painted_unions[idx]
+        
+        # Keep expansion only on internal edges (where expansion overlaps with future layers)
+        # Final edges (no overlap with future layers) get no expansion (pixel-perfect)
+        internal_expansion = cv2.bitwise_and(expansion_area, future_union)
+        
+        # Combine: base + internal expansion
+        refined_expanded = cv2.bitwise_or(base, internal_expansion)
+        
+        # Remove already painted areas
+        paint_mask = cv2.bitwise_and(refined_expanded, cv2.bitwise_not(painted_union))
+        
+        # If mask becomes empty after removing painted areas, use the base mask
         # This ensures every color that exists in the palette has at least something to paint
         if np.sum(paint_mask) == 0:
             # Use the base mask, but remove only the areas that would overlap
