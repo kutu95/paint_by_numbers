@@ -5,6 +5,9 @@ from typing import List, Tuple, Dict, Optional
 from sklearn.cluster import KMeans
 from PIL import Image
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def apply_exif_orientation(image: np.ndarray, image_path: str) -> np.ndarray:
@@ -273,17 +276,24 @@ def smart_overpaint_expansion(
     
     # First pass: Build future painted union (what will be painted by all later layers)
     # This tells us which areas will be covered by future layers (internal edges)
+    logger.info(f"Overpaint expansion: First pass - building future painted unions for {N} layers...")
     future_painted_unions = {}
     for idx in range(N):
+        layer_num = idx + 1
         future_union = np.zeros(mask_shape, dtype=np.uint8)
         # Union of all layers after this one
         for future_idx in range(idx + 1, N):
             future_palette_idx = order[future_idx]
             future_union = cv2.bitwise_or(future_union, base_masks[future_palette_idx])
         future_painted_unions[idx] = future_union
+        logger.info(f"Layer {layer_num}: First pass complete")
+    logger.info("First pass done - all future unions built")
     
     # Second pass: Expand each layer, but only keep expansion on internal edges
+    logger.info(f"Overpaint expansion: Second pass - expanding {N} layers...")
     for idx, palette_idx in enumerate(order):
+        layer_num = idx + 1
+        logger.info(f"Layer {layer_num}: Second pass - expanding...")
         base = base_masks[palette_idx].copy()
         
         # If base mask is empty, skip (this shouldn't happen after our fix, but just in case)
@@ -328,7 +338,9 @@ def smart_overpaint_expansion(
         painted_union = cv2.bitwise_or(painted_union, paint_mask)
         
         expanded_masks[palette_idx] = paint_mask
+        logger.info(f"Layer {layer_num}: Second pass done")
     
+    logger.info("Second pass done - all layers expanded")
     return expanded_masks
 
 

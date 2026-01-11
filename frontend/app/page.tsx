@@ -343,25 +343,8 @@ export default function Home() {
     loadLibraryGroups()
   }, [])
 
-  // Auto-generate recipes when library group changes and we have session data (client-side only)
-  useEffect(() => {
-    if (typeof window === 'undefined' || !mounted) return
-    if (sessionData && selectedLibraryGroup && libraryGroups.length > 0 && !loadingRecipes && libraryGroupsLoaded) {
-      // Use a ref or flag to prevent duplicate calls
-      const recipeKey = `${sessionData.session_id}_${selectedLibraryGroup}`
-      const lastGenerated = sessionStorage.getItem(`recipes_${recipeKey}`)
-      
-      if (!lastGenerated) {
-        // Delay slightly to avoid hydration issues
-        const timer = setTimeout(() => {
-          handleGenerateRecipes()
-          sessionStorage.setItem(`recipes_${recipeKey}`, 'true')
-        }, 100)
-        return () => clearTimeout(timer)
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedLibraryGroup, libraryGroupsLoaded, mounted]) // Only regenerate when group changes
+  // Recipes are now only generated when user clicks the "Generate Recipes" button
+  // (Removed auto-generation on page load)
 
   const loadLibraryGroups = async () => {
     if (typeof window === 'undefined') return
