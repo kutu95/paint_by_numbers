@@ -6,8 +6,21 @@ from sklearn.cluster import KMeans
 from PIL import Image
 import uuid
 import logging
+import hashlib
+import shutil
+import json
 
 logger = logging.getLogger(__name__)
+
+# Mask cache directory
+MASK_CACHE_DIR = Path(__file__).parent.parent / "data" / "mask_cache"
+try:
+    MASK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Mask cache directory initialized at: {MASK_CACHE_DIR}")
+    logger.info(f"Cache directory exists: {MASK_CACHE_DIR.exists()}")
+    logger.info(f"Cache directory is writable: {MASK_CACHE_DIR.is_dir()}")
+except Exception as e:
+    logger.error(f"Failed to create mask cache directory at {MASK_CACHE_DIR}: {e}")
 
 
 def apply_exif_orientation(image: np.ndarray, image_path: str) -> np.ndarray:
@@ -470,6 +483,214 @@ def generate_outline(mask: np.ndarray, style: str = 'thin') -> np.ndarray:
     return outline_rgba
 
 
+def compute_cache_key(image_path: str, n_colors: int, overpaint_mm: float, order_mode: str, 
+                     max_side: int, saturation_boost: float, detail_level: float) -> str:
+    """Compute cache key from image hash and processing parameters."""
+    # Read image file and compute hash
+    with open(image_path, 'rb') as f:
+        image_hash = hashlib.sha256(f.read()).hexdigest()[:16]  # Use first 16 chars
+    
+    # Create parameter string (normalize floats to avoid precision issues)
+    params = f"{n_colors}_{overpaint_mm:.2f}_{order_mode}_{max_side}_{saturation_boost:.2f}_{detail_level:.2f}"
+    
+    # Combine image hash with parameters
+    cache_key = f"{image_hash}_{params}"
+    logger.info(f"Computed cache key: {cache_key}")
+    return cache_key
+
+
+def get_cache_dir(cache_key: str) -> Path:
+    """Get cache directory for a cache key."""
+    return MASK_CACHE_DIR / cache_key
+
+
+def check_mask_cache(cache_key: str) -> Optional[Path]:
+    """Check if masks are cached for the given key.
+    
+    Returns:
+        Path to cache directory if found, None otherwise
+    """
+    cache_dir = get_cache_dir(cache_key)
+    logger.info(f"Checking cache at: {cache_dir}")
+    logger.info(f"Cache dir exists: {cache_dir.exists()}")
+    
+    if cache_dir.exists():
+        metadata_path = cache_dir / "cache_metadata.json"
+        logger.info(f"Metadata file exists: {metadata_path.exists()}")
+        if metadata_path.exists():
+            logger.info(f"Cache HIT for key: {cache_key}")
+            return cache_dir
+    
+    logger.info(f"Cache MISS for key: {cache_key}")
+    return None
+
+
+def load_from_cache(cache_dir: Path, output_dir: Path, order_mode: str) -> Optional[Dict]:
+    """Load masks from cache and copy to output directory.
+    
+    Args:
+        cache_dir: Path to cache directory
+        output_dir: Path to output session directory
+        order_mode: Layer ordering mode (may differ from cached order)
+    
+    Returns:
+        Processing result dict if successful, None if cache is invalid
+    """
+    try:
+        logger.info(f"Loading from cache: {cache_dir}")
+        
+        # Load metadata
+        metadata_path = cache_dir / "cache_metadata.json"
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+        
+        logger.info(f"Loaded metadata: {len(metadata.get('palette', []))} colors")
+        
+        # Copy preview
+        cached_preview = cache_dir / "preview.jpg"
+        if cached_preview.exists():
+            shutil.copy2(cached_preview, output_dir / "preview.jpg")
+            logger.info("Copied preview from cache")
+        else:
+            logger.warning("Preview not found in cache")
+        
+        # Load palette and cached order
+        palette = metadata.get('palette', [])
+        cached_order = metadata.get('order', [])
+        
+        if not palette:
+            logger.error("No palette in cache metadata")
+            return None
+        
+        # Reorder layers based on current order_mode
+        order = order_layers(palette, order_mode)
+        logger.info(f"Reordered layers for mode '{order_mode}': {order}")
+        
+        # Copy masks and generate outlines for the new order
+        layers = []
+        missing_masks = []
+        for layer_idx, palette_idx in enumerate(order):
+            # Find the cached mask file (by palette index, not layer index)
+            cached_mask = cache_dir / f"palette_{palette_idx}_mask.png"
+            if not cached_mask.exists():
+                logger.warning(f"Cached mask not found for palette index {palette_idx}")
+                missing_masks.append(palette_idx)
+                continue
+            
+            # Copy mask to new layer index
+            mask_path = output_dir / f'layer_{layer_idx}_mask.png'
+            shutil.copy2(cached_mask, mask_path)
+            
+            # Load mask to generate outlines
+            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if mask is None:
+                logger.error(f"Failed to load mask from {mask_path}")
+                continue
+            
+            # Generate outlines
+            for outline_style in ['thin', 'thick', 'glow']:
+                outline = generate_outline(mask, outline_style)
+                outline_path = output_dir / f'layer_{layer_idx}_outline_{outline_style}.png'
+                cv2.imwrite(str(outline_path), cv2.cvtColor(outline, cv2.COLOR_RGBA2BGRA))
+            
+            layers.append({
+                'layer_index': layer_idx,
+                'palette_index': palette_idx,
+                'mask_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_mask.png',
+                'outline_thin_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_outline_thin.png',
+                'outline_thick_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_outline_thick.png',
+                'outline_glow_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_outline_glow.png'
+            })
+        
+        if missing_masks:
+            logger.error(f"Missing masks for palette indices: {missing_masks}")
+            return None
+        
+        if not layers:
+            logger.error("No layers loaded from cache")
+            return None
+        
+        # Add finished layer
+        finished_layer_index = len(layers)
+        layers.append({
+            'layer_index': finished_layer_index,
+            'palette_index': -1,
+            'is_finished': True,
+            'finished_url': f'/api/sessions/{output_dir.name}/preview.jpg',
+            'mask_url': f'/api/sessions/{output_dir.name}/preview.jpg',
+            'outline_thin_url': f'/api/sessions/{output_dir.name}/preview.jpg',
+            'outline_thick_url': f'/api/sessions/{output_dir.name}/preview.jpg',
+            'outline_glow_url': f'/api/sessions/{output_dir.name}/preview.jpg'
+        })
+        
+        logger.info(f"Successfully loaded {len(layers)-1} layers from cache")
+        return {
+            'width': metadata.get('width'),
+            'height': metadata.get('height'),
+            'palette': palette,
+            'order': order,
+            'quantized_preview_url': f'/api/sessions/{output_dir.name}/preview.jpg',
+            'layers': layers
+        }
+    except Exception as e:
+        logger.error(f"Failed to load from cache: {e}", exc_info=True)
+        return None
+
+
+def save_to_cache(cache_dir: Path, output_dir: Path, result: Dict):
+    """Save processing results to cache.
+    
+    Args:
+        cache_dir: Path to cache directory
+        output_dir: Path to session output directory (source of files to cache)
+        result: Processing result dictionary
+    """
+    try:
+        logger.info(f"Saving to cache: {cache_dir}")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy preview
+        preview_src = output_dir / "preview.jpg"
+        if preview_src.exists():
+            shutil.copy2(preview_src, cache_dir / "preview.jpg")
+            logger.info("Cached preview image")
+        else:
+            logger.warning("Preview image not found to cache")
+        
+        # Save masks by palette index (not layer index) so they can be reordered
+        cached_count = 0
+        for layer in result['layers']:
+            if layer.get('is_finished'):
+                continue
+            
+            palette_idx = layer['palette_index']
+            layer_idx = layer['layer_index']
+            
+            # Copy mask
+            mask_src = output_dir / f"layer_{layer_idx}_mask.png"
+            if mask_src.exists():
+                mask_dst = cache_dir / f"palette_{palette_idx}_mask.png"
+                shutil.copy2(mask_src, mask_dst)
+                cached_count += 1
+            else:
+                logger.warning(f"Mask not found for layer {layer_idx}, palette {palette_idx}")
+        
+        # Save metadata
+        metadata = {
+            'width': result['width'],
+            'height': result['height'],
+            'palette': result['palette'],
+            'order': result['order']  # Save the order used when caching
+        }
+        metadata_path = cache_dir / "cache_metadata.json"
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        logger.info(f"Successfully cached {cached_count} masks to: {cache_dir}")
+    except Exception as e:
+        logger.error(f"Failed to save to cache: {e}", exc_info=True)
+
+
 def process_image(
     image_path: str,
     output_dir: Path,
@@ -480,7 +701,25 @@ def process_image(
     saturation_boost: float = 1.0,
     detail_level: float = 0.5
 ) -> Dict:
-    """Main processing pipeline."""
+    """Main processing pipeline with caching support."""
+    logger.info(f"process_image called: image_path={image_path}, n_colors={n_colors}, cache_dir={MASK_CACHE_DIR}")
+    
+    # Compute cache key
+    cache_key = compute_cache_key(image_path, n_colors, overpaint_mm, order_mode, 
+                                  max_side, saturation_boost, detail_level)
+    
+    # Check cache first
+    cached_dir = check_mask_cache(cache_key)
+    if cached_dir:
+        logger.info(f"Using cached masks for key: {cache_key}")
+        result = load_from_cache(cached_dir, output_dir, order_mode)
+        if result:
+            return result
+        logger.warning("Cache load failed, regenerating masks")
+    
+    # Cache miss or load failed - process normally
+    logger.info(f"Processing image (cache miss): {cache_key}")
+    
     # Load image
     image = cv2.imread(image_path)
     if image is None:
@@ -572,7 +811,7 @@ def process_image(
         'outline_glow_url': f'/api/sessions/{output_dir.name}/preview.jpg'
     })
     
-    return {
+    result = {
         'width': w,
         'height': h,
         'palette': palette,
@@ -580,4 +819,10 @@ def process_image(
         'quantized_preview_url': f'/api/sessions/{output_dir.name}/preview.jpg',
         'layers': layers
     }
+    
+    # Save to cache
+    cache_dir = get_cache_dir(cache_key)
+    save_to_cache(cache_dir, output_dir, result)
+    
+    return result
 
