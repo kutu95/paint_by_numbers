@@ -64,7 +64,7 @@ export default function PaintsPage() {
         const savedGroup = typeof window !== 'undefined' 
           ? localStorage.getItem('lastSelectedPaintLibrary') 
           : null
-        const groupExists = savedGroup && data.groups.some(g => g.group === savedGroup)
+        const groupExists = savedGroup && data.groups.some((g: LibraryGroup) => g.group === savedGroup)
         
         if (groupExists && savedGroup) {
           setSelectedGroup(savedGroup)
