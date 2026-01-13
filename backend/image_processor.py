@@ -1339,30 +1339,17 @@ def process_image(
     # Step 6: Generate outlines and save
     layers = []
     
-    # Save regular quantized layers
-    for layer_idx, palette_idx in enumerate(order):
-        mask = expanded_masks[palette_idx]
-        mask_path = output_dir / f'layer_{layer_idx}_mask.png'
-        cv2.imwrite(str(mask_path), mask)
-        
-        # Generate outlines
-        for outline_style in ['thin', 'thick', 'glow']:
-            outline = generate_outline(mask, outline_style)
-            outline_path = output_dir / f'layer_{layer_idx}_outline_{outline_style}.png'
-            cv2.imwrite(str(outline_path), cv2.cvtColor(outline, cv2.COLOR_RGBA2BGRA))
-        
-        layers.append({
-            'layer_index': layer_idx,
-            'palette_index': palette_idx,
-            'mask_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_mask.png',
-            'outline_thin_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_outline_thin.png',
-            'outline_thick_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_outline_thick.png',
-            'outline_glow_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_outline_glow.png'
-        })
+    # Save gradient ramp layers FIRST (before regular layers)
+    # For top-to-bottom gradients, paint from top (step 0) to bottom (step N-1)
+    # This means lightest to darkest for typical sky gradients
+    # Sort gradient layers by region ID and step index to ensure correct order
+    sorted_gradient_layers = sorted(
+        gradient_layers,
+        key=lambda g: (g.get('gradient_region_id', ''), g.get('gradient_step_index', 0))
+    )
     
-    # Save gradient ramp layers
-    next_layer_idx = len(layers)
-    for grad_layer in gradient_layers:
+    next_layer_idx = 0
+    for grad_layer in sorted_gradient_layers:
         grad_layer_idx = grad_layer['layer_index']
         if grad_layer_idx in gradient_masks:
             mask = gradient_masks[grad_layer_idx]
@@ -1389,6 +1376,28 @@ def process_image(
                 'outline_glow_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_glow.png'
             })
             next_layer_idx += 1
+    
+    # Save regular quantized layers (after gradient layers)
+    regular_start_idx = next_layer_idx
+    for layer_idx, palette_idx in enumerate(order):
+        mask = expanded_masks[palette_idx]
+        mask_path = output_dir / f'layer_{regular_start_idx + layer_idx}_mask.png'
+        cv2.imwrite(str(mask_path), mask)
+        
+        # Generate outlines
+        for outline_style in ['thin', 'thick', 'glow']:
+            outline = generate_outline(mask, outline_style)
+            outline_path = output_dir / f'layer_{regular_start_idx + layer_idx}_outline_{outline_style}.png'
+            cv2.imwrite(str(outline_path), cv2.cvtColor(outline, cv2.COLOR_RGBA2BGRA))
+        
+        layers.append({
+            'layer_index': regular_start_idx + layer_idx,
+            'palette_index': palette_idx,
+            'mask_url': f'/api/sessions/{output_dir.name}/layer_{regular_start_idx + layer_idx}_mask.png',
+            'outline_thin_url': f'/api/sessions/{output_dir.name}/layer_{regular_start_idx + layer_idx}_outline_thin.png',
+            'outline_thick_url': f'/api/sessions/{output_dir.name}/layer_{regular_start_idx + layer_idx}_outline_thick.png',
+            'outline_glow_url': f'/api/sessions/{output_dir.name}/layer_{regular_start_idx + layer_idx}_outline_glow.png'
+        })
     
     # Add final "finished" layer showing the complete quantized image
     finished_layer_index = len(layers)
