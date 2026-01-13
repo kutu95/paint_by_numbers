@@ -74,7 +74,11 @@ async def create_session(
     order_mode: str = Form("largest"),
     max_side: int = Form(1920),
     saturation_boost: float = Form(1.0),
-    detail_level: float = Form(0.5)
+    detail_level: float = Form(0.5),
+    enable_gradients: str = Form("true"),
+    gradient_steps_n: int = Form(9),
+    gradient_transition_mode: str = Form("dither"),
+    gradient_transition_width: int = Form(25)
 ):
     """Create a new session and process the image."""
     try:
@@ -101,6 +105,18 @@ async def create_session(
     if detail_level < 0.0 or detail_level > 1.0:
         logger.error(f"Invalid detail_level: {detail_level}")
         raise HTTPException(status_code=400, detail="detail_level must be between 0.0 and 1.0")
+    
+    # Validate gradient parameters
+    enable_gradients_bool = enable_gradients.lower() in ('true', '1', 'yes', 'on')
+    if gradient_steps_n < 5 or gradient_steps_n > 15:
+        logger.error(f"Invalid gradient_steps_n: {gradient_steps_n}")
+        raise HTTPException(status_code=400, detail="gradient_steps_n must be between 5 and 15")
+    if gradient_transition_mode not in ['off', 'dither', 'feather-preview']:
+        logger.error(f"Invalid gradient_transition_mode: {gradient_transition_mode}")
+        raise HTTPException(status_code=400, detail="gradient_transition_mode must be 'off', 'dither', or 'feather-preview'")
+    if gradient_transition_width < 5 or gradient_transition_width > 60:
+        logger.error(f"Invalid gradient_transition_width: {gradient_transition_width}")
+        raise HTTPException(status_code=400, detail="gradient_transition_width must be between 5 and 60")
     
     # Create session directory
     session_id = str(uuid.uuid4())
@@ -130,7 +146,11 @@ async def create_session(
             order_mode,
             max_side,
             saturation_boost,
-            detail_level
+            detail_level,
+            enable_gradients=enable_gradients_bool,
+            gradient_steps_n=gradient_steps_n,
+            gradient_transition_mode=gradient_transition_mode,
+            gradient_transition_width=gradient_transition_width
         )
         
         result['session_id'] = session_id

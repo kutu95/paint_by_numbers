@@ -17,6 +17,25 @@ interface Layer {
   outline_thin_url: string
   outline_thick_url: string
   outline_glow_url: string
+  is_gradient?: boolean
+  gradient_region_id?: string
+  gradient_step_index?: number
+  hex?: string
+  rgb?: number[]
+}
+
+interface GradientRegion {
+  id: string
+  bounding_box: [number, number, number, number]
+  steps_n: number
+  direction: string
+  transition_mode: string
+  transition_width_px: number
+  stops: Array<{
+    index: number
+    hex_color: string
+    rgb: number[]
+  }>
 }
 
 interface SessionResponse {
@@ -27,6 +46,7 @@ interface SessionResponse {
   order: number[]
   quantized_preview_url: string
   layers: Layer[]
+  gradient_regions?: GradientRegion[]
 }
 
 export default function Home() {
@@ -41,6 +61,10 @@ export default function Home() {
   const [maxSide, setMaxSide] = useState(1920)
   const [saturationBoost, setSaturationBoost] = useState(1.0)
   const [detailLevel, setDetailLevel] = useState(0.5)
+  const [enableGradients, setEnableGradients] = useState(true)
+  const [gradientStepsN, setGradientStepsN] = useState(9)
+  const [gradientTransitionMode, setGradientTransitionMode] = useState<'off' | 'dither' | 'feather-preview'>('dither')
+  const [gradientTransitionWidth, setGradientTransitionWidth] = useState(25)
   const [processing, setProcessing] = useState(false)
   const [sessionData, setSessionData] = useState<SessionResponse | null>(null)
   const [manualOrder, setManualOrder] = useState<number[]>([])
@@ -133,12 +157,16 @@ export default function Home() {
         maxSide,
         saturationBoost,
         detailLevel,
+        enableGradients,
+        gradientStepsN,
+        gradientTransitionMode,
+        gradientTransitionWidth,
       }
       localStorage.setItem('layerpainter_settings', JSON.stringify(settings))
     } catch (e) {
       console.error('Failed to save settings to localStorage:', e)
     }
-  }, [nColors, overpaintMm, orderMode, maxSide, saturationBoost, detailLevel])
+  }, [nColors, overpaintMm, orderMode, maxSide, saturationBoost, detailLevel, enableGradients, gradientStepsN, gradientTransitionMode, gradientTransitionWidth])
 
   // Set mounted flag and load settings from localStorage after component mounts (client-side only)
   useEffect(() => {
@@ -156,6 +184,10 @@ export default function Home() {
           if (parsed.maxSide !== undefined) setMaxSide(parsed.maxSide)
           if (parsed.saturationBoost !== undefined) setSaturationBoost(parsed.saturationBoost)
           if (parsed.detailLevel !== undefined) setDetailLevel(parsed.detailLevel)
+          if (parsed.enableGradients !== undefined) setEnableGradients(parsed.enableGradients)
+          if (parsed.gradientStepsN !== undefined) setGradientStepsN(parsed.gradientStepsN)
+          if (parsed.gradientTransitionMode !== undefined) setGradientTransitionMode(parsed.gradientTransitionMode)
+          if (parsed.gradientTransitionWidth !== undefined) setGradientTransitionWidth(parsed.gradientTransitionWidth)
         }
       } catch (e) {
         console.error('Failed to load settings from localStorage:', e)
@@ -241,6 +273,10 @@ export default function Home() {
     formData.append('max_side', maxSide.toString())
     formData.append('saturation_boost', saturationBoost.toString())
     formData.append('detail_level', detailLevel.toString())
+    formData.append('enable_gradients', enableGradients.toString())
+    formData.append('gradient_steps_n', gradientStepsN.toString())
+    formData.append('gradient_transition_mode', gradientTransitionMode)
+    formData.append('gradient_transition_width', gradientTransitionWidth.toString())
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/sessions`, {
@@ -593,6 +629,94 @@ export default function Home() {
                   <span>100% (Maximum Detail)</span>
                 </div>
               </div>
+
+              {/* Gradient-Aware Quantization Settings */}
+              <div className="col-span-2 border-t border-gray-700 pt-4 mt-4">
+                <h3 className="text-lg font-semibold mb-4">Gradient-Aware Quantization</h3>
+                <p className="text-sm text-gray-400 mb-4">
+                  Automatically detects smooth gradients (sky, water) and generates multi-step ramps instead of flat color bands.
+                </p>
+                
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      id="enableGradients"
+                      checked={enableGradients}
+                      onChange={(e) => setEnableGradients(e.target.checked)}
+                      className="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500"
+                    />
+                    <label htmlFor="enableGradients" className="text-sm">
+                      Enable gradient detection and ramp generation
+                    </label>
+                  </div>
+
+                  {enableGradients && (
+                    <>
+                      <div>
+                        <label className="block mb-2">
+                          Gradient Steps: {gradientStepsN}
+                          <span className="text-xs text-gray-400 ml-2">
+                            (Number of steps in gradient ramps, 5-15)
+                          </span>
+                        </label>
+                        <input
+                          type="range"
+                          min="5"
+                          max="15"
+                          step="1"
+                          value={gradientStepsN}
+                          onChange={(e) => setGradientStepsN(parseInt(e.target.value))}
+                          className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-600"
+                        />
+                        <div className="flex justify-between text-xs text-gray-400 mt-1">
+                          <span>5 (Fewer steps)</span>
+                          <span>9 (Default)</span>
+                          <span>15 (More steps)</span>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block mb-2">Transition Mode</label>
+                        <select
+                          value={gradientTransitionMode}
+                          onChange={(e) => setGradientTransitionMode(e.target.value as any)}
+                          className="w-full px-3 py-2 bg-gray-800 rounded text-white"
+                        >
+                          <option value="off">Off (Hard edges)</option>
+                          <option value="dither">Dither (Smooth transitions)</option>
+                          <option value="feather-preview">Feather Preview (Preview only)</option>
+                        </select>
+                      </div>
+
+                      {gradientTransitionMode !== 'off' && (
+                        <div>
+                          <label className="block mb-2">
+                            Transition Width: {gradientTransitionWidth}px
+                            <span className="text-xs text-gray-400 ml-2">
+                              (Width of transition bands between steps, 5-60px)
+                            </span>
+                          </label>
+                          <input
+                            type="range"
+                            min="5"
+                            max="60"
+                            step="5"
+                            value={gradientTransitionWidth}
+                            onChange={(e) => setGradientTransitionWidth(parseInt(e.target.value))}
+                            className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-600"
+                          />
+                          <div className="flex justify-between text-xs text-gray-400 mt-1">
+                            <span>5px (Narrow)</span>
+                            <span>25px (Default)</span>
+                            <span>60px (Wide)</span>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
             </div>
 
             <button
@@ -815,50 +939,74 @@ export default function Home() {
             <div>
               <h2 className="text-2xl font-bold mb-4">Layers</h2>
               <div className="space-y-2">
-                {(orderMode === 'manual' ? manualOrder : sessionData.order).map((paletteIdx, layerIdx) => {
-                  const layer = sessionData.layers.find((l) => l.palette_index === paletteIdx)
-                  const color = sessionData.palette.find((p) => p.index === paletteIdx)
-                  if (!layer || !color) return null
+                {sessionData.layers
+                  .filter(l => !l.is_finished) // Exclude finished layer from main list
+                  .map((layer) => {
+                    const isGradient = layer.is_gradient || false
+                    let colorHex = '#000000'
+                    let displayText = ''
+                    
+                    if (isGradient) {
+                      // Gradient layer
+                      colorHex = layer.hex || '#808080'
+                      displayText = `Gradient Step ${(layer.gradient_step_index || 0) + 1}`
+                      if (layer.gradient_region_id) {
+                        displayText += ` (${layer.gradient_region_id})`
+                      }
+                    } else {
+                      // Regular quantized layer
+                      const color = sessionData.palette.find((p) => p.index === layer.palette_index)
+                      if (!color) return null
+                      colorHex = color.hex
+                      displayText = `Palette ${layer.palette_index} - ${color.coverage.toFixed(1)}% coverage`
+                    }
 
-                  return (
-                    <div
-                      key={layerIdx}
-                      className="flex items-center gap-4 p-4 bg-gray-800 rounded"
-                    >
-                      <div className="text-lg font-mono">{layerIdx + 1}</div>
+                    return (
                       <div
-                        className="w-16 h-16 rounded border border-gray-600"
-                        style={{ backgroundColor: color.hex }}
-                      />
-                      <img
-                        src={`${API_BASE_URL}${layer.mask_url}`}
-                        alt={`Layer ${layerIdx + 1}`}
-                        className="w-16 h-16 object-contain bg-gray-700 rounded"
-                      />
-                      {orderMode === 'manual' && (
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => moveLayer(layerIdx, 'up')}
-                            disabled={layerIdx === 0}
-                            className="px-3 py-1 bg-gray-700 rounded disabled:opacity-50"
-                          >
-                            ↑
-                          </button>
-                          <button
-                            onClick={() => moveLayer(layerIdx, 'down')}
-                            disabled={layerIdx === manualOrder.length - 1}
-                            className="px-3 py-1 bg-gray-700 rounded disabled:opacity-50"
-                          >
-                            ↓
-                          </button>
+                        key={layer.layer_index}
+                        className={`flex items-center gap-4 p-4 rounded ${isGradient ? 'bg-purple-900/30 border border-purple-700' : 'bg-gray-800'}`}
+                      >
+                        <div className="text-lg font-mono">{layer.layer_index + 1}</div>
+                        <div
+                          className="w-16 h-16 rounded border border-gray-600"
+                          style={{ backgroundColor: colorHex }}
+                        />
+                        <img
+                          src={`${API_BASE_URL}${layer.mask_url}`}
+                          alt={`Layer ${layer.layer_index + 1}`}
+                          className="w-16 h-16 object-contain bg-gray-700 rounded"
+                        />
+                        {orderMode === 'manual' && !isGradient && (
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => {
+                                const orderIdx = manualOrder.indexOf(layer.palette_index)
+                                if (orderIdx >= 0) moveLayer(orderIdx, 'up')
+                              }}
+                              className="px-3 py-1 bg-gray-700 rounded disabled:opacity-50"
+                            >
+                              ↑
+                            </button>
+                            <button
+                              onClick={() => {
+                                const orderIdx = manualOrder.indexOf(layer.palette_index)
+                                if (orderIdx >= 0) moveLayer(orderIdx, 'down')
+                              }}
+                              className="px-3 py-1 bg-gray-700 rounded disabled:opacity-50"
+                            >
+                              ↓
+                            </button>
+                          </div>
+                        )}
+                        <div className="flex-1 text-sm text-gray-400">
+                          {displayText}
+                          {isGradient && (
+                            <span className="ml-2 text-xs text-purple-400">(Gradient Ramp)</span>
+                          )}
                         </div>
-                      )}
-                      <div className="flex-1 text-sm text-gray-400">
-                        Palette {paletteIdx} - {color.coverage.toFixed(1)}% coverage
                       </div>
-                    </div>
-                  )
-                })}
+                    )
+                  })}
               </div>
             </div>
 

@@ -9,6 +9,8 @@ import logging
 import hashlib
 import shutil
 import json
+import random
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +252,363 @@ def calculate_lightness(rgb: List[int]) -> float:
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
+@dataclass
+class GradientRegion:
+    """Represents a gradient region that needs special ramp-based quantization."""
+    id: str
+    bounding_box: Tuple[int, int, int, int]  # (x, y, width, height)
+    steps_n: int
+    direction: str  # 'top-to-bottom' for now
+    transition_mode: str  # 'off', 'dither', 'feather-preview'
+    transition_width_px: int
+    seed: int
+    stops: List[Dict]  # List of {index, hex_color, rgb, mask_bitmap}
+
+
+def detect_gradient_regions(
+    original_image: np.ndarray,
+    quantized_labels: np.ndarray,
+    palette: List[Dict],
+    edge_density_threshold: float = 0.05,
+    lightness_variation_threshold: float = 0.3,
+    min_region_area_ratio: float = 0.05
+) -> List[GradientRegion]:
+    """Detect gradient regions in the image.
+    
+    Args:
+        original_image: Original RGB image (will be downscaled for analysis)
+        quantized_labels: K-means labels from quantization
+        palette: Palette colors
+        edge_density_threshold: Maximum edge density to be considered gradient (0-1)
+        lightness_variation_threshold: Minimum lightness variation to be gradient (0-1)
+        min_region_area_ratio: Minimum area ratio for a region to be analyzed
+    
+    Returns:
+        List of detected gradient regions
+    """
+    h, w = original_image.shape[:2]
+    total_pixels = h * w
+    min_region_area = int(total_pixels * min_region_area_ratio)
+    
+    # Downscale original image for analysis (max 512px on long edge)
+    analysis_max_side = 512
+    if max(h, w) > analysis_max_side:
+        scale = analysis_max_side / max(h, w)
+        analysis_h = int(h * scale)
+        analysis_w = int(w * scale)
+        analysis_image = cv2.resize(original_image, (analysis_w, analysis_h), interpolation=cv2.INTER_AREA)
+        analysis_labels = cv2.resize(quantized_labels.astype(np.uint8), (analysis_w, analysis_h), interpolation=cv2.INTER_NEAREST)
+    else:
+        analysis_image = original_image
+        analysis_labels = quantized_labels
+        analysis_h, analysis_w = h, w
+        scale = 1.0
+    
+    # Convert to Lab for lightness analysis
+    lab_image = cv2.cvtColor(analysis_image, cv2.COLOR_RGB2LAB)
+    lightness = lab_image[:, :, 0].astype(np.float32)  # L channel
+    
+    # Compute edge density using Sobel
+    gray = cv2.cvtColor(analysis_image, cv2.COLOR_RGB2GRAY)
+    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    gradient_magnitude = np.sqrt(sobelx**2 + sobely**2)
+    edge_density = gradient_magnitude / 255.0  # Normalize to 0-1
+    
+    gradient_regions = []
+    region_id = 0
+    
+    # Analyze each quantized region
+    for palette_idx in range(len(palette)):
+        # Get mask for this palette color
+        region_mask = (analysis_labels == palette_idx).astype(np.uint8)
+        region_area = np.sum(region_mask)
+        
+        if region_area < min_region_area:
+            continue
+        
+        # Compute bounding box
+        coords = np.argwhere(region_mask > 0)
+        if len(coords) == 0:
+            continue
+        
+        y_min, x_min = coords.min(axis=0)
+        y_max, x_max = coords.max(axis=0)
+        bbox_h = y_max - y_min + 1
+        bbox_w = x_max - x_min + 1
+        
+        # Extract region for analysis
+        region_lightness = lightness[y_min:y_max+1, x_min:x_max+1]
+        region_edge_density = edge_density[y_min:y_max+1, x_min:x_max+1]
+        region_mask_crop = region_mask[y_min:y_max+1, x_min:x_max+1]
+        
+        # Mask to only analyze pixels in this region
+        region_lightness_masked = region_lightness[region_mask_crop > 0]
+        region_edge_density_masked = region_edge_density[region_mask_crop > 0]
+        
+        if len(region_lightness_masked) == 0:
+            continue
+        
+        # Compute edge density (mean of edge density in region)
+        mean_edge_density = np.mean(region_edge_density_masked)
+        
+        # Compute lightness variation along Y direction (top-to-bottom)
+        # Sample lightness values along vertical lines in the region
+        lightness_samples = []
+        for x in range(bbox_w):
+            col_lightness = region_lightness[:, x]
+            col_mask = region_mask_crop[:, x]
+            if np.sum(col_mask) > 0:
+                col_lightness_masked = col_lightness[col_mask > 0]
+                if len(col_lightness_masked) > 1:
+                    lightness_range = np.max(col_lightness_masked) - np.min(col_lightness_masked)
+                    lightness_samples.append(lightness_range)
+        
+        if len(lightness_samples) == 0:
+            continue
+        
+        mean_lightness_variation = np.mean(lightness_samples) / 255.0  # Normalize to 0-1
+        
+        # Classify as gradient region
+        is_gradient = (
+            mean_edge_density < edge_density_threshold and
+            mean_lightness_variation > lightness_variation_threshold
+        )
+        
+        if is_gradient:
+            # Scale bounding box back to full resolution
+            full_x_min = int(x_min / scale)
+            full_y_min = int(y_min / scale)
+            full_x_max = int(x_max / scale)
+            full_y_max = int(y_max / scale)
+            full_bbox_w = full_x_max - full_x_min + 1
+            full_bbox_h = full_y_max - full_y_min + 1
+            
+            gradient_regions.append(GradientRegion(
+                id=f"gradient_{region_id}",
+                bounding_box=(full_x_min, full_y_min, full_bbox_w, full_bbox_h),
+                steps_n=9,  # Default, will be configurable
+                direction='top-to-bottom',
+                transition_mode='dither',
+                transition_width_px=25,
+                seed=42 + region_id,  # Deterministic seed
+                stops=[]
+            ))
+            region_id += 1
+            logger.info(f"Detected gradient region {region_id-1} at ({full_x_min}, {full_y_min}), size {full_bbox_w}x{full_bbox_h}, "
+                       f"edge_density={mean_edge_density:.3f}, lightness_variation={mean_lightness_variation:.3f}")
+    
+    return gradient_regions
+
+
+def generate_gradient_ramp(
+    image: np.ndarray,
+    gradient_region: GradientRegion,
+    n_steps: int = 9
+) -> List[Dict]:
+    """Generate gradient ramp steps for a gradient region.
+    
+    Args:
+        image: RGB image (normalized resolution)
+        gradient_region: Gradient region to process
+        n_steps: Number of ramp steps (5-15)
+    
+    Returns:
+        List of stops with {index, hex_color, rgb, mask_bitmap}
+    """
+    x, y, w, h = gradient_region.bounding_box
+    img_h, img_w = image.shape[:2]
+    
+    # Clamp bounding box to image bounds
+    x = max(0, min(x, img_w - 1))
+    y = max(0, min(y, img_h - 1))
+    w = min(w, img_w - x)
+    h = min(h, img_h - y)
+    
+    if w <= 0 or h <= 0:
+        return []
+    
+    # Extract region from image
+    region_image = image[y:y+h, x:x+w].copy()
+    region_h, region_w = region_image.shape[:2]
+    
+    if region_h == 0 or region_w == 0:
+        return []
+    
+    # Convert to Lab for better color analysis
+    region_lab = cv2.cvtColor(region_image, cv2.COLOR_RGB2LAB)
+    
+    # Create bins for each step (top-to-bottom)
+    bins = [[] for _ in range(n_steps)]
+    bin_mask = np.zeros((region_h, region_w), dtype=np.int32)
+    
+    # Assign each pixel to a bin based on Y position
+    for py in range(region_h):
+        # Normalize Y position (0 at top, 1 at bottom)
+        t = py / max(1, region_h - 1)
+        bin_index = int(np.clip(np.floor(t * n_steps), 0, n_steps - 1))
+        
+        for px in range(region_w):
+            bins[bin_index].append((py, px))
+            bin_mask[py, px] = bin_index
+    
+    # Compute representative color for each bin using median in Lab space
+    stops = []
+    for step_idx in range(n_steps):
+        if len(bins[step_idx]) == 0:
+            continue
+        
+        # Collect Lab values for pixels in this bin
+        lab_values = []
+        for py, px in bins[step_idx]:
+            lab_val = region_lab[py, px]
+            lab_values.append(lab_val)
+        
+        if len(lab_values) == 0:
+            continue
+        
+        # Compute median in Lab space
+        lab_array = np.array(lab_values)
+        median_lab = np.median(lab_array, axis=0).astype(np.uint8)
+        
+        # Convert median Lab back to RGB
+        lab_3d = median_lab.reshape(1, 1, 3)
+        rgb_3d = cv2.cvtColor(lab_3d, cv2.COLOR_LAB2RGB)
+        rgb = np.clip(rgb_3d[0, 0], 0, 255).astype(int).tolist()
+        
+        # Create binary mask for this step
+        step_mask = (bin_mask == step_idx).astype(np.uint8) * 255
+        
+        stops.append({
+            'index': step_idx,
+            'hex_color': '#{:02x}{:02x}{:02x}'.format(rgb[0], rgb[1], rgb[2]),
+            'rgb': rgb,
+            'mask_bitmap': step_mask
+        })
+    
+    return stops
+
+
+def apply_dithered_transitions(
+    stops: List[Dict],
+    transition_width_px: int,
+    seed: int
+) -> List[Dict]:
+    """Apply dithered transitions between ramp steps.
+    
+    Args:
+        stops: List of stops with mask_bitmap
+        transition_width_px: Width of transition band in pixels
+        seed: Random seed for deterministic dithering
+    
+    Returns:
+        Updated stops with dithered masks
+    """
+    if len(stops) < 2 or transition_width_px <= 0:
+        return stops
+    
+    updated_stops = []
+    
+    for i in range(len(stops)):
+        current_mask = stops[i]['mask_bitmap'].copy()
+        
+        # Apply transition with next step (for top-to-bottom, next is below)
+        if i < len(stops) - 1:
+            next_mask = stops[i+1]['mask_bitmap']
+            transition_mask = create_transition_band(
+                current_mask, next_mask, transition_width_px, seed + i * 1000
+            )
+            # Add transition pixels to current mask
+            current_mask = np.maximum(current_mask, transition_mask)
+            # Remove transition pixels from next mask to avoid overlap
+            stops[i+1]['mask_bitmap'] = np.minimum(
+                stops[i+1]['mask_bitmap'],
+                (255 - transition_mask).astype(np.uint8)
+            )
+        
+        updated_stop = stops[i].copy()
+        updated_stop['mask_bitmap'] = current_mask
+        updated_stops.append(updated_stop)
+    
+    return updated_stops
+
+
+def create_transition_band(
+    step_mask: np.ndarray,
+    next_step_mask: np.ndarray,
+    width_px: int,
+    seed: int
+) -> np.ndarray:
+    """Create a dithered transition band between two adjacent ramp steps.
+    
+    For top-to-bottom gradients, creates a horizontal transition band.
+    
+    Args:
+        step_mask: Current step mask
+        next_step_mask: Next step mask
+        width_px: Width of transition band in pixels
+        seed: Random seed for deterministic dithering
+    
+    Returns:
+        Binary mask for transition pixels to add to current step
+    """
+    h, w = step_mask.shape
+    transition_mask = np.zeros((h, w), dtype=np.uint8)
+    
+    if width_px <= 0:
+        return transition_mask
+    
+    # For top-to-bottom gradient, find the boundary between steps
+    # Find the bottom edge of current step and top edge of next step
+    rng = random.Random(seed)
+    
+    # Find the bottommost row with pixels in current step
+    current_bottom = -1
+    for y in range(h - 1, -1, -1):
+        if np.any(step_mask[y, :] > 0):
+            current_bottom = y
+            break
+    
+    # Find the topmost row with pixels in next step
+    next_top = h
+    for y in range(h):
+        if np.any(next_step_mask[y, :] > 0):
+            next_top = y
+            break
+    
+    if current_bottom < 0 or next_top >= h:
+        return transition_mask
+    
+    # Create transition band in the gap between steps
+    transition_start = max(0, current_bottom - width_px // 2)
+    transition_end = min(h, next_top + width_px // 2)
+    
+    for y in range(transition_start, transition_end):
+        for x in range(w):
+            # Only process pixels that are in next step
+            if next_step_mask[y, x] == 0:
+                continue
+            
+            # Calculate distance from current step bottom
+            dist_from_current = y - current_bottom if y >= current_bottom else current_bottom - y
+            # Calculate distance from next step top
+            dist_from_next = next_top - y if y <= next_top else y - next_top
+            
+            # Use the closer distance
+            min_dist = min(dist_from_current, dist_from_next)
+            
+            if min_dist <= width_px:
+                # Probability decreases as distance increases
+                prob = 1.0 - (min_dist / width_px)
+                
+                # Use deterministic RNG based on position
+                rng.seed(seed + y * w + x)
+                if rng.random() < prob:
+                    transition_mask[y, x] = 255
+    
+    return transition_mask
+
+
 def order_layers(palette: List[Dict], order_mode: str) -> List[int]:
     """Order layers by coverage, lightness, or return manual order."""
     if order_mode == 'largest':
@@ -484,14 +843,16 @@ def generate_outline(mask: np.ndarray, style: str = 'thin') -> np.ndarray:
 
 
 def compute_cache_key(image_path: str, n_colors: int, overpaint_mm: float, order_mode: str, 
-                     max_side: int, saturation_boost: float, detail_level: float) -> str:
+                     max_side: int, saturation_boost: float, detail_level: float,
+                     enable_gradients: bool = True, gradient_steps_n: int = 9,
+                     gradient_transition_mode: str = 'dither', gradient_transition_width: int = 25) -> str:
     """Compute cache key from image hash and processing parameters."""
     # Read image file and compute hash
     with open(image_path, 'rb') as f:
         image_hash = hashlib.sha256(f.read()).hexdigest()[:16]  # Use first 16 chars
     
     # Create parameter string (normalize floats to avoid precision issues)
-    params = f"{n_colors}_{overpaint_mm:.2f}_{order_mode}_{max_side}_{saturation_boost:.2f}_{detail_level:.2f}"
+    params = f"{n_colors}_{overpaint_mm:.2f}_{order_mode}_{max_side}_{saturation_boost:.2f}_{detail_level:.2f}_{enable_gradients}_{gradient_steps_n}_{gradient_transition_mode}_{gradient_transition_width}"
     
     # Combine image hash with parameters
     cache_key = f"{image_hash}_{params}"
@@ -691,6 +1052,139 @@ def save_to_cache(cache_dir: Path, output_dir: Path, result: Dict):
         logger.error(f"Failed to save to cache: {e}", exc_info=True)
 
 
+def process_gradient_regions(
+    normalized_image: np.ndarray,
+    labels: np.ndarray,
+    palette: List[Dict],
+    gradient_steps_n: int = 9,
+    gradient_transition_mode: str = 'dither',
+    gradient_transition_width: int = 25,
+    enable_gradient_detection: bool = True
+) -> Tuple[Dict[int, np.ndarray], List[Dict], List[GradientRegion]]:
+    """Process gradient regions and generate ramp masks.
+    
+    Args:
+        original_image: Full resolution original RGB image
+        normalized_image: Normalized RGB image (used for quantization)
+        labels: K-means labels from quantization
+        palette: Palette colors
+        gradient_steps_n: Number of steps in gradient ramps (5-15)
+        gradient_transition_mode: 'off', 'dither', or 'feather-preview'
+        gradient_transition_width: Width of transition bands in pixels
+        enable_gradient_detection: Whether to detect and process gradients
+    
+    Returns:
+        Tuple of (gradient_masks_dict, gradient_layers_list, gradient_regions_list)
+        gradient_masks_dict: Maps gradient layer index to mask array
+        gradient_layers_list: List of layer dicts for gradient ramps
+        gradient_regions_list: List of detected gradient regions
+    """
+    gradient_masks = {}
+    gradient_layers = []
+    gradient_regions = []
+    
+    if not enable_gradient_detection:
+        return gradient_masks, gradient_layers, gradient_regions
+    
+    # Detect gradient regions
+    logger.info("Detecting gradient regions...")
+    gradient_regions = detect_gradient_regions(
+        normalized_image,
+        labels,
+        palette
+    )
+    
+    if len(gradient_regions) == 0:
+        logger.info("No gradient regions detected")
+        return gradient_masks, gradient_layers, gradient_regions
+    
+    logger.info(f"Detected {len(gradient_regions)} gradient regions")
+    
+    # Process each gradient region
+    gradient_layer_index = 0
+    for grad_region in gradient_regions:
+        # Update region settings
+        grad_region.steps_n = gradient_steps_n
+        grad_region.transition_mode = gradient_transition_mode
+        grad_region.transition_width_px = gradient_transition_width
+        
+        # Generate ramp steps
+        stops = generate_gradient_ramp(
+            normalized_image,
+            grad_region,
+            n_steps=gradient_steps_n
+        )
+        
+        if len(stops) == 0:
+            continue
+        
+        # Apply transitions if enabled
+        if gradient_transition_mode == 'dither':
+            stops = apply_dithered_transitions(
+                stops,
+                gradient_transition_width,
+                grad_region.seed
+            )
+        
+        grad_region.stops = stops
+        
+        # Create full-resolution masks for each stop
+        x, y, w_region, h_region = grad_region.bounding_box
+        full_h, full_w = normalized_image.shape[:2]
+        
+        for stop in stops:
+            # Stop mask is already at region size
+            stop_mask_region = stop['mask_bitmap']
+            stop_h, stop_w = stop_mask_region.shape
+            
+            # Ensure mask matches region dimensions (should already match)
+            if stop_h != h_region or stop_w != w_region:
+                stop_mask_region = cv2.resize(
+                    stop_mask_region,
+                    (w_region, h_region),
+                    interpolation=cv2.INTER_NEAREST
+                )
+            
+            # Create full image mask
+            full_mask = np.zeros((full_h, full_w), dtype=np.uint8)
+            # Clamp coordinates to image bounds
+            x_end = min(x + w_region, full_w)
+            y_end = min(y + h_region, full_h)
+            x_start = max(0, x)
+            y_start = max(0, y)
+            mask_w = x_end - x_start
+            mask_h = y_end - y_start
+            
+            # Extract the relevant portion of the region mask
+            mask_x_offset = max(0, -x)
+            mask_y_offset = max(0, -y)
+            region_mask_crop = stop_mask_region[mask_y_offset:mask_y_offset+mask_h, mask_x_offset:mask_x_offset+mask_w]
+            
+            full_mask[y_start:y_end, x_start:x_end] = region_mask_crop
+            
+            # Store mask
+            gradient_masks[gradient_layer_index] = full_mask
+            
+            # Create layer entry
+            gradient_layers.append({
+                'layer_index': gradient_layer_index,
+                'palette_index': -2,  # Special marker for gradient ramp
+                'gradient_region_id': grad_region.id,
+                'gradient_step_index': stop['index'],
+                'hex': stop['hex_color'],
+                'rgb': stop['rgb'],
+                'is_gradient': True
+            })
+            
+            gradient_layer_index += 1
+        
+        # Optional: Add glaze pass (unifying translucent layer)
+        # This can be enabled via parameter
+    
+    logger.info(f"Generated {len(gradient_layers)} gradient ramp layers")
+    return gradient_masks, gradient_layers, gradient_regions
+
+
 def process_image(
     image_path: str,
     output_dir: Path,
@@ -699,14 +1193,20 @@ def process_image(
     order_mode: str,
     max_side: int,
     saturation_boost: float = 1.0,
-    detail_level: float = 0.5
+    detail_level: float = 0.5,
+    enable_gradients: bool = True,
+    gradient_steps_n: int = 9,
+    gradient_transition_mode: str = 'dither',
+    gradient_transition_width: int = 25
 ) -> Dict:
     """Main processing pipeline with caching support."""
     logger.info(f"process_image called: image_path={image_path}, n_colors={n_colors}, cache_dir={MASK_CACHE_DIR}")
     
     # Compute cache key
     cache_key = compute_cache_key(image_path, n_colors, overpaint_mm, order_mode, 
-                                  max_side, saturation_boost, detail_level)
+                                  max_side, saturation_boost, detail_level,
+                                  enable_gradients, gradient_steps_n, 
+                                  gradient_transition_mode, gradient_transition_width)
     
     # Check cache first
     cached_dir = check_mask_cache(cache_key)
@@ -749,6 +1249,17 @@ def process_image(
     # Step 2: Quantize
     labels, quantized, palette = quantize_lab(normalized, n_colors, seed=42, saturation_boost=saturation_boost)
     
+    # Step 2.5: Process gradient regions (if enabled)
+    gradient_masks, gradient_layers, gradient_regions = process_gradient_regions(
+        normalized,  # Use normalized image for analysis and ramp generation
+        labels,
+        palette,
+        gradient_steps_n=gradient_steps_n,
+        gradient_transition_mode=gradient_transition_mode,
+        gradient_transition_width=gradient_transition_width,
+        enable_gradient_detection=enable_gradients
+    )
+    
     # Save quantized preview
     preview_path = output_dir / 'preview.jpg'
     cv2.imwrite(str(preview_path), cv2.cvtColor(quantized, cv2.COLOR_RGB2BGR))
@@ -760,8 +1271,25 @@ def process_image(
     min_area_ratio = 0.00005 + (detail_level * 0.00195)  # Range: 0.00005 to 0.002
     
     base_masks = {}
+    # Create exclusion mask for gradient regions (pixels that will be handled by gradients)
+    gradient_exclusion_mask = np.zeros((h, w), dtype=np.uint8)
+    if len(gradient_regions) > 0:
+        for grad_region in gradient_regions:
+            x, y, w_region, h_region = grad_region.bounding_box
+            # Clamp to image bounds
+            x_end = min(x + w_region, w)
+            y_end = min(y + h_region, h)
+            x_start = max(0, x)
+            y_start = max(0, y)
+            gradient_exclusion_mask[y_start:y_end, x_start:x_end] = 255
+    
     for idx in range(n_colors):
         mask = (labels == idx).astype(np.uint8) * 255
+        
+        # Remove pixels that are in gradient regions
+        if np.sum(gradient_exclusion_mask) > 0:
+            mask = cv2.bitwise_and(mask, cv2.bitwise_not(gradient_exclusion_mask))
+        
         # Get coverage for this color to inform mask cleaning
         color_coverage = palette[idx]['coverage'] if idx < len(palette) else 0.0
         cleaned = clean_mask(mask, min_area_ratio=min_area_ratio, coverage=color_coverage)
@@ -778,6 +1306,8 @@ def process_image(
     
     # Step 6: Generate outlines and save
     layers = []
+    
+    # Save regular quantized layers
     for layer_idx, palette_idx in enumerate(order):
         mask = expanded_masks[palette_idx]
         mask_path = output_dir / f'layer_{layer_idx}_mask.png'
@@ -798,6 +1328,36 @@ def process_image(
             'outline_glow_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_outline_glow.png'
         })
     
+    # Save gradient ramp layers
+    next_layer_idx = len(layers)
+    for grad_layer in gradient_layers:
+        grad_layer_idx = grad_layer['layer_index']
+        if grad_layer_idx in gradient_masks:
+            mask = gradient_masks[grad_layer_idx]
+            mask_path = output_dir / f'layer_{next_layer_idx}_mask.png'
+            cv2.imwrite(str(mask_path), mask)
+            
+            # Generate outlines
+            for outline_style in ['thin', 'thick', 'glow']:
+                outline = generate_outline(mask, outline_style)
+                outline_path = output_dir / f'layer_{next_layer_idx}_outline_{outline_style}.png'
+                cv2.imwrite(str(outline_path), cv2.cvtColor(outline, cv2.COLOR_RGBA2BGRA))
+            
+            layers.append({
+                'layer_index': next_layer_idx,
+                'palette_index': grad_layer.get('palette_index', -2),
+                'gradient_region_id': grad_layer.get('gradient_region_id'),
+                'gradient_step_index': grad_layer.get('gradient_step_index'),
+                'hex': grad_layer.get('hex'),
+                'rgb': grad_layer.get('rgb'),
+                'is_gradient': True,
+                'mask_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_mask.png',
+                'outline_thin_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_thin.png',
+                'outline_thick_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_thick.png',
+                'outline_glow_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_glow.png'
+            })
+            next_layer_idx += 1
+    
     # Add final "finished" layer showing the complete quantized image
     finished_layer_index = len(layers)
     layers.append({
@@ -811,13 +1371,34 @@ def process_image(
         'outline_glow_url': f'/api/sessions/{output_dir.name}/preview.jpg'
     })
     
+    # Serialize gradient regions for response
+    gradient_regions_data = []
+    for grad_region in gradient_regions:
+        gradient_regions_data.append({
+            'id': grad_region.id,
+            'bounding_box': grad_region.bounding_box,
+            'steps_n': grad_region.steps_n,
+            'direction': grad_region.direction,
+            'transition_mode': grad_region.transition_mode,
+            'transition_width_px': grad_region.transition_width_px,
+            'stops': [
+                {
+                    'index': stop['index'],
+                    'hex_color': stop['hex_color'],
+                    'rgb': stop['rgb']
+                }
+                for stop in grad_region.stops
+            ]
+        })
+    
     result = {
         'width': w,
         'height': h,
         'palette': palette,
         'order': order,
         'quantized_preview_url': f'/api/sessions/{output_dir.name}/preview.jpg',
-        'layers': layers
+        'layers': layers,
+        'gradient_regions': gradient_regions_data
     }
     
     # Save to cache
