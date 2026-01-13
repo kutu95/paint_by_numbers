@@ -27,7 +27,13 @@ export default function PaintsPage() {
   const [editingPaint, setEditingPaint] = useState<Paint | null>(null)
   const [formData, setFormData] = useState({ name: '', hex_approx: '#000000', notes: '' })
   const [libraryGroups, setLibraryGroups] = useState<LibraryGroup[]>([])
-  const [selectedGroup, setSelectedGroup] = useState<string>('default')
+  const [selectedGroup, setSelectedGroup] = useState<string>(() => {
+    // Load last selected group from localStorage
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('lastSelectedPaintLibrary') || 'default'
+    }
+    return 'default'
+  })
   const [showCreateGroup, setShowCreateGroup] = useState(false)
   const [newGroupName, setNewGroupName] = useState('')
   const [renamingGroup, setRenamingGroup] = useState<string | null>(null)
@@ -39,6 +45,10 @@ export default function PaintsPage() {
 
   useEffect(() => {
     if (selectedGroup) {
+      // Save selected group to localStorage
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('lastSelectedPaintLibrary', selectedGroup)
+      }
       loadPaints()
     }
   }, [selectedGroup])
@@ -48,8 +58,20 @@ export default function PaintsPage() {
       const response = await fetch(`${API_BASE_URL}/api/paint/library/groups`)
       const data = await response.json()
       setLibraryGroups(data.groups || [])
-      if (data.groups && data.groups.length > 0 && !selectedGroup) {
-        setSelectedGroup(data.groups[0].group)
+      
+      // If we have a saved group, verify it still exists, otherwise use first available
+      if (data.groups && data.groups.length > 0) {
+        const savedGroup = typeof window !== 'undefined' 
+          ? localStorage.getItem('lastSelectedPaintLibrary') 
+          : null
+        const groupExists = savedGroup && data.groups.some(g => g.group === savedGroup)
+        
+        if (groupExists && savedGroup) {
+          setSelectedGroup(savedGroup)
+        } else if (!selectedGroup || !data.groups.some(g => g.group === selectedGroup)) {
+          // Use first group if current selection doesn't exist
+          setSelectedGroup(data.groups[0].group)
+        }
       }
     } catch (error) {
       console.error('Failed to load library groups:', error)
@@ -240,7 +262,14 @@ export default function PaintsPage() {
             <label className="font-semibold">Library Group:</label>
             <select
               value={selectedGroup}
-              onChange={(e) => setSelectedGroup(e.target.value)}
+              onChange={(e) => {
+                const newGroup = e.target.value
+                setSelectedGroup(newGroup)
+                // Save to localStorage immediately
+                if (typeof window !== 'undefined') {
+                  localStorage.setItem('lastSelectedPaintLibrary', newGroup)
+                }
+              }}
               className="px-3 py-2 bg-gray-700 rounded border border-gray-600"
             >
               {libraryGroups.map((group) => (
