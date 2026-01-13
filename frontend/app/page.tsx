@@ -22,6 +22,7 @@ interface Layer {
   gradient_step_index?: number
   hex?: string
   rgb?: number[]
+  is_finished?: boolean
 }
 
 interface GradientRegion {
