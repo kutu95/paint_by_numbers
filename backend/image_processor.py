@@ -319,6 +319,8 @@ def detect_gradient_regions(
     region_id = 0
     
     # Analyze each quantized region
+    logger.info(f"Analyzing {len(palette)} palette regions, min_area={min_region_area} ({min_region_area_ratio*100:.1f}% of image)")
+    analyzed_count = 0
     for palette_idx in range(len(palette)):
         # Get mask for this palette color
         region_mask = (analysis_labels == palette_idx).astype(np.uint8)
@@ -326,6 +328,8 @@ def detect_gradient_regions(
         
         if region_area < min_region_area:
             continue
+        
+        analyzed_count += 1
         
         # Compute bounding box
         coords = np.argwhere(region_mask > 0)
@@ -375,12 +379,11 @@ def detect_gradient_regions(
             mean_lightness_variation > lightness_variation_threshold
         )
         
-        # Log details for large regions (likely candidates for gradients)
-        if region_area >= min_region_area * 2:  # Log regions at least 2x the minimum
-            logger.info(f"Region {palette_idx}: area={region_area} ({region_area/total_pixels*100:.1f}%), "
-                       f"edge_density={mean_edge_density:.3f} (threshold={edge_density_threshold}), "
-                       f"lightness_variation={mean_lightness_variation:.3f} (threshold={lightness_variation_threshold}), "
-                       f"is_gradient={is_gradient}")
+        # Log details for all analyzed regions
+        logger.info(f"Region {palette_idx}: area={region_area} ({region_area/total_pixels*100:.1f}%), "
+                   f"bbox={bbox_w}x{bbox_h}, edge_density={mean_edge_density:.3f} (threshold={edge_density_threshold}), "
+                   f"lightness_variation={mean_lightness_variation:.3f} (threshold={lightness_variation_threshold}), "
+                   f"is_gradient={is_gradient}")
         
         if is_gradient:
             # Scale bounding box back to full resolution
@@ -406,6 +409,7 @@ def detect_gradient_regions(
                        f"size {full_bbox_w}x{full_bbox_h}, edge_density={mean_edge_density:.3f}, "
                        f"lightness_variation={mean_lightness_variation:.3f}")
     
+    logger.info(f"Gradient detection complete: analyzed {analyzed_count} regions, detected {len(gradient_regions)} gradient regions")
     return gradient_regions
 
 
