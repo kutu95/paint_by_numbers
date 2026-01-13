@@ -68,7 +68,7 @@ export default function PaintsPage() {
         
         if (groupExists && savedGroup) {
           setSelectedGroup(savedGroup)
-        } else if (!selectedGroup || !data.groups.some(g => g.group === selectedGroup)) {
+        } else if (!selectedGroup || !data.groups.some((g: LibraryGroup) => g.group === selectedGroup)) {
           // Use first group if current selection doesn't exist
           setSelectedGroup(data.groups[0].group)
         }
