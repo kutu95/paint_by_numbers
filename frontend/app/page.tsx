@@ -71,10 +71,52 @@ export default function Home() {
       reader.onload = (e) => {
         const previewData = e.target?.result as string
         setPreview(previewData)
-        // Save preview to localStorage so it persists across navigation
-        localStorage.setItem('current_image_preview', previewData)
-        // Also save the file name for reference
-        localStorage.setItem('current_image_name', file.name)
+        
+        // Compress image before saving to localStorage to avoid quota errors
+        const img = new Image()
+        img.onload = () => {
+          // Create canvas to compress image
+          const canvas = document.createElement('canvas')
+          const maxWidth = 800 // Max width for compressed preview
+          const maxHeight = 600 // Max height for compressed preview
+          
+          let width = img.width
+          let height = img.height
+          
+          // Calculate new dimensions while maintaining aspect ratio
+          if (width > maxWidth || height > maxHeight) {
+            const ratio = Math.min(maxWidth / width, maxHeight / height)
+            width = width * ratio
+            height = height * ratio
+          }
+          
+          canvas.width = width
+          canvas.height = height
+          const ctx = canvas.getContext('2d')
+          
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, width, height)
+            // Convert to compressed JPEG (quality 0.7)
+            const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.7)
+            
+            // Try to save compressed preview to localStorage
+            try {
+              localStorage.setItem('current_image_preview', compressedDataUrl)
+              localStorage.setItem('current_image_name', file.name)
+            } catch (err) {
+              // If still too large, just don't save it
+              console.warn('Image too large for localStorage, preview will not persist across navigation')
+              // Remove any existing preview to free up space
+              try {
+                localStorage.removeItem('current_image_preview')
+                localStorage.removeItem('current_image_name')
+              } catch (removeErr) {
+                // Ignore removal errors
+              }
+            }
+          }
+        }
+        img.src = previewData
       }
       reader.readAsDataURL(file)
     }
