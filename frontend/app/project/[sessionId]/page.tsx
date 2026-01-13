@@ -13,6 +13,11 @@ interface Layer {
   outline_glow_url: string
   is_finished?: boolean
   finished_url?: string
+  is_gradient?: boolean
+  gradient_region_id?: string
+  gradient_step_index?: number
+  hex?: string
+  rgb?: number[]
 }
 
 interface SessionData {
@@ -290,8 +295,18 @@ export default function ProjectionViewer() {
       return
     }
 
-    const paletteColor = sessionData.palette.find(p => p.index === layerData.palette_index)
-    if (!paletteColor || !paletteColor.hex || !layerData.mask_url) {
+    // Handle gradient layers differently
+    let colorHex: string | null = null
+    if (layerData.is_gradient && layerData.hex) {
+      colorHex = layerData.hex
+    } else {
+      const paletteColor = sessionData.palette.find(p => p.index === layerData.palette_index)
+      if (paletteColor && paletteColor.hex) {
+        colorHex = paletteColor.hex
+      }
+    }
+    
+    if (!colorHex || !layerData.mask_url) {
       setColoredMaskUrl(null)
       return
     }
@@ -320,9 +335,9 @@ export default function ProjectionViewer() {
         const data = imageData.data
         
         // Convert hex to RGB
-        const r = parseInt(paletteColor.hex.slice(1, 3), 16)
-        const g = parseInt(paletteColor.hex.slice(3, 5), 16)
-        const b = parseInt(paletteColor.hex.slice(5, 7), 16)
+        const r = parseInt(colorHex.slice(1, 3), 16)
+        const g = parseInt(colorHex.slice(3, 5), 16)
+        const b = parseInt(colorHex.slice(5, 7), 16)
         
         // Replace white pixels (RGB > 200) with palette color, keep black areas transparent
         for (let i = 0; i < data.length; i += 4) {
@@ -374,8 +389,13 @@ export default function ProjectionViewer() {
     )
   }
 
-  // Get the color for this layer
-  const layerColor = sessionData?.palette?.find(p => p.index === currentLayerData?.palette_index)
+  // Get the color for this layer (handle gradient layers)
+  let layerColor: { hex: string } | undefined
+  if (currentLayerData.is_gradient && currentLayerData.hex) {
+    layerColor = { hex: currentLayerData.hex }
+  } else {
+    layerColor = sessionData?.palette?.find(p => p.index === currentLayerData?.palette_index)
+  }
 
   const baseUrl = API_BASE_URL
   const outlineUrl =
