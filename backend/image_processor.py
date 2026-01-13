@@ -269,9 +269,9 @@ def detect_gradient_regions(
     original_image: np.ndarray,
     quantized_labels: np.ndarray,
     palette: List[Dict],
-    edge_density_threshold: float = 0.05,
-    lightness_variation_threshold: float = 0.3,
-    min_region_area_ratio: float = 0.05
+    edge_density_threshold: float = 0.15,  # Increased from 0.05 - allow more edge density
+    lightness_variation_threshold: float = 0.15,  # Decreased from 0.3 - detect smaller variations
+    min_region_area_ratio: float = 0.02  # Decreased from 0.05 - detect smaller regions
 ) -> List[GradientRegion]:
     """Detect gradient regions in the image.
     
@@ -375,6 +375,13 @@ def detect_gradient_regions(
             mean_lightness_variation > lightness_variation_threshold
         )
         
+        # Log details for large regions (likely candidates for gradients)
+        if region_area >= min_region_area * 2:  # Log regions at least 2x the minimum
+            logger.info(f"Region {palette_idx}: area={region_area} ({region_area/total_pixels*100:.1f}%), "
+                       f"edge_density={mean_edge_density:.3f} (threshold={edge_density_threshold}), "
+                       f"lightness_variation={mean_lightness_variation:.3f} (threshold={lightness_variation_threshold}), "
+                       f"is_gradient={is_gradient}")
+        
         if is_gradient:
             # Scale bounding box back to full resolution
             full_x_min = int(x_min / scale)
@@ -395,8 +402,9 @@ def detect_gradient_regions(
                 stops=[]
             ))
             region_id += 1
-            logger.info(f"Detected gradient region {region_id-1} at ({full_x_min}, {full_y_min}), size {full_bbox_w}x{full_bbox_h}, "
-                       f"edge_density={mean_edge_density:.3f}, lightness_variation={mean_lightness_variation:.3f}")
+            logger.info(f"Detected gradient region {region_id-1} (palette_idx={palette_idx}) at ({full_x_min}, {full_y_min}), "
+                       f"size {full_bbox_w}x{full_bbox_h}, edge_density={mean_edge_density:.3f}, "
+                       f"lightness_variation={mean_lightness_variation:.3f}")
     
     return gradient_regions
 
@@ -1088,6 +1096,8 @@ def process_gradient_regions(
     
     # Detect gradient regions
     logger.info("Detecting gradient regions...")
+    logger.info(f"Image size: {normalized_image.shape[0]}x{normalized_image.shape[1]}, "
+                f"Palette size: {len(palette)}, Labels range: {labels.min()}-{labels.max()}")
     gradient_regions = detect_gradient_regions(
         normalized_image,
         labels,
@@ -1095,7 +1105,7 @@ def process_gradient_regions(
     )
     
     if len(gradient_regions) == 0:
-        logger.info("No gradient regions detected")
+        logger.info("No gradient regions detected - check debug logs above for region analysis")
         return gradient_masks, gradient_layers, gradient_regions
     
     logger.info(f"Detected {len(gradient_regions)} gradient regions")
