@@ -271,7 +271,7 @@ def detect_gradient_regions(
     palette: List[Dict],
     edge_density_threshold: float = 0.15,  # Increased from 0.05 - allow more edge density
     lightness_variation_threshold: float = 0.15,  # Decreased from 0.3 - detect smaller variations
-    min_region_area_ratio: float = 0.02  # Decreased from 0.05 - detect smaller regions
+    min_region_area_ratio: float = 0.005  # Decreased from 0.02 - detect much smaller regions (0.5% of image)
 ) -> List[GradientRegion]:
     """Detect gradient regions in the image.
     
@@ -290,6 +290,8 @@ def detect_gradient_regions(
     total_pixels = h * w
     min_region_area = int(total_pixels * min_region_area_ratio)
     
+    logger.info(f"Image size: {h}x{w} ({total_pixels} pixels), min_region_area={min_region_area} ({min_region_area_ratio*100:.2f}%)")
+    
     # Downscale original image for analysis (max 512px on long edge)
     analysis_max_side = 512
     if max(h, w) > analysis_max_side:
@@ -298,6 +300,7 @@ def detect_gradient_regions(
         analysis_w = int(w * scale)
         analysis_image = cv2.resize(original_image, (analysis_w, analysis_h), interpolation=cv2.INTER_AREA)
         analysis_labels = cv2.resize(quantized_labels.astype(np.uint8), (analysis_w, analysis_h), interpolation=cv2.INTER_NEAREST)
+        logger.info(f"Downscaled for analysis: {analysis_h}x{analysis_w} (scale={scale:.3f})")
     else:
         analysis_image = original_image
         analysis_labels = quantized_labels
@@ -319,14 +322,18 @@ def detect_gradient_regions(
     region_id = 0
     
     # Analyze each quantized region
-    logger.info(f"Analyzing {len(palette)} palette regions, min_area={min_region_area} ({min_region_area_ratio*100:.1f}% of image)")
+    analysis_total_pixels = analysis_h * analysis_w
+    analysis_min_area = int(analysis_total_pixels * min_region_area_ratio)
+    logger.info(f"Analyzing {len(palette)} palette regions, analysis_min_area={analysis_min_area} ({min_region_area_ratio*100:.2f}% of {analysis_total_pixels} analysis pixels)")
     analyzed_count = 0
     for palette_idx in range(len(palette)):
         # Get mask for this palette color
         region_mask = (analysis_labels == palette_idx).astype(np.uint8)
         region_area = np.sum(region_mask)
+        region_area_pct = (region_area / analysis_total_pixels) * 100
         
-        if region_area < min_region_area:
+        if region_area < analysis_min_area:
+            logger.debug(f"Region {palette_idx}: area={region_area} ({region_area_pct:.2f}%) - too small, skipping")
             continue
         
         analyzed_count += 1
@@ -380,7 +387,7 @@ def detect_gradient_regions(
         )
         
         # Log details for all analyzed regions
-        logger.info(f"Region {palette_idx}: area={region_area} ({region_area/total_pixels*100:.1f}%), "
+        logger.info(f"Region {palette_idx}: area={region_area} ({region_area_pct:.2f}%), "
                    f"bbox={bbox_w}x{bbox_h}, edge_density={mean_edge_density:.3f} (threshold={edge_density_threshold}), "
                    f"lightness_variation={mean_lightness_variation:.3f} (threshold={lightness_variation_threshold}), "
                    f"is_gradient={is_gradient}")
