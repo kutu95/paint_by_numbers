@@ -36,7 +36,7 @@ export default function ProjectionViewer() {
   const [grid, setGrid] = useState(false)
   const [inverted, setInverted] = useState(false)
   const [showColor, setShowColor] = useState(false)
-  const [outlineMode, setOutlineMode] = useState<OutlineMode>('thin')
+  const [outlineMode, setOutlineMode] = useState<OutlineMode>('off')
   const [maskOpacity, setMaskOpacity] = useState(85)
   const [registrationMode, setRegistrationMode] = useState(false)
   const [blackScreen, setBlackScreen] = useState(false)
@@ -47,6 +47,7 @@ export default function ProjectionViewer() {
   const [showDoneLayers, setShowDoneLayers] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const mouseTimerRef = useRef<NodeJS.Timeout>()
+  const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null)
   
   // Store colored mask data URL - MUST be before any early returns
   const [coloredMaskUrl, setColoredMaskUrl] = useState<string | null>(null)
@@ -134,6 +135,56 @@ export default function ProjectionViewer() {
       }
     }
   }, [])
+
+  // Touch/swipe gestures for mobile navigation
+  useEffect(() => {
+    const handleTouchStart = (e: TouchEvent) => {
+      const touch = e.touches[0]
+      touchStartRef.current = {
+        x: touch.clientX,
+        y: touch.clientY,
+        time: Date.now()
+      }
+    }
+
+    const handleTouchEnd = (e: TouchEvent) => {
+      if (!touchStartRef.current) return
+
+      const touch = e.changedTouches[0]
+      const deltaX = touch.clientX - touchStartRef.current.x
+      const deltaY = touch.clientY - touchStartRef.current.y
+      const deltaTime = Date.now() - touchStartRef.current.time
+      
+      // Minimum swipe distance (50px) and maximum time (500ms) for a valid swipe
+      const minSwipeDistance = 50
+      const maxSwipeTime = 500
+      
+      // Check if it's a horizontal swipe (more horizontal than vertical)
+      if (Math.abs(deltaX) > Math.abs(deltaY) && 
+          Math.abs(deltaX) > minSwipeDistance && 
+          deltaTime < maxSwipeTime) {
+        // Swipe left = next layer, swipe right = previous layer
+        if (deltaX < 0) {
+          navigateLayer(1) // Swipe left = next
+        } else {
+          navigateLayer(-1) // Swipe right = previous
+        }
+      }
+      
+      touchStartRef.current = null
+    }
+
+    const container = containerRef.current
+    if (container) {
+      container.addEventListener('touchstart', handleTouchStart, { passive: true })
+      container.addEventListener('touchend', handleTouchEnd, { passive: true })
+      
+      return () => {
+        container.removeEventListener('touchstart', handleTouchStart)
+        container.removeEventListener('touchend', handleTouchEnd)
+      }
+    }
+  }, [navigateLayer])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -552,7 +603,7 @@ export default function ProjectionViewer() {
                 )}
               </div>
               <div className="mt-2 text-xs text-gray-400">
-                ← → / Space: Navigate | D: Toggle Done | C: Crosshairs | G: Grid | I: Invert | K: Color | O: Outline | [ ]: Opacity | R: Registration | B: Black | W: White | S: Show Done | H: HUD | Esc: Back
+                ← → / Space / Swipe: Navigate | D: Toggle Done | C: Crosshairs | G: Grid | I: Invert | K: Color | O: Outline | [ ]: Opacity | R: Registration | B: Black | W: White | S: Show Done | H: HUD | Esc: Back
               </div>
             </div>
           )}
