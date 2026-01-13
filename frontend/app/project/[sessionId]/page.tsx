@@ -609,6 +609,12 @@ export default function ProjectionViewer() {
                 </div>
                 {!currentLayerData.is_finished && (
                   <>
+                    {currentLayerData.is_gradient && (
+                      <div className="text-purple-300">
+                        Gradient Step {(currentLayerData.gradient_step_index ?? 0) + 1}
+                        {currentLayerData.gradient_region_id && ` (${currentLayerData.gradient_region_id})`}
+                      </div>
+                    )}
                     <div>Opacity: {maskOpacity}%</div>
                     <div>Outline: {outlineMode}</div>
                     <div>{showColor ? 'Color ON' : inverted ? 'Inverted' : 'Normal'}</div>
