@@ -270,7 +270,7 @@ def detect_gradient_regions(
     quantized_labels: np.ndarray,
     palette: List[Dict],
     edge_density_threshold: float = 0.15,  # Increased from 0.05 - allow more edge density
-    lightness_variation_threshold: float = 0.15,  # Decreased from 0.3 - detect smaller variations
+    lightness_variation_threshold: float = 0.05,  # Decreased from 0.15 - detect very subtle variations (sky bands)
     min_region_area_ratio: float = 0.005  # Decreased from 0.02 - detect much smaller regions (0.5% of image)
 ) -> List[GradientRegion]:
     """Detect gradient regions in the image.
@@ -364,8 +364,10 @@ def detect_gradient_regions(
         mean_edge_density = np.mean(region_edge_density_masked)
         
         # Compute lightness variation along Y direction (top-to-bottom)
-        # Sample lightness values along vertical lines in the region
+        # For sky regions, we want to detect smooth gradients even if variation is small
+        # Use both range and standard deviation to catch subtle gradients
         lightness_samples = []
+        lightness_stds = []
         for x in range(bbox_w):
             col_lightness = region_lightness[:, x]
             col_mask = region_mask_crop[:, x]
@@ -374,22 +376,31 @@ def detect_gradient_regions(
                 if len(col_lightness_masked) > 1:
                     lightness_range = np.max(col_lightness_masked) - np.min(col_lightness_masked)
                     lightness_samples.append(lightness_range)
+                    # Also compute std dev to catch smooth gradients
+                    lightness_stds.append(np.std(col_lightness_masked))
         
         if len(lightness_samples) == 0:
             continue
         
         mean_lightness_variation = np.mean(lightness_samples) / 255.0  # Normalize to 0-1
+        mean_lightness_std = np.mean(lightness_stds) / 255.0 if lightness_stds else 0.0
+        
+        # Use the maximum of range and std to catch both step-like and smooth gradients
+        # This helps detect sky bands that have subtle but consistent variation
+        effective_variation = max(mean_lightness_variation, mean_lightness_std * 2.0)
         
         # Classify as gradient region
+        # Use effective_variation which accounts for both range and smooth gradients
         is_gradient = (
             mean_edge_density < edge_density_threshold and
-            mean_lightness_variation > lightness_variation_threshold
+            effective_variation > lightness_variation_threshold
         )
         
         # Log details for all analyzed regions
         logger.info(f"Region {palette_idx}: area={region_area} ({region_area_pct:.2f}%), "
                    f"bbox={bbox_w}x{bbox_h}, edge_density={mean_edge_density:.3f} (threshold={edge_density_threshold}), "
-                   f"lightness_variation={mean_lightness_variation:.3f} (threshold={lightness_variation_threshold}), "
+                   f"lightness_variation={mean_lightness_variation:.3f}, std={mean_lightness_std:.3f}, "
+                   f"effective_variation={effective_variation:.3f} (threshold={lightness_variation_threshold}), "
                    f"is_gradient={is_gradient}")
         
         if is_gradient:
