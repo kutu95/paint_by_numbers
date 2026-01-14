@@ -455,7 +455,126 @@ def detect_gradient_regions(
                 logger.info(f"Skipping gradient region {palette_idx} due to {overlap_ratio:.1%} overlap with existing gradient regions")
     
     logger.info(f"Gradient detection complete: analyzed {analyzed_count} regions, detected {len(gradient_regions)} gradient regions")
+    
+    # Merge adjacent/overlapping gradient regions that are likely part of the same gradient
+    # (e.g., multiple sky bands should be one gradient region)
+    if len(gradient_regions) > 1:
+        merged_regions = merge_adjacent_gradient_regions(gradient_regions, analysis_labels, analysis_h, analysis_w, scale)
+        if len(merged_regions) < len(gradient_regions):
+            logger.info(f"Merged {len(gradient_regions)} gradient regions into {len(merged_regions)} regions")
+            gradient_regions = merged_regions
+    
     return gradient_regions
+
+
+def merge_adjacent_gradient_regions(
+    gradient_regions: List[GradientRegion],
+    analysis_labels: np.ndarray,
+    analysis_h: int,
+    analysis_w: int,
+    scale: float
+) -> List[GradientRegion]:
+    """Merge adjacent gradient regions that are likely part of the same gradient.
+    
+    For example, if the sky is quantized into 3 bands, merge them into one gradient region.
+    """
+    if len(gradient_regions) <= 1:
+        return gradient_regions
+    
+    # Create masks for each region at analysis resolution
+    region_masks = []
+    for grad_region in gradient_regions:
+        x, y, w, h = grad_region.bounding_box
+        # Scale bounding box to analysis resolution
+        analysis_x = int(x * scale)
+        analysis_y = int(y * scale)
+        analysis_w_region = int(w * scale)
+        analysis_h_region = int(h * scale)
+        
+        # Create mask (simplified - just the bounding box area)
+        mask = np.zeros((analysis_h, analysis_w), dtype=np.uint8)
+        x_end = min(analysis_x + analysis_w_region, analysis_w)
+        y_end = min(analysis_y + analysis_h_region, analysis_h)
+        x_start = max(0, analysis_x)
+        y_start = max(0, analysis_y)
+        mask[y_start:y_end, x_start:x_end] = 255
+        region_masks.append(mask)
+    
+    # Group regions that are adjacent or overlapping
+    merged_groups = []
+    used = set()
+    
+    for i, grad_region in enumerate(gradient_regions):
+        if i in used:
+            continue
+        
+        # Start a new group with this region
+        group = [i]
+        used.add(i)
+        group_mask = region_masks[i].copy()
+        
+        # Find adjacent regions
+        for j in range(i + 1, len(gradient_regions)):
+            if j in used:
+                continue
+            
+            # Check if regions are adjacent (overlap or close)
+            overlap = np.sum((group_mask > 0) & (region_masks[j] > 0))
+            group_pixels = np.sum(group_mask > 0)
+            j_pixels = np.sum(region_masks[j] > 0)
+            
+            # Merge if they overlap or are very close (within 10 pixels)
+            if overlap > 0 or (group_pixels > 0 and j_pixels > 0):
+                # Check distance between bounding boxes
+                x1, y1, w1, h1 = gradient_regions[i].bounding_box
+                x2, y2, w2, h2 = gradient_regions[j].bounding_box
+                
+                # Calculate distance between boxes
+                x1_end = x1 + w1
+                y1_end = y1 + h1
+                x2_end = x2 + w2
+                y2_end = y2 + h2
+                
+                # Check if boxes overlap or are close (within 20 pixels)
+                x_overlap = not (x1_end < x2 or x2_end < x1)
+                y_overlap = not (y1_end < y2 or y2_end < y1)
+                x_gap = max(0, max(x1, x2) - min(x1_end, x2_end))
+                y_gap = max(0, max(y1, y2) - min(y1_end, y2_end))
+                
+                if (x_overlap and y_overlap) or (x_gap < 20 and y_gap < 20):
+                    group.append(j)
+                    used.add(j)
+                    group_mask = np.maximum(group_mask, region_masks[j])
+        
+        merged_groups.append(group)
+    
+    # Create merged regions
+    merged_regions = []
+    for group in merged_groups:
+        if len(group) == 1:
+            # No merging needed
+            merged_regions.append(gradient_regions[group[0]])
+        else:
+            # Merge bounding boxes
+            boxes = [gradient_regions[i].bounding_box for i in group]
+            x_min = min(box[0] for box in boxes)
+            y_min = min(box[1] for box in boxes)
+            x_max = max(box[0] + box[2] for box in boxes)
+            y_max = max(box[1] + box[3] for box in boxes)
+            
+            merged_regions.append(GradientRegion(
+                id=f"gradient_merged_{len(merged_regions)}",
+                bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
+                steps_n=gradient_regions[group[0]].steps_n,  # Use first region's settings
+                direction='top-to-bottom',
+                transition_mode=gradient_regions[group[0]].transition_mode,
+                transition_width_px=gradient_regions[group[0]].transition_width_px,
+                seed=gradient_regions[group[0]].seed,
+                stops=[]
+            ))
+            logger.info(f"Merged {len(group)} gradient regions into one: {x_min},{y_min} {x_max-x_min}x{y_max-y_min}")
+    
+    return merged_regions
 
 
 def generate_gradient_ramp(
