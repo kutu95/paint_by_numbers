@@ -10,7 +10,7 @@ import hashlib
 import shutil
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +263,7 @@ class GradientRegion:
     transition_width_px: int
     seed: int
     stops: List[Dict]  # List of {index, hex_color, rgb, mask_bitmap}
-    source_palette_indices: List[int] = None  # Which palette colors were merged into this gradient
+    source_palette_indices: List[int] = field(default_factory=list)  # Which palette colors were merged into this gradient
 
 
 def detect_gradient_regions(
