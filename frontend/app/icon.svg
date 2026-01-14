@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <!-- Background (transparent for favicon) -->
+  
+  <!-- Bottom Layer (Red) -->
+  <g transform="translate(20, 60)">
+    <!-- Top face -->
+    <polygon points="0,0 40,0 60,20 20,20" fill="#E74C3C"/>
+    <!-- Thickness edge -->
+    <polygon points="20,20 60,20 60,25 20,25" fill="#B33D31"/>
+  </g>
+  
+  <!-- Middle Layer (Orange) -->
+  <g transform="translate(15, 45)">
+    <!-- Top face -->
+    <polygon points="0,0 40,0 60,20 20,20" fill="#FDC742"/>
+    <!-- Thickness edge -->
+    <polygon points="20,20 60,20 60,25 20,25" fill="#C19932"/>
+  </g>
+  
+  <!-- Top Layer (Teal) -->
+  <g transform="translate(10, 30)">
+    <!-- Top face -->
+    <polygon points="0,0 40,0 60,20 20,20" fill="#4ECDC4"/>
+    <!-- Thickness edge -->
+    <polygon points="20,20 60,20 60,25 20,25" fill="#3BA099"/>
+  </g>
+</svg>
