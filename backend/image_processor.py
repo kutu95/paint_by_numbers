@@ -1530,6 +1530,7 @@ def process_image(
                 'hex': grad_layer.get('hex'),
                 'rgb': grad_layer.get('rgb'),
                 'is_gradient': True,
+                'source_palette_indices': grad_layer.get('source_palette_indices', []),
                 'mask_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_mask.png',
                 'outline_thin_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_thin.png',
                 'outline_thick_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_thick.png',

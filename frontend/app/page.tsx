@@ -949,17 +949,22 @@ export default function Home() {
                     let displayText = ''
                     
                     if (isGradient) {
-                      // Gradient layer
+                      // Gradient layer - use the gradient step's own color
                       colorHex = layer.hex || '#808080'
                       const stepNum = (layer.gradient_step_index || 0) + 1
                       
-                      // Try to find palette color if this gradient replaced one
+                      // Show which palette color(s) this gradient replaced (if available)
                       let paletteInfo = ''
-                      if (layer.palette_index !== undefined && layer.palette_index >= 0) {
-                        const paletteColor = sessionData.palette.find((p) => p.index === layer.palette_index)
-                        if (paletteColor) {
-                          paletteInfo = ` - Palette ${layer.palette_index}`
+                      if (layer.source_palette_indices && layer.source_palette_indices.length > 0) {
+                        // Show all source palette indices, or just the first if it's a single one
+                        if (layer.source_palette_indices.length === 1) {
+                          paletteInfo = ` (replaces Palette ${layer.source_palette_indices[0]})`
+                        } else {
+                          paletteInfo = ` (replaces Palettes ${layer.source_palette_indices.join(', ')})`
                         }
+                      } else if (layer.palette_index !== undefined && layer.palette_index >= 0) {
+                        // Fallback to single palette_index if source_palette_indices not available
+                        paletteInfo = ` (replaces Palette ${layer.palette_index})`
                       }
                       
                       displayText = `Gradient Step ${stepNum}${paletteInfo}`
