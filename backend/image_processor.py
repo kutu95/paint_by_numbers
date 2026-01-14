@@ -1113,9 +1113,66 @@ def load_from_cache(cache_dir: Path, output_dir: Path, order_mode: str) -> Optio
         order = order_layers(palette, order_mode)
         logger.info(f"Reordered layers for mode '{order_mode}': {order}")
         
-        # Copy masks and generate outlines for the new order
-        layers = []
+        # Load gradient regions from metadata
+        gradient_regions_data = metadata.get('gradient_regions', [])
+        
+        # Load gradient layers first (they should be painted first)
+        gradient_layers = []
+        next_layer_idx = 0
+        
+        if gradient_regions_data:
+            logger.info(f"Loading {len(gradient_regions_data)} gradient regions from cache")
+            for grad_region_data in gradient_regions_data:
+                region_id = grad_region_data['id']
+                stops = grad_region_data.get('stops', [])
+                
+                for stop in stops:
+                    step_idx = stop['index']
+                    cached_mask = cache_dir / f"gradient_{region_id}_step_{step_idx}_mask.png"
+                    
+                    if cached_mask.exists():
+                        # Copy mask to output directory
+                        mask_path = output_dir / f'layer_{next_layer_idx}_mask.png'
+                        shutil.copy2(cached_mask, mask_path)
+                        
+                        # Load mask to generate outlines
+                        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                        if mask is not None:
+                            # Generate outlines
+                            for outline_style in ['thin', 'thick', 'glow']:
+                                outline = generate_outline(mask, outline_style)
+                                outline_path = output_dir / f'layer_{next_layer_idx}_outline_{outline_style}.png'
+                                cv2.imwrite(str(outline_path), cv2.cvtColor(outline, cv2.COLOR_RGBA2BGRA))
+                            
+                            # Create layer entry
+                            source_palette_indices = grad_region_data.get('source_palette_indices', [])
+                            source_palette_idx = source_palette_indices[0] if source_palette_indices else -2
+                            
+                            gradient_layers.append({
+                                'layer_index': next_layer_idx,
+                                'palette_index': source_palette_idx,
+                                'gradient_region_id': region_id,
+                                'gradient_step_index': step_idx,
+                                'hex': stop['hex_color'],
+                                'rgb': stop['rgb'],
+                                'is_gradient': True,
+                                'source_palette_indices': source_palette_indices,
+                                'mask_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_mask.png',
+                                'outline_thin_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_thin.png',
+                                'outline_thick_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_thick.png',
+                                'outline_glow_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_glow.png'
+                            })
+                            next_layer_idx += 1
+                        else:
+                            logger.warning(f"Failed to load gradient mask: {mask_path}")
+                    else:
+                        logger.warning(f"Cached gradient mask not found: {cached_mask}")
+        
+        # Copy regular quantized masks and generate outlines for the new order
+        layers = gradient_layers  # Start with gradient layers
         missing_masks = []
+        regular_start_idx = next_layer_idx
+        
         for layer_idx, palette_idx in enumerate(order):
             # Find the cached mask file (by palette index, not layer index)
             cached_mask = cache_dir / f"palette_{palette_idx}_mask.png"
@@ -1124,8 +1181,9 @@ def load_from_cache(cache_dir: Path, output_dir: Path, order_mode: str) -> Optio
                 missing_masks.append(palette_idx)
                 continue
             
-            # Copy mask to new layer index
-            mask_path = output_dir / f'layer_{layer_idx}_mask.png'
+            # Copy mask to new layer index (after gradient layers)
+            output_layer_idx = regular_start_idx + layer_idx
+            mask_path = output_dir / f'layer_{output_layer_idx}_mask.png'
             shutil.copy2(cached_mask, mask_path)
             
             # Load mask to generate outlines
@@ -1137,16 +1195,16 @@ def load_from_cache(cache_dir: Path, output_dir: Path, order_mode: str) -> Optio
             # Generate outlines
             for outline_style in ['thin', 'thick', 'glow']:
                 outline = generate_outline(mask, outline_style)
-                outline_path = output_dir / f'layer_{layer_idx}_outline_{outline_style}.png'
+                outline_path = output_dir / f'layer_{output_layer_idx}_outline_{outline_style}.png'
                 cv2.imwrite(str(outline_path), cv2.cvtColor(outline, cv2.COLOR_RGBA2BGRA))
             
             layers.append({
-                'layer_index': layer_idx,
+                'layer_index': output_layer_idx,
                 'palette_index': palette_idx,
-                'mask_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_mask.png',
-                'outline_thin_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_outline_thin.png',
-                'outline_thick_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_outline_thick.png',
-                'outline_glow_url': f'/api/sessions/{output_dir.name}/layer_{layer_idx}_outline_glow.png'
+                'mask_url': f'/api/sessions/{output_dir.name}/layer_{output_layer_idx}_mask.png',
+                'outline_thin_url': f'/api/sessions/{output_dir.name}/layer_{output_layer_idx}_outline_thin.png',
+                'outline_thick_url': f'/api/sessions/{output_dir.name}/layer_{output_layer_idx}_outline_thick.png',
+                'outline_glow_url': f'/api/sessions/{output_dir.name}/layer_{output_layer_idx}_outline_glow.png'
             })
         
         if missing_masks:
@@ -1170,14 +1228,15 @@ def load_from_cache(cache_dir: Path, output_dir: Path, order_mode: str) -> Optio
             'outline_glow_url': f'/api/sessions/{output_dir.name}/preview.jpg'
         })
         
-        logger.info(f"Successfully loaded {len(layers)-1} layers from cache")
+        logger.info(f"Successfully loaded {len(gradient_layers)} gradient layers and {len(layers) - len(gradient_layers)} regular layers from cache")
         return {
             'width': metadata.get('width'),
             'height': metadata.get('height'),
             'palette': palette,
             'order': order,
             'quantized_preview_url': f'/api/sessions/{output_dir.name}/preview.jpg',
-            'layers': layers
+            'layers': layers,
+            'gradient_regions': gradient_regions_data  # Include gradient regions in response
         }
     except Exception as e:
         logger.error(f"Failed to load from cache: {e}", exc_info=True)
@@ -1206,34 +1265,54 @@ def save_to_cache(cache_dir: Path, output_dir: Path, result: Dict):
         
         # Save masks by palette index (not layer index) so they can be reordered
         cached_count = 0
+        gradient_cached_count = 0
+        
         for layer in result['layers']:
             if layer.get('is_finished'):
                 continue
             
-            palette_idx = layer['palette_index']
-            layer_idx = layer['layer_index']
-            
-            # Copy mask
-            mask_src = output_dir / f"layer_{layer_idx}_mask.png"
-            if mask_src.exists():
-                mask_dst = cache_dir / f"palette_{palette_idx}_mask.png"
-                shutil.copy2(mask_src, mask_dst)
-                cached_count += 1
+            # Handle gradient layers differently
+            if layer.get('is_gradient'):
+                layer_idx = layer['layer_index']
+                gradient_region_id = layer.get('gradient_region_id', 'unknown')
+                gradient_step_idx = layer.get('gradient_step_index', 0)
+                
+                # Save gradient mask with unique identifier
+                mask_src = output_dir / f"layer_{layer_idx}_mask.png"
+                if mask_src.exists():
+                    # Use region_id and step_index to create unique filename
+                    mask_dst = cache_dir / f"gradient_{gradient_region_id}_step_{gradient_step_idx}_mask.png"
+                    shutil.copy2(mask_src, mask_dst)
+                    gradient_cached_count += 1
+                else:
+                    logger.warning(f"Gradient mask not found for layer {layer_idx}, region {gradient_region_id}, step {gradient_step_idx}")
             else:
-                logger.warning(f"Mask not found for layer {layer_idx}, palette {palette_idx}")
+                # Regular palette mask
+                palette_idx = layer['palette_index']
+                layer_idx = layer['layer_index']
+                
+                # Copy mask
+                mask_src = output_dir / f"layer_{layer_idx}_mask.png"
+                if mask_src.exists():
+                    mask_dst = cache_dir / f"palette_{palette_idx}_mask.png"
+                    shutil.copy2(mask_src, mask_dst)
+                    cached_count += 1
+                else:
+                    logger.warning(f"Mask not found for layer {layer_idx}, palette {palette_idx}")
         
-        # Save metadata
+        # Save metadata including gradient regions
         metadata = {
             'width': result['width'],
             'height': result['height'],
             'palette': result['palette'],
-            'order': result['order']  # Save the order used when caching
+            'order': result['order'],  # Save the order used when caching
+            'gradient_regions': result.get('gradient_regions', [])  # Save gradient region data
         }
         metadata_path = cache_dir / "cache_metadata.json"
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
         
-        logger.info(f"Successfully cached {cached_count} masks to: {cache_dir}")
+        logger.info(f"Successfully cached {cached_count} regular masks and {gradient_cached_count} gradient masks to: {cache_dir}")
     except Exception as e:
         logger.error(f"Failed to save to cache: {e}", exc_info=True)
 
