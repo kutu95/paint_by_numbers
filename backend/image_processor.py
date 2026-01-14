@@ -320,6 +320,7 @@ def detect_gradient_regions(
     
     gradient_regions = []
     region_id = 0
+    detected_region_masks = {}  # Track which pixels are already in a gradient region
     
     # Analyze each quantized region
     analysis_total_pixels = analysis_h * analysis_w
