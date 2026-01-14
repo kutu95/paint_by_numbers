@@ -404,28 +404,55 @@ def detect_gradient_regions(
                    f"is_gradient={is_gradient}")
         
         if is_gradient:
-            # Scale bounding box back to full resolution
-            full_x_min = int(x_min / scale)
-            full_y_min = int(y_min / scale)
-            full_x_max = int(x_max / scale)
-            full_y_max = int(y_max / scale)
-            full_bbox_w = full_x_max - full_x_min + 1
-            full_bbox_h = full_y_max - full_y_min + 1
+            # Check for overlap with existing gradient regions
+            # Create a mask for this region at analysis resolution
+            candidate_mask = region_mask.copy()
             
-            gradient_regions.append(GradientRegion(
-                id=f"gradient_{region_id}",
-                bounding_box=(full_x_min, full_y_min, full_bbox_w, full_bbox_h),
-                steps_n=9,  # Default, will be configurable
-                direction='top-to-bottom',
-                transition_mode='dither',
-                transition_width_px=25,
-                seed=42 + region_id,  # Deterministic seed
-                stops=[]
-            ))
-            region_id += 1
-            logger.info(f"Detected gradient region {region_id-1} (palette_idx={palette_idx}) at ({full_x_min}, {full_y_min}), "
-                       f"size {full_bbox_w}x{full_bbox_h}, edge_density={mean_edge_density:.3f}, "
-                       f"lightness_variation={mean_lightness_variation:.3f}")
+            # Check overlap with previously detected regions
+            overlap_ratio = 0.0
+            if len(detected_region_masks) > 0:
+                # Create combined mask of all existing gradient regions
+                combined_existing = np.zeros((analysis_h, analysis_w), dtype=np.uint8)
+                for existing_mask in detected_region_masks.values():
+                    combined_existing = np.maximum(combined_existing, existing_mask)
+                
+                # Calculate overlap
+                overlap_pixels = np.sum((candidate_mask > 0) & (combined_existing > 0))
+                candidate_pixels = np.sum(candidate_mask > 0)
+                if candidate_pixels > 0:
+                    overlap_ratio = overlap_pixels / candidate_pixels
+            
+            # Only add if overlap is minimal (< 20% overlap)
+            # If there's significant overlap, prefer the first detected region
+            if overlap_ratio < 0.2:
+                # Scale bounding box back to full resolution
+                full_x_min = int(x_min / scale)
+                full_y_min = int(y_min / scale)
+                full_x_max = int(x_max / scale)
+                full_y_max = int(y_max / scale)
+                full_bbox_w = full_x_max - full_x_min + 1
+                full_bbox_h = full_y_max - full_y_min + 1
+                
+                gradient_regions.append(GradientRegion(
+                    id=f"gradient_{region_id}",
+                    bounding_box=(full_x_min, full_y_min, full_bbox_w, full_bbox_h),
+                    steps_n=9,  # Default, will be configurable
+                    direction='top-to-bottom',
+                    transition_mode='dither',
+                    transition_width_px=25,
+                    seed=42 + region_id,  # Deterministic seed
+                    stops=[]
+                ))
+                
+                # Store mask for overlap detection
+                detected_region_masks[region_id] = candidate_mask
+                
+                region_id += 1
+                logger.info(f"Detected gradient region {region_id-1} (palette_idx={palette_idx}) at ({full_x_min}, {full_y_min}), "
+                           f"size {full_bbox_w}x{full_bbox_h}, edge_density={mean_edge_density:.3f}, "
+                           f"lightness_variation={mean_lightness_variation:.3f}, overlap={overlap_ratio:.1%}")
+            else:
+                logger.info(f"Skipping gradient region {palette_idx} due to {overlap_ratio:.1%} overlap with existing gradient regions")
     
     logger.info(f"Gradient detection complete: analyzed {analyzed_count} regions, detected {len(gradient_regions)} gradient regions")
     return gradient_regions
