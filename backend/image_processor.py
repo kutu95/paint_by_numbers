@@ -263,6 +263,7 @@ class GradientRegion:
     transition_width_px: int
     seed: int
     stops: List[Dict]  # List of {index, hex_color, rgb, mask_bitmap}
+    source_palette_indices: List[int] = None  # Which palette colors were merged into this gradient
 
 
 def detect_gradient_regions(
@@ -442,7 +443,8 @@ def detect_gradient_regions(
                     transition_mode='dither',
                     transition_width_px=25,
                     seed=42 + region_id,  # Deterministic seed
-                    stops=[]
+                    stops=[],
+                    source_palette_indices=[palette_idx]  # Track which palette color this came from
                 ))
                 
                 # Store mask for overlap detection
@@ -563,6 +565,12 @@ def merge_adjacent_gradient_regions(
             x_max = max(box[0] + box[2] for box in boxes)
             y_max = max(box[1] + box[3] for box in boxes)
             
+            # Merge source palette indices from all grouped regions
+            merged_palette_indices = []
+            for i in group:
+                if gradient_regions[i].source_palette_indices:
+                    merged_palette_indices.extend(gradient_regions[i].source_palette_indices)
+            
             merged_regions.append(GradientRegion(
                 id=f"gradient_merged_{len(merged_regions)}",
                 bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
@@ -571,7 +579,8 @@ def merge_adjacent_gradient_regions(
                 transition_mode=gradient_regions[group[0]].transition_mode,
                 transition_width_px=gradient_regions[group[0]].transition_width_px,
                 seed=gradient_regions[group[0]].seed,
-                stops=[]
+                stops=[],
+                source_palette_indices=merged_palette_indices
             ))
             logger.info(f"Merged {len(group)} gradient regions into one: {x_min},{y_min} {x_max-x_min}x{y_max-y_min}")
     
@@ -1345,14 +1354,18 @@ def process_gradient_regions(
             gradient_masks[gradient_layer_index] = full_mask
             
             # Create layer entry
+            # Use the first source palette index if available (for display purposes)
+            source_palette_idx = grad_region.source_palette_indices[0] if grad_region.source_palette_indices else -2
+            
             gradient_layers.append({
                 'layer_index': gradient_layer_index,
-                'palette_index': -2,  # Special marker for gradient ramp
+                'palette_index': source_palette_idx,  # First palette color this gradient replaced
                 'gradient_region_id': grad_region.id,
                 'gradient_step_index': stop['index'],
                 'hex': stop['hex_color'],
                 'rgb': stop['rgb'],
-                'is_gradient': True
+                'is_gradient': True,
+                'source_palette_indices': grad_region.source_palette_indices  # All palette indices
             })
             
             gradient_layer_index += 1
@@ -1569,6 +1582,7 @@ def process_image(
             'direction': grad_region.direction,
             'transition_mode': grad_region.transition_mode,
             'transition_width_px': grad_region.transition_width_px,
+            'source_palette_indices': grad_region.source_palette_indices or [],
             'stops': [
                 {
                     'index': stop['index'],

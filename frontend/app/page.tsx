@@ -23,6 +23,7 @@ interface Layer {
   hex?: string
   rgb?: number[]
   is_finished?: boolean
+  source_palette_indices?: number[]
 }
 
 interface GradientRegion {
@@ -950,10 +951,18 @@ export default function Home() {
                     if (isGradient) {
                       // Gradient layer
                       colorHex = layer.hex || '#808080'
-                      displayText = `Gradient Step ${(layer.gradient_step_index || 0) + 1}`
-                      if (layer.gradient_region_id) {
-                        displayText += ` (${layer.gradient_region_id})`
+                      const stepNum = (layer.gradient_step_index || 0) + 1
+                      
+                      // Try to find palette color if this gradient replaced one
+                      let paletteInfo = ''
+                      if (layer.palette_index !== undefined && layer.palette_index >= 0) {
+                        const paletteColor = sessionData.palette.find((p) => p.index === layer.palette_index)
+                        if (paletteColor) {
+                          paletteInfo = ` - Palette ${layer.palette_index}`
+                        }
                       }
+                      
+                      displayText = `Gradient Step ${stepNum}${paletteInfo}`
                     } else {
                       // Regular quantized layer
                       const color = sessionData.palette.find((p) => p.index === layer.palette_index)
@@ -1002,7 +1011,7 @@ export default function Home() {
                         <div className="flex-1 text-sm text-gray-400">
                           {displayText}
                           {isGradient && (
-                            <span className="ml-2 text-xs text-purple-400">(Gradient Ramp)</span>
+                            <span className="ml-2 text-xs text-purple-400">(Gradient)</span>
                           )}
                         </div>
                       </div>
