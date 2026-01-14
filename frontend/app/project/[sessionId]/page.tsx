@@ -310,7 +310,7 @@ export default function ProjectionViewer() {
       setColoredMaskUrl(null)
       return
     }
-
+    
     // Load mask image and replace white pixels with palette color
     const img = new Image()
     img.crossOrigin = 'anonymous'
@@ -334,10 +334,11 @@ export default function ProjectionViewer() {
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
         const data = imageData.data
         
-        // Convert hex to RGB
-        const r = parseInt(colorHex.slice(1, 3), 16)
-        const g = parseInt(colorHex.slice(3, 5), 16)
-        const b = parseInt(colorHex.slice(5, 7), 16)
+        // Convert hex to RGB (colorHex is guaranteed to be non-null here due to check above)
+        const hex = colorHex as string  // Type assertion since we already checked it's not null
+        const r = parseInt(hex.slice(1, 3), 16)
+        const g = parseInt(hex.slice(3, 5), 16)
+        const b = parseInt(hex.slice(5, 7), 16)
         
         // Replace white pixels (RGB > 200) with palette color, keep black areas transparent
         for (let i = 0; i < data.length; i += 4) {
