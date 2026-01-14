@@ -73,6 +73,14 @@ export default function Home() {
   const [recipes, setRecipes] = useState<any[]>([])
   const [loadingRecipes, setLoadingRecipes] = useState(false)
   const [selectedColor, setSelectedColor] = useState<PaletteColor | null>(null)
+  const [selectedLayerColor, setSelectedLayerColor] = useState<{
+    hex: string
+    paletteIndex?: number
+    coverage?: number
+    isGradient: boolean
+    gradientStepIndex?: number
+    layerIndex: number
+  } | null>(null)
   const [mounted, setMounted] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const router = useRouter()
@@ -197,17 +205,18 @@ export default function Home() {
     }
   }, [])
 
-  // Handle ESC key to close modal
+  // Handle ESC key to close modals
   useEffect(() => {
     if (!mounted || typeof window === 'undefined') return
     const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && selectedColor) {
-        setSelectedColor(null)
+      if (e.key === 'Escape') {
+        if (selectedColor) setSelectedColor(null)
+        if (selectedLayerColor) setSelectedLayerColor(null)
       }
     }
     window.addEventListener('keydown', handleEsc)
     return () => window.removeEventListener('keydown', handleEsc)
-  }, [selectedColor, mounted])
+  }, [selectedColor, selectedLayerColor, mounted])
 
   // Restore image preview and session data from localStorage on mount (client-side only)
   useEffect(() => {
@@ -983,8 +992,31 @@ export default function Home() {
                       >
                         <div className="text-lg font-mono">{layer.layer_index + 1}</div>
                         <div
-                          className="w-16 h-16 rounded border border-gray-600"
+                          className="w-16 h-16 rounded border border-gray-600 cursor-pointer hover:opacity-90 transition-opacity hover:ring-2 hover:ring-white"
                           style={{ backgroundColor: colorHex }}
+                          onClick={() => {
+                            if (isGradient) {
+                              setSelectedLayerColor({
+                                hex: colorHex,
+                                paletteIndex: layer.palette_index >= 0 ? layer.palette_index : undefined,
+                                isGradient: true,
+                                gradientStepIndex: layer.gradient_step_index,
+                                layerIndex: layer.layer_index
+                              })
+                            } else {
+                              const color = sessionData.palette.find((p) => p.index === layer.palette_index)
+                              if (color) {
+                                setSelectedLayerColor({
+                                  hex: colorHex,
+                                  paletteIndex: layer.palette_index,
+                                  coverage: color.coverage,
+                                  isGradient: false,
+                                  layerIndex: layer.layer_index
+                                })
+                              }
+                            }
+                          }}
+                          title="Click to view color info"
                         />
                         <img
                           src={`${API_BASE_URL}${layer.mask_url}`}
@@ -1140,6 +1172,81 @@ export default function Home() {
                 <div className="flex items-center justify-between p-3 bg-gray-700 rounded">
                   <span className="text-gray-300 font-semibold">Coverage:</span>
                   <span className="text-white">{selectedColor.coverage.toFixed(1)}%</span>
+                </div>
+              </div>
+
+              <div className="mt-6 text-sm text-gray-400 text-center">
+                Click outside or press ESC to close
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Layer Color Info Modal */}
+        {mounted && selectedLayerColor && (
+          <div
+            className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50"
+            onClick={() => setSelectedLayerColor(null)}
+          >
+            <div
+              className="bg-gray-800 rounded-lg p-8 max-w-md w-full mx-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-2xl font-bold">
+                  {selectedLayerColor.isGradient 
+                    ? `Gradient Step ${(selectedLayerColor.gradientStepIndex ?? 0) + 1}`
+                    : `Palette Color ${selectedLayerColor.paletteIndex}`}
+                </h3>
+                <button
+                  onClick={() => setSelectedLayerColor(null)}
+                  className="text-gray-400 hover:text-white text-2xl font-bold w-8 h-8 flex items-center justify-center rounded hover:bg-gray-700"
+                >
+                  ×
+                </button>
+              </div>
+
+              {/* Large color swatch */}
+              <div
+                className="w-full aspect-square rounded-lg border-4 border-gray-600 mb-6 shadow-2xl"
+                style={{ backgroundColor: selectedLayerColor.hex }}
+              />
+
+              {/* Color information */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between p-3 bg-gray-700 rounded">
+                  <span className="text-gray-300 font-semibold">Hex:</span>
+                  <span className="text-white font-mono">{selectedLayerColor.hex.toUpperCase()}</span>
+                </div>
+                {hexToRgbObject(selectedLayerColor.hex) && (
+                  <div className="flex items-center justify-between p-3 bg-gray-700 rounded">
+                    <span className="text-gray-300 font-semibold">RGB:</span>
+                    <span className="text-white font-mono">
+                      R: {hexToRgbObject(selectedLayerColor.hex)!.r} | G: {hexToRgbObject(selectedLayerColor.hex)!.g} | B: {hexToRgbObject(selectedLayerColor.hex)!.b}
+                    </span>
+                  </div>
+                )}
+                {selectedLayerColor.paletteIndex !== undefined && (
+                  <div className="flex items-center justify-between p-3 bg-gray-700 rounded">
+                    <span className="text-gray-300 font-semibold">Palette Number:</span>
+                    <span className="text-white">{selectedLayerColor.paletteIndex}</span>
+                  </div>
+                )}
+                {selectedLayerColor.coverage !== undefined && (
+                  <div className="flex items-center justify-between p-3 bg-gray-700 rounded">
+                    <span className="text-gray-300 font-semibold">Coverage:</span>
+                    <span className="text-white">{selectedLayerColor.coverage.toFixed(1)}%</span>
+                  </div>
+                )}
+                {selectedLayerColor.isGradient && (
+                  <div className="flex items-center justify-between p-3 bg-purple-900/30 rounded border border-purple-700">
+                    <span className="text-purple-300 font-semibold">Type:</span>
+                    <span className="text-purple-300">Gradient Step</span>
+                  </div>
+                )}
+                <div className="flex items-center justify-between p-3 bg-gray-700 rounded">
+                  <span className="text-gray-300 font-semibold">Layer Index:</span>
+                  <span className="text-white">{selectedLayerColor.layerIndex + 1}</span>
                 </div>
               </div>
 
