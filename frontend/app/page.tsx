@@ -1206,11 +1206,13 @@ export default function Home() {
                 </button>
               </div>
 
-              {/* Large color swatch */}
-              <div
-                className="w-full aspect-square rounded-lg border-4 border-gray-600 mb-6 shadow-2xl"
-                style={{ backgroundColor: selectedLayerColor.hex }}
-              />
+              {/* Color swatch (50% size) */}
+              <div className="flex justify-center mb-6">
+                <div
+                  className="w-1/2 aspect-square rounded-lg border-4 border-gray-600 shadow-2xl"
+                  style={{ backgroundColor: selectedLayerColor.hex }}
+                />
+              </div>
 
               {/* Color information */}
               <div className="space-y-3">
@@ -1244,11 +1246,79 @@ export default function Home() {
                     <span className="text-purple-300">Gradient Step</span>
                   </div>
                 )}
-                <div className="flex items-center justify-between p-3 bg-gray-700 rounded">
-                  <span className="text-gray-300 font-semibold">Layer Index:</span>
-                  <span className="text-white">{selectedLayerColor.layerIndex + 1}</span>
-                </div>
+                {selectedLayerColor.paletteIndex !== undefined && (
+                  <div className="flex items-center justify-between p-3 bg-gray-700 rounded">
+                    <span className="text-gray-300 font-semibold">Palette Index:</span>
+                    <span className="text-white">{selectedLayerColor.paletteIndex}</span>
+                  </div>
+                )}
               </div>
+
+              {/* Recipe information */}
+              {selectedLayerColor.paletteIndex !== undefined && recipes.length > 0 && (() => {
+                const recipeData = recipes.find((r: any) => r.palette_index === selectedLayerColor.paletteIndex)
+                if (!recipeData) return null
+                
+                const recipe = recipeData.recipe
+                const errorInfo = recipe && recipeData.type !== 'chatgpt' && recipe.error !== undefined 
+                  ? getErrorLevel(recipe.error) 
+                  : null
+                
+                return (
+                  <div className="mt-6 pt-6 border-t border-gray-700">
+                    <h4 className="text-lg font-bold mb-3">Mixing Recipe</h4>
+                    <div className="text-sm text-gray-300 mb-3">
+                      {formatRecipe(recipeData)}
+                    </div>
+                    
+                    {/* Recipe details for ChatGPT recipes */}
+                    {recipe && (recipeData.type === 'chatgpt' || recipe.type === 'chatgpt') && recipe.ingredients && (
+                      <div className="text-xs text-gray-400 mt-2 space-y-1">
+                        {recipe.mixing_strategy && (
+                          <div><strong>Strategy:</strong> {recipe.mixing_strategy}</div>
+                        )}
+                        {recipe.expected_result && (
+                          <div><strong>Expected:</strong> {recipe.expected_result}</div>
+                        )}
+                        {recipe.adjustment_ladder && (
+                          <div><strong>Adjustments:</strong> {recipe.adjustment_ladder}</div>
+                        )}
+                        {recipe.tips && (
+                          <div><strong>Tips:</strong> {recipe.tips}</div>
+                        )}
+                      </div>
+                    )}
+                    
+                    {/* Recipe metadata for non-ChatGPT recipes */}
+                    {recipe && recipeData.type !== 'chatgpt' && recipe.type !== 'chatgpt' && (
+                      <div className="text-xs text-gray-400 mt-2 flex items-center gap-2 flex-wrap">
+                        {recipe.uncalibrated && (
+                          <span className="px-2 py-0.5 rounded text-xs bg-yellow-600/30 text-yellow-300 border border-yellow-500/50">
+                            ⚠️ Estimated (not calibrated)
+                          </span>
+                        )}
+                        {errorInfo && (
+                          <span 
+                            className="px-2 py-0.5 rounded text-xs"
+                            style={{
+                              backgroundColor: errorInfo.color === 'green' ? '#16a34a' : 
+                                            errorInfo.color === 'yellow' ? '#ca8a04' : '#dc2626'
+                            }}
+                          >
+                            Error: {recipe.error.toFixed(2)} ΔE - {errorInfo.level}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    
+                    {!recipe && (
+                      <div className="text-xs text-red-400 mt-2">
+                        {recipeData.error || 'No recipe available'}
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
 
               <div className="mt-6 text-sm text-gray-400 text-center">
                 Click outside or press ESC to close
