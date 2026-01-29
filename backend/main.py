@@ -78,7 +78,8 @@ async def create_session(
     enable_gradients: str = Form("true"),
     gradient_steps_n: int = Form(9),
     gradient_transition_mode: str = Form("dither"),
-    gradient_transition_width: int = Form(25)
+    gradient_transition_width: int = Form(25),
+    enable_glaze: str = Form("false")
 ):
     """Create a new session and process the image."""
     try:
@@ -117,6 +118,7 @@ async def create_session(
     if gradient_transition_width < 5 or gradient_transition_width > 60:
         logger.error(f"Invalid gradient_transition_width: {gradient_transition_width}")
         raise HTTPException(status_code=400, detail="gradient_transition_width must be between 5 and 60")
+    enable_glaze_bool = enable_glaze.lower() in ('true', '1', 'yes', 'on')
     
     # Create session directory
     session_id = str(uuid.uuid4())
@@ -150,7 +152,8 @@ async def create_session(
             enable_gradients=enable_gradients_bool,
             gradient_steps_n=gradient_steps_n,
             gradient_transition_mode=gradient_transition_mode,
-            gradient_transition_width=gradient_transition_width
+            gradient_transition_width=gradient_transition_width,
+            enable_glaze=enable_glaze_bool
         )
         
         result['session_id'] = session_id

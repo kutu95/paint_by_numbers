@@ -6,9 +6,12 @@ cd "$(dirname "$0")/backend"
 # Activate virtual environment
 source venv/bin/activate
 
-# Start the backend server
+# Ensure dependencies are installed (idempotent)
+pip install -q -r requirements.txt
+
+# Start the backend server (use python3 for macOS compatibility)
 echo "Starting backend server on http://localhost:8000"
 echo "Press Ctrl+C to stop"
 echo ""
 
-python main.py
+python3 main.py

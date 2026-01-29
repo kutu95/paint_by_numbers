@@ -995,6 +995,90 @@ def ensure_complete_coverage(
     return expanded_masks
 
 
+def fill_holes_covered_by_later_layers(
+    expanded_masks: Dict[int, np.ndarray],
+    order: List[int]
+) -> Dict[int, np.ndarray]:
+    """Fill holes in each layer where a later layer will paint there.
+    
+    Earlier layers get painted first; anything painted on top will cover them.
+    So if the current layer has a hole (no paint) and a later layer will cover
+    that pixel, we can fill the hole in the current layer to make painting easier
+    (user can paint through—it gets covered anyway).
+    
+    Args:
+        expanded_masks: Dictionary of palette index to mask (modified in place)
+        order: List of palette indices in paint order (first = painted first)
+    
+    Returns:
+        expanded_masks (same dict, modified)
+    """
+    if len(order) < 2:
+        return expanded_masks
+    shape = list(expanded_masks.values())[0].shape
+    n = len(order)
+    # Build union of all "later" masks for each position (from the end)
+    acc = np.zeros(shape, dtype=np.uint8)
+    later_unions: List[np.ndarray] = [np.zeros(shape, dtype=np.uint8) for _ in range(n)]
+    for idx in range(n - 1, 0, -1):
+        acc = cv2.bitwise_or(acc, expanded_masks[order[idx]])
+        later_unions[idx - 1] = acc.copy()
+    for idx in range(n - 1):
+        palette_idx = order[idx]
+        mask = expanded_masks[palette_idx]
+        later = later_unions[idx]
+        holes = (mask == 0).astype(np.uint8) * 255
+        fillable = cv2.bitwise_and(holes, later)
+        if np.sum(fillable) > 0:
+            expanded_masks[palette_idx] = cv2.bitwise_or(mask, fillable)
+            logger.info(f"Filled {np.sum(fillable)} hole pixels in layer (palette {palette_idx}) with later-layer coverage")
+    return expanded_masks
+
+
+def fill_holes_in_gradient_layers(
+    gradient_masks: Dict[int, np.ndarray],
+    sorted_gradient_layers: List[Dict],
+    expanded_masks: Dict[int, np.ndarray],
+    order: List[int],
+    gradient_regions: List[GradientRegion]
+) -> None:
+    """Fill holes in each gradient layer where a later layer (gradient or regular) will paint.
+    
+    Only fills holes inside the gradient region(s) so we never extend gradient masks
+    into non-gradient areas. Modifies gradient_masks in place.
+    """
+    if not gradient_masks or not sorted_gradient_layers:
+        return
+    shape = list(gradient_masks.values())[0].shape
+    # Restrict fills to pixels inside any gradient region (bounding box union)
+    gradient_area = np.zeros(shape, dtype=np.uint8)
+    for grad_region in gradient_regions:
+        x, y, w, h = grad_region.bounding_box
+        h_img, w_img = shape[:2]
+        x_end = min(x + w, w_img)
+        y_end = min(y + h, h_img)
+        x_start = max(0, x)
+        y_start = max(0, y)
+        gradient_area[y_start:y_end, x_start:x_end] = 255
+    all_regular_union = np.zeros(shape, dtype=np.uint8)
+    for palette_idx in order:
+        if palette_idx in expanded_masks:
+            all_regular_union = cv2.bitwise_or(all_regular_union, expanded_masks[palette_idx])
+    sorted_indices = [g['layer_index'] for g in sorted_gradient_layers if g['layer_index'] in gradient_masks]
+    n = len(sorted_indices)
+    for i, grad_layer_idx in enumerate(sorted_indices):
+        later_union = all_regular_union.copy()
+        for j in range(i + 1, n):
+            later_union = cv2.bitwise_or(later_union, gradient_masks[sorted_indices[j]])
+        mask = gradient_masks[grad_layer_idx]
+        holes = (mask == 0).astype(np.uint8) * 255
+        fillable = cv2.bitwise_and(holes, later_union)
+        fillable = cv2.bitwise_and(fillable, gradient_area)  # only inside gradient region
+        if np.sum(fillable) > 0:
+            gradient_masks[grad_layer_idx] = cv2.bitwise_or(mask, fillable)
+            logger.info(f"Filled {np.sum(fillable)} hole pixels in gradient layer {grad_layer_idx} with later-layer coverage")
+
+
 def generate_outline(mask: np.ndarray, style: str = 'thin') -> np.ndarray:
     """Generate outline overlay from mask."""
     if style == 'off':
@@ -1031,14 +1115,15 @@ def generate_outline(mask: np.ndarray, style: str = 'thin') -> np.ndarray:
 def compute_cache_key(image_path: str, n_colors: int, overpaint_mm: float, order_mode: str, 
                      max_side: int, saturation_boost: float, detail_level: float,
                      enable_gradients: bool = True, gradient_steps_n: int = 9,
-                     gradient_transition_mode: str = 'dither', gradient_transition_width: int = 25) -> str:
+                     gradient_transition_mode: str = 'dither', gradient_transition_width: int = 25,
+                     enable_glaze: bool = False) -> str:
     """Compute cache key from image hash and processing parameters."""
     # Read image file and compute hash
     with open(image_path, 'rb') as f:
         image_hash = hashlib.sha256(f.read()).hexdigest()[:16]  # Use first 16 chars
     
     # Create parameter string (normalize floats to avoid precision issues)
-    params = f"{n_colors}_{overpaint_mm:.2f}_{order_mode}_{max_side}_{saturation_boost:.2f}_{detail_level:.2f}_{enable_gradients}_{gradient_steps_n}_{gradient_transition_mode}_{gradient_transition_width}"
+    params = f"{n_colors}_{overpaint_mm:.2f}_{order_mode}_{max_side}_{saturation_boost:.2f}_{detail_level:.2f}_{enable_gradients}_{gradient_steps_n}_{gradient_transition_mode}_{gradient_transition_width}_{enable_glaze}"
     
     # Combine image hash with parameters
     cache_key = f"{image_hash}_{params}"
@@ -1125,6 +1210,8 @@ def load_from_cache(cache_dir: Path, output_dir: Path, order_mode: str) -> Optio
             for grad_region_data in gradient_regions_data:
                 region_id = grad_region_data['id']
                 stops = grad_region_data.get('stops', [])
+                source_palette_indices = grad_region_data.get('source_palette_indices', [])
+                source_palette_idx = source_palette_indices[0] if source_palette_indices else -2
                 
                 for stop in stops:
                     step_idx = stop['index']
@@ -1145,9 +1232,6 @@ def load_from_cache(cache_dir: Path, output_dir: Path, order_mode: str) -> Optio
                                 cv2.imwrite(str(outline_path), cv2.cvtColor(outline, cv2.COLOR_RGBA2BGRA))
                             
                             # Create layer entry
-                            source_palette_indices = grad_region_data.get('source_palette_indices', [])
-                            source_palette_idx = source_palette_indices[0] if source_palette_indices else -2
-                            
                             gradient_layers.append({
                                 'layer_index': next_layer_idx,
                                 'palette_index': source_palette_idx,
@@ -1156,6 +1240,7 @@ def load_from_cache(cache_dir: Path, output_dir: Path, order_mode: str) -> Optio
                                 'hex': stop['hex_color'],
                                 'rgb': stop['rgb'],
                                 'is_gradient': True,
+                                'is_glaze': False,
                                 'source_palette_indices': source_palette_indices,
                                 'mask_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_mask.png',
                                 'outline_thin_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_thin.png',
@@ -1167,6 +1252,39 @@ def load_from_cache(cache_dir: Path, output_dir: Path, order_mode: str) -> Optio
                             logger.warning(f"Failed to load gradient mask: {mask_path}")
                     else:
                         logger.warning(f"Cached gradient mask not found: {cached_mask}")
+                
+                # Load glaze layer for this region if present
+                if grad_region_data.get('glaze_hex') is not None:
+                    cached_glaze = cache_dir / f"gradient_{region_id}_glaze_mask.png"
+                    if cached_glaze.exists():
+                        mask_path = output_dir / f'layer_{next_layer_idx}_mask.png'
+                        shutil.copy2(cached_glaze, mask_path)
+                        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                        if mask is not None:
+                            for outline_style in ['thin', 'thick', 'glow']:
+                                outline = generate_outline(mask, outline_style)
+                                outline_path = output_dir / f'layer_{next_layer_idx}_outline_{outline_style}.png'
+                                cv2.imwrite(str(outline_path), cv2.cvtColor(outline, cv2.COLOR_RGBA2BGRA))
+                            gradient_layers.append({
+                                'layer_index': next_layer_idx,
+                                'palette_index': source_palette_idx,
+                                'gradient_region_id': region_id,
+                                'gradient_step_index': 9999,
+                                'hex': grad_region_data['glaze_hex'],
+                                'rgb': grad_region_data.get('glaze_rgb', [128, 128, 128]),
+                                'is_gradient': True,
+                                'is_glaze': True,
+                                'source_palette_indices': source_palette_indices,
+                                'mask_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_mask.png',
+                                'outline_thin_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_thin.png',
+                                'outline_thick_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_thick.png',
+                                'outline_glow_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_glow.png'
+                            })
+                            next_layer_idx += 1
+                        else:
+                            logger.warning(f"Failed to load glaze mask: {mask_path}")
+                    else:
+                        logger.warning(f"Cached glaze mask not found: {cached_glaze}")
         
         # Copy regular quantized masks and generate outlines for the new order
         layers = gradient_layers  # Start with gradient layers
@@ -1276,12 +1394,14 @@ def save_to_cache(cache_dir: Path, output_dir: Path, result: Dict):
                 layer_idx = layer['layer_index']
                 gradient_region_id = layer.get('gradient_region_id', 'unknown')
                 gradient_step_idx = layer.get('gradient_step_index', 0)
+                is_glaze = layer.get('is_glaze', False)
                 
-                # Save gradient mask with unique identifier
                 mask_src = output_dir / f"layer_{layer_idx}_mask.png"
                 if mask_src.exists():
-                    # Use region_id and step_index to create unique filename
-                    mask_dst = cache_dir / f"gradient_{gradient_region_id}_step_{gradient_step_idx}_mask.png"
+                    if is_glaze:
+                        mask_dst = cache_dir / f"gradient_{gradient_region_id}_glaze_mask.png"
+                    else:
+                        mask_dst = cache_dir / f"gradient_{gradient_region_id}_step_{gradient_step_idx}_mask.png"
                     shutil.copy2(mask_src, mask_dst)
                     gradient_cached_count += 1
                 else:
@@ -1324,7 +1444,8 @@ def process_gradient_regions(
     gradient_steps_n: int = 9,
     gradient_transition_mode: str = 'dither',
     gradient_transition_width: int = 25,
-    enable_gradient_detection: bool = True
+    enable_gradient_detection: bool = True,
+    enable_glaze: bool = False
 ) -> Tuple[Dict[int, np.ndarray], List[Dict], List[GradientRegion]]:
     """Process gradient regions and generate ramp masks.
     
@@ -1337,6 +1458,7 @@ def process_gradient_regions(
         gradient_transition_mode: 'off', 'dither', or 'feather-preview'
         gradient_transition_width: Width of transition bands in pixels
         enable_gradient_detection: Whether to detect and process gradients
+        enable_glaze: If True, add a glaze layer per gradient region (paint last, very thin)
     
     Returns:
         Tuple of (gradient_masks_dict, gradient_layers_list, gradient_regions_list)
@@ -1444,13 +1566,55 @@ def process_gradient_regions(
                 'hex': stop['hex_color'],
                 'rgb': stop['rgb'],
                 'is_gradient': True,
+                'is_glaze': False,
                 'source_palette_indices': grad_region.source_palette_indices  # All palette indices
             })
             
             gradient_layer_index += 1
         
-        # Optional: Add glaze pass (unifying translucent layer)
-        # This can be enabled via parameter
+        # Optional glaze pass: one layer per region with full region mask, average color (paint last, very thin)
+        if enable_glaze and len(stops) > 0:
+            x, y, w_region, h_region = grad_region.bounding_box
+            full_h, full_w = normalized_image.shape[:2]
+            # Full region mask: union of all stop masks
+            region_combined = np.zeros((h_region, w_region), dtype=np.uint8)
+            for stop in stops:
+                m = stop['mask_bitmap']
+                if m.shape[0] != h_region or m.shape[1] != w_region:
+                    m = cv2.resize(m, (w_region, h_region), interpolation=cv2.INTER_NEAREST)
+                region_combined = np.maximum(region_combined, m)
+            # Average color from ramp stops (unifying glaze tone)
+            r = int(np.mean([s['rgb'][0] for s in stops]))
+            g = int(np.mean([s['rgb'][1] for s in stops]))
+            b = int(np.mean([s['rgb'][2] for s in stops]))
+            glaze_rgb = [r, g, b]
+            glaze_hex = '#{:02x}{:02x}{:02x}'.format(r, g, b)
+            # Full image mask
+            full_mask = np.zeros((full_h, full_w), dtype=np.uint8)
+            x_end = min(x + w_region, full_w)
+            y_end = min(y + h_region, full_h)
+            x_start = max(0, x)
+            y_start = max(0, y)
+            mask_w = x_end - x_start
+            mask_h = y_end - y_start
+            mask_x_offset = max(0, -x)
+            mask_y_offset = max(0, -y)
+            region_crop = region_combined[mask_y_offset:mask_y_offset+mask_h, mask_x_offset:mask_x_offset+mask_w]
+            full_mask[y_start:y_end, x_start:x_end] = region_crop
+            gradient_masks[gradient_layer_index] = full_mask
+            source_palette_idx = grad_region.source_palette_indices[0] if grad_region.source_palette_indices else -2
+            gradient_layers.append({
+                'layer_index': gradient_layer_index,
+                'palette_index': source_palette_idx,
+                'gradient_region_id': grad_region.id,
+                'gradient_step_index': 9999,  # Sentinel so glaze sorts last (paint after ramp steps)
+                'hex': glaze_hex,
+                'rgb': glaze_rgb,
+                'is_gradient': True,
+                'is_glaze': True,
+                'source_palette_indices': grad_region.source_palette_indices
+            })
+            gradient_layer_index += 1
     
     logger.info(f"Generated {len(gradient_layers)} gradient ramp layers")
     return gradient_masks, gradient_layers, gradient_regions
@@ -1468,7 +1632,8 @@ def process_image(
     enable_gradients: bool = True,
     gradient_steps_n: int = 9,
     gradient_transition_mode: str = 'dither',
-    gradient_transition_width: int = 25
+    gradient_transition_width: int = 25,
+    enable_glaze: bool = False
 ) -> Dict:
     """Main processing pipeline with caching support."""
     logger.info(f"process_image called: image_path={image_path}, n_colors={n_colors}, cache_dir={MASK_CACHE_DIR}")
@@ -1477,7 +1642,8 @@ def process_image(
     cache_key = compute_cache_key(image_path, n_colors, overpaint_mm, order_mode, 
                                   max_side, saturation_boost, detail_level,
                                   enable_gradients, gradient_steps_n, 
-                                  gradient_transition_mode, gradient_transition_width)
+                                  gradient_transition_mode, gradient_transition_width,
+                                  enable_glaze)
     
     # Check cache first
     cached_dir = check_mask_cache(cache_key)
@@ -1528,7 +1694,8 @@ def process_image(
         gradient_steps_n=gradient_steps_n,
         gradient_transition_mode=gradient_transition_mode,
         gradient_transition_width=gradient_transition_width,
-        enable_gradient_detection=enable_gradients
+        enable_gradient_detection=enable_gradients,
+        enable_glaze=enable_glaze
     )
     
     # Save quantized preview
@@ -1575,18 +1742,22 @@ def process_image(
     # Step 5.5: Ensure complete coverage - fill any unpainted areas
     expanded_masks = ensure_complete_coverage(expanded_masks, order, quantized, labels, palette)
     
+    # Step 5.6: Fill holes in each layer where a later layer will paint (paint-through for easier painting)
+    expanded_masks = fill_holes_covered_by_later_layers(expanded_masks, order)
+    
+    # Step 5.7: Fill holes in gradient layers where later gradient or regular layers will paint
+    sorted_gradient_layers = sorted(
+        gradient_layers,
+        key=lambda g: (g.get('gradient_region_id', ''), g.get('gradient_step_index', 0))
+    )
+    fill_holes_in_gradient_layers(gradient_masks, sorted_gradient_layers, expanded_masks, order, gradient_regions)
+    
     # Step 6: Generate outlines and save
     layers = []
     
     # Save gradient ramp layers FIRST (before regular layers)
     # For top-to-bottom gradients, paint from top (step 0) to bottom (step N-1)
     # This means lightest to darkest for typical sky gradients
-    # Sort gradient layers by region ID and step index to ensure correct order
-    sorted_gradient_layers = sorted(
-        gradient_layers,
-        key=lambda g: (g.get('gradient_region_id', ''), g.get('gradient_step_index', 0))
-    )
-    
     next_layer_idx = 0
     for grad_layer in sorted_gradient_layers:
         grad_layer_idx = grad_layer['layer_index']
@@ -1609,6 +1780,7 @@ def process_image(
                 'hex': grad_layer.get('hex'),
                 'rgb': grad_layer.get('rgb'),
                 'is_gradient': True,
+                'is_glaze': grad_layer.get('is_glaze', False),
                 'source_palette_indices': grad_layer.get('source_palette_indices', []),
                 'mask_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_mask.png',
                 'outline_thin_url': f'/api/sessions/{output_dir.name}/layer_{next_layer_idx}_outline_thin.png',
@@ -1652,10 +1824,11 @@ def process_image(
         'outline_glow_url': f'/api/sessions/{output_dir.name}/preview.jpg'
     })
     
-    # Serialize gradient regions for response
+    # Serialize gradient regions for response (include glaze when present)
     gradient_regions_data = []
     for grad_region in gradient_regions:
-        gradient_regions_data.append({
+        glaze_layer = next((l for l in gradient_layers if l.get('is_glaze') and l.get('gradient_region_id') == grad_region.id), None)
+        region_data = {
             'id': grad_region.id,
             'bounding_box': grad_region.bounding_box,
             'steps_n': grad_region.steps_n,
@@ -1671,7 +1844,11 @@ def process_image(
                 }
                 for stop in grad_region.stops
             ]
-        })
+        }
+        if glaze_layer is not None:
+            region_data['glaze_hex'] = glaze_layer['hex']
+            region_data['glaze_rgb'] = glaze_layer['rgb']
+        gradient_regions_data.append(region_data)
     
     result = {
         'width': w,

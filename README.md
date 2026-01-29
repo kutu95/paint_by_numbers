@@ -62,6 +62,7 @@ The frontend will be available at `http://localhost:3000`
    - Overpaint amount in mm (default 5)
    - Layer ordering mode (largest/smallest/manual)
    - Max processing resolution (1920 or 2400px)
+   - **Gradient-aware quantization** (optional): Enable to detect smooth gradients (sky, water) and generate multi-step ramps instead of flat bands. Set gradient steps (5–15), transition mode (dither recommended), and optionally enable the **glaze pass** for a final unifying thin layer per gradient.
 4. Click "Generate Layers"
 5. Review the quantized preview, palette, and layer list
 6. Click "Start Projection" to enter fullscreen projection mode
@@ -74,6 +75,9 @@ The frontend will be available at `http://localhost:3000`
 - **O** - Cycle outline mode (off → thin → thick → glow)
 - **[** - Decrease mask opacity (40-100%, default 85%)
 - **]** - Increase mask opacity
+- **-** - Shrink projected image (25–100%, 5% steps)
+- **+** / **=** - Enlarge projected image (100–200%, 5% steps)
+- **F** - Toggle full-colour final image (see how current layer fits in) / back to current layer
 - **R** - Toggle registration mode (crosshairs + grid + outline only, no fill)
 - **B** - Black screen
 - **W** - White screen
@@ -81,6 +85,15 @@ The frontend will be available at `http://localhost:3000`
 - **←** / **→** - Navigate to previous/next layer
 - **Space** - Next layer
 - **D** - Mark current layer as Done (skipped in navigation)
+
+## Painting gradient regions (sky, water)
+
+When gradient detection is enabled, the app finds smooth gradient areas and replaces flat color bands with **ramp steps** (lighter to darker, top to bottom by default). Paint in layer order:
+
+1. **Gradient steps** – Paint each gradient step layer in order (Step 1, 2, …). Use the suggested colors; transitions between steps are dithered so edges blend when viewed from a distance.
+2. **Glaze pass** (optional) – If you enabled "Glaze pass", a final layer per gradient region is added. Paint it **last**, very thin/translucent, over the whole gradient area to unify the steps.
+
+Non-gradient areas are unchanged and use the normal palette layers.
 
 ## Features
 
@@ -187,6 +200,14 @@ Quick deployment steps:
 5. Start services: `sudo systemctl start backend.service frontend.service`
 
 For automated deployment, use the provided `deployment/deploy.sh` script.
+
+## Tests
+
+Basic gradient validation tests (coverage, no leak, deterministic output):
+
+```bash
+cd backend && source venv/bin/activate && python -m unittest tests.test_gradient_validation -v
+```
 
 ## Limitations
 

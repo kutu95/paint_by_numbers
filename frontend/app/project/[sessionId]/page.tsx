@@ -14,6 +14,7 @@ interface Layer {
   is_finished?: boolean
   finished_url?: string
   is_gradient?: boolean
+  is_glaze?: boolean
   gradient_region_id?: string
   gradient_step_index?: number
   hex?: string
@@ -50,6 +51,8 @@ export default function ProjectionViewer() {
   const [mouseActive, setMouseActive] = useState(true)
   const [doneLayers, setDoneLayers] = useState<Set<number>>(new Set())
   const [showDoneLayers, setShowDoneLayers] = useState(false)
+  const [projectionScale, setProjectionScale] = useState(1.0)
+  const [showFinalPreview, setShowFinalPreview] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const mouseTimerRef = useRef<NodeJS.Timeout>()
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null)
@@ -81,6 +84,22 @@ export default function ProjectionViewer() {
       setDoneLayers(new Set(JSON.parse(done)))
     }
   }, [sessionId])
+
+  // Load projection scale from localStorage (per session)
+  useEffect(() => {
+    const saved = localStorage.getItem(`projection_scale_${sessionId}`)
+    if (saved != null) {
+      const n = parseFloat(saved)
+      if (!Number.isNaN(n) && n >= 0.25 && n <= 2) setProjectionScale(n)
+    }
+  }, [sessionId])
+
+  // Persist projection scale when it changes
+  useEffect(() => {
+    if (projectionScale >= 0.25 && projectionScale <= 2) {
+      localStorage.setItem(`projection_scale_${sessionId}`, String(projectionScale))
+    }
+  }, [sessionId, projectionScale])
 
   // Save done layers to localStorage
   const saveDoneLayers = useCallback((layers: Set<number>) => {
@@ -268,6 +287,17 @@ export default function ProjectionViewer() {
           // S for Show - toggle showing done layers
           setShowDoneLayers((prev) => !prev)
           break
+        case '-':
+          setProjectionScale((prev) => Math.max(0.25, Math.round((prev - 0.05) * 100) / 100))
+          break
+        case '=':
+        case '+':
+          setProjectionScale((prev) => Math.min(2, Math.round((prev + 0.05) * 100) / 100))
+          break
+        case 'f':
+          // F for Final – toggle full-colour final image to see how current layer fits in
+          setShowFinalPreview((prev) => !prev)
+          break
         case 'escape':
         case 'Escape':
           // Save current session ID before navigating back
@@ -403,6 +433,11 @@ export default function ProjectionViewer() {
     currentLayerData.is_finished || outlineMode === 'off'
       ? null
       : `${baseUrl}${currentLayerData[`outline_${outlineMode}_url` as keyof Layer]}`
+  // URL for full-colour final image (preview) – used when showFinalPreview is on
+  const finishedLayer = sessionData.layers.find((l) => l.is_finished)
+  const finalPreviewUrl = finishedLayer
+    ? `${baseUrl}${finishedLayer.finished_url || finishedLayer.mask_url}`
+    : null
 
   return (
     <div
@@ -435,13 +470,20 @@ export default function ProjectionViewer() {
             </button>
           )}
 
-          {/* Main canvas */}
-          <div className="relative w-full h-full flex items-center justify-center">
-            {/* Finished image or Mask image */}
-            {currentLayerData.is_finished ? (
+          {/* Main canvas - scaled so projected area can match canvas size */}
+          <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
+            <div
+              className="w-full h-full flex items-center justify-center"
+              style={{
+                transform: `scale(${projectionScale})`,
+                transformOrigin: 'center center',
+              }}
+            >
+              {/* Finished image, or Final preview toggle, or current layer mask */}
+              {currentLayerData.is_finished || showFinalPreview ? (
               <img
-                src={`${baseUrl}${currentLayerData.finished_url || currentLayerData.mask_url}`}
-                alt="Finished Image"
+                src={showFinalPreview && finalPreviewUrl ? finalPreviewUrl : `${baseUrl}${currentLayerData.finished_url || currentLayerData.mask_url}`}
+                alt={showFinalPreview ? 'Final image preview' : 'Finished Image'}
                 className="absolute"
                 style={{
                   opacity: registrationMode ? 0 : 1,
@@ -498,78 +540,79 @@ export default function ProjectionViewer() {
               </>
             )}
 
-            {/* Corner crosshairs */}
-            {crosshairs && (
-              <svg className="absolute inset-0 w-full h-full pointer-events-none">
-                <defs>
-                  <style>{`
-                    .crosshair { stroke: #888; stroke-width: 2; }
-                  `}</style>
-                </defs>
-                {/* Top-left */}
-                <line
-                  x1="3%"
-                  y1="3%"
-                  x2="3%"
-                  y2="8%"
-                  className="crosshair"
-                />
-                <line
-                  x1="3%"
-                  y1="3%"
-                  x2="8%"
-                  y2="3%"
-                  className="crosshair"
-                />
-                {/* Top-right */}
-                <line
-                  x1="97%"
-                  y1="3%"
-                  x2="97%"
-                  y2="8%"
-                  className="crosshair"
-                />
-                <line
-                  x1="97%"
-                  y1="3%"
-                  x2="92%"
-                  y2="3%"
-                  className="crosshair"
-                />
-                {/* Bottom-left */}
-                <line
-                  x1="3%"
-                  y1="97%"
-                  x2="3%"
-                  y2="92%"
-                  className="crosshair"
-                />
-                <line
-                  x1="3%"
-                  y1="97%"
-                  x2="8%"
-                  y2="97%"
-                  className="crosshair"
-                />
-                {/* Bottom-right */}
-                <line
-                  x1="97%"
-                  y1="97%"
-                  x2="97%"
-                  y2="92%"
-                  className="crosshair"
-                />
-                <line
-                  x1="97%"
-                  y1="97%"
-                  x2="92%"
-                  y2="97%"
-                  className="crosshair"
-                />
-              </svg>
-            )}
+              {/* Corner crosshairs - inside scaled area so they move with the projected image */}
+              {crosshairs && (
+                <svg className="absolute inset-0 w-full h-full pointer-events-none">
+                  <defs>
+                    <style>{`
+                      .crosshair { stroke: #888; stroke-width: 2; }
+                    `}</style>
+                  </defs>
+                  {/* Top-left */}
+                  <line
+                    x1="3%"
+                    y1="3%"
+                    x2="3%"
+                    y2="8%"
+                    className="crosshair"
+                  />
+                  <line
+                    x1="3%"
+                    y1="3%"
+                    x2="8%"
+                    y2="3%"
+                    className="crosshair"
+                  />
+                  {/* Top-right */}
+                  <line
+                    x1="97%"
+                    y1="3%"
+                    x2="97%"
+                    y2="8%"
+                    className="crosshair"
+                  />
+                  <line
+                    x1="97%"
+                    y1="3%"
+                    x2="92%"
+                    y2="3%"
+                    className="crosshair"
+                  />
+                  {/* Bottom-left */}
+                  <line
+                    x1="3%"
+                    y1="97%"
+                    x2="3%"
+                    y2="92%"
+                    className="crosshair"
+                  />
+                  <line
+                    x1="3%"
+                    y1="97%"
+                    x2="8%"
+                    y2="97%"
+                    className="crosshair"
+                  />
+                  {/* Bottom-right */}
+                  <line
+                    x1="97%"
+                    y1="97%"
+                    x2="97%"
+                    y2="92%"
+                    className="crosshair"
+                  />
+                  <line
+                    x1="97%"
+                    y1="97%"
+                    x2="92%"
+                    y2="97%"
+                    className="crosshair"
+                  />
+                </svg>
+              )}
+            </div>
 
-            {/* Grid */}
+            {/* Grid - at viewport level */}
             {grid && (
               <svg className="absolute inset-0 w-full h-full pointer-events-none opacity-30">
                 <defs>
@@ -604,16 +647,24 @@ export default function ProjectionViewer() {
             <div className="fixed bottom-4 left-4 right-4 bg-black bg-opacity-70 p-4 rounded text-white text-sm">
               <div className="flex flex-wrap gap-4">
                 <div>
-                  {currentLayerData.is_finished 
-                    ? 'Finished Image' 
+                  {showFinalPreview
+                    ? `Final image (Layer: ${currentLayer + 1})`
+                    : currentLayerData.is_finished
+                    ? 'Finished Image'
                     : `Layer: ${currentLayer + 1} / ${sessionData.layers.length}`}
                 </div>
+                {showFinalPreview && (
+                  <div className="text-amber-300">F: Back to layer</div>
+                )}
                 {!currentLayerData.is_finished && (
                   <>
                     {currentLayerData.is_gradient && (
                       <div className="text-purple-300">
-                        Gradient Step {(currentLayerData.gradient_step_index ?? 0) + 1}
-                        {currentLayerData.gradient_region_id && ` (${currentLayerData.gradient_region_id})`}
+                        {currentLayerData.is_glaze
+                          ? 'Glaze (paint last, very thin)'
+                          : `Gradient Step ${((currentLayerData.gradient_step_index ?? 0) >= 0 && (currentLayerData.gradient_step_index ?? 0) < 100)
+                              ? (currentLayerData.gradient_step_index ?? 0) + 1
+                              : 0}${currentLayerData.gradient_region_id ? ` (${currentLayerData.gradient_region_id})` : ''}`}
                       </div>
                     )}
                     <div>Opacity: {maskOpacity}%</div>
@@ -621,6 +672,7 @@ export default function ProjectionViewer() {
                     <div>{showColor ? 'Color ON' : inverted ? 'Inverted' : 'Normal'}</div>
                   </>
                 )}
+                <div>Scale: {Math.round(projectionScale * 100)}%</div>
                 <div>{crosshairs ? 'Crosshairs ON' : 'Crosshairs OFF'}</div>
                 <div>{grid ? 'Grid ON' : 'Grid OFF'}</div>
                 <div>{registrationMode ? 'Registration ON' : 'Registration OFF'}</div>
@@ -630,7 +682,7 @@ export default function ProjectionViewer() {
                 )}
               </div>
               <div className="mt-2 text-xs text-gray-400">
-                ← → / Space / Swipe: Navigate | D: Toggle Done | C: Crosshairs | G: Grid | I: Invert | K: Color | O: Outline | [ ]: Opacity | R: Registration | B: Black | W: White | S: Show Done | H: HUD | Esc: Back
+                ← → / Space / Swipe: Navigate | D: Toggle Done | C: Crosshairs | G: Grid | I: Invert | K: Color | O: Outline | [ ]: Opacity | - +: Scale | F: Final image | R: Registration | B: Black | W: White | S: Show Done | H: HUD | Esc: Back
               </div>
             </div>
           )}

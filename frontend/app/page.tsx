@@ -18,6 +18,7 @@ interface Layer {
   outline_thick_url: string
   outline_glow_url: string
   is_gradient?: boolean
+  is_glaze?: boolean
   gradient_region_id?: string
   gradient_step_index?: number
   hex?: string
@@ -67,6 +68,7 @@ export default function Home() {
   const [gradientStepsN, setGradientStepsN] = useState(9)
   const [gradientTransitionMode, setGradientTransitionMode] = useState<'off' | 'dither' | 'feather-preview'>('dither')
   const [gradientTransitionWidth, setGradientTransitionWidth] = useState(25)
+  const [enableGlaze, setEnableGlaze] = useState(false)
   const [processing, setProcessing] = useState(false)
   const [sessionData, setSessionData] = useState<SessionResponse | null>(null)
   const [manualOrder, setManualOrder] = useState<number[]>([])
@@ -171,12 +173,13 @@ export default function Home() {
         gradientStepsN,
         gradientTransitionMode,
         gradientTransitionWidth,
+        enableGlaze,
       }
       localStorage.setItem('layerpainter_settings', JSON.stringify(settings))
     } catch (e) {
       console.error('Failed to save settings to localStorage:', e)
     }
-  }, [nColors, overpaintMm, orderMode, maxSide, saturationBoost, detailLevel, enableGradients, gradientStepsN, gradientTransitionMode, gradientTransitionWidth])
+  }, [nColors, overpaintMm, orderMode, maxSide, saturationBoost, detailLevel, enableGradients, gradientStepsN, gradientTransitionMode, gradientTransitionWidth, enableGlaze])
 
   // Set mounted flag and load settings from localStorage after component mounts (client-side only)
   useEffect(() => {
@@ -198,6 +201,7 @@ export default function Home() {
           if (parsed.gradientStepsN !== undefined) setGradientStepsN(parsed.gradientStepsN)
           if (parsed.gradientTransitionMode !== undefined) setGradientTransitionMode(parsed.gradientTransitionMode)
           if (parsed.gradientTransitionWidth !== undefined) setGradientTransitionWidth(parsed.gradientTransitionWidth)
+          if (parsed.enableGlaze !== undefined) setEnableGlaze(parsed.enableGlaze)
         }
       } catch (e) {
         console.error('Failed to load settings from localStorage:', e)
@@ -288,6 +292,7 @@ export default function Home() {
     formData.append('gradient_steps_n', gradientStepsN.toString())
     formData.append('gradient_transition_mode', gradientTransitionMode)
     formData.append('gradient_transition_width', gradientTransitionWidth.toString())
+    formData.append('enable_glaze', enableGlaze.toString())
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/sessions`, {
@@ -724,6 +729,19 @@ export default function Home() {
                           </div>
                         </div>
                       )}
+
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="checkbox"
+                          id="enableGlaze"
+                          checked={enableGlaze}
+                          onChange={(e) => setEnableGlaze(e.target.checked)}
+                          className="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500"
+                        />
+                        <label htmlFor="enableGlaze" className="text-sm">
+                          Glaze pass (add a unifying thin layer per gradient region — paint last)
+                        </label>
+                      </div>
                     </>
                   )}
                 </div>
@@ -960,23 +978,25 @@ export default function Home() {
                     if (isGradient) {
                       // Gradient layer - use the gradient step's own color
                       colorHex = layer.hex || '#808080'
-                      const stepNum = (layer.gradient_step_index || 0) + 1
-                      
-                      // Show which palette color(s) this gradient replaced (if available)
-                      let paletteInfo = ''
-                      if (layer.source_palette_indices && layer.source_palette_indices.length > 0) {
-                        // Show all source palette indices, or just the first if it's a single one
-                        if (layer.source_palette_indices.length === 1) {
-                          paletteInfo = ` (replaces Palette ${layer.source_palette_indices[0]})`
-                        } else {
-                          paletteInfo = ` (replaces Palettes ${layer.source_palette_indices.join(', ')})`
+                      const isGlaze = layer.is_glaze || false
+                      if (isGlaze) {
+                        displayText = 'Glaze (paint last, very thin)'
+                      } else {
+                        const stepNum = (layer.gradient_step_index ?? 0) >= 0 && (layer.gradient_step_index ?? 0) < 100
+                          ? (layer.gradient_step_index ?? 0) + 1
+                          : 0
+                        let paletteInfo = ''
+                        if (layer.source_palette_indices && layer.source_palette_indices.length > 0) {
+                          if (layer.source_palette_indices.length === 1) {
+                            paletteInfo = ` (replaces Palette ${layer.source_palette_indices[0]})`
+                          } else {
+                            paletteInfo = ` (replaces Palettes ${layer.source_palette_indices.join(', ')})`
+                          }
+                        } else if (layer.palette_index !== undefined && layer.palette_index >= 0) {
+                          paletteInfo = ` (replaces Palette ${layer.palette_index})`
                         }
-                      } else if (layer.palette_index !== undefined && layer.palette_index >= 0) {
-                        // Fallback to single palette_index if source_palette_indices not available
-                        paletteInfo = ` (replaces Palette ${layer.palette_index})`
+                        displayText = `Gradient Step ${stepNum}${paletteInfo}`
                       }
-                      
-                      displayText = `Gradient Step ${stepNum}${paletteInfo}`
                     } else {
                       // Regular quantized layer
                       const color = sessionData.palette.find((p) => p.index === layer.palette_index)
