@@ -8,23 +8,29 @@ Next.js environment variables starting with `NEXT_PUBLIC_` are **baked into the 
 
 ## Solution
 
-On your Ubuntu server, you need to **rebuild the frontend** with the correct API URL:
+On your Ubuntu server, do a **clean rebuild** so the correct API URL is baked in:
 
 ```bash
 cd /opt/layerpainter/frontend
 
-# Set the environment variable for the build
-export NEXT_PUBLIC_API_BASE_URL=https://layerpainter-api.margies.app
-
-# Rebuild the frontend (this bakes the API URL into the bundle)
-npm run build
-
-# Restart the frontend service
+# Option A: Pass the env var inline (recommended – guarantees it’s used)
+rm -rf .next
+NEXT_PUBLIC_API_BASE_URL=https://layerpainter-api.margies.app npm run build
 sudo systemctl restart frontend.service
-
-# Verify it's running
-sudo systemctl status frontend.service
 ```
+
+**Option B: Use a file so you don’t have to type the URL each time**
+
+```bash
+cd /opt/layerpainter/frontend
+cp .env.production.example .env.production
+# Edit .env.production and set NEXT_PUBLIC_API_BASE_URL to your API URL
+rm -rf .next
+npm run build
+sudo systemctl restart frontend.service
+```
+
+After deploying, **hard refresh the site** (Ctrl+Shift+R or Cmd+Shift+R) or open it in a private/incognito window so the browser doesn’t use an old cached bundle that still points at localhost.
 
 ## Verify the Fix
 

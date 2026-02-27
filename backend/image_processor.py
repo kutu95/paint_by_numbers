@@ -14,6 +14,10 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+# Bump this any time the processing pipeline changes in a way
+# that should invalidate previously cached masks/preview images.
+PIPELINE_VERSION = "v2"
+
 # Mask cache directory
 MASK_CACHE_DIR = Path(__file__).parent.parent / "data" / "mask_cache"
 try:
@@ -1123,7 +1127,9 @@ def compute_cache_key(image_path: str, n_colors: int, overpaint_mm: float, order
         image_hash = hashlib.sha256(f.read()).hexdigest()[:16]  # Use first 16 chars
     
     # Create parameter string (normalize floats to avoid precision issues)
-    params = f"{n_colors}_{overpaint_mm:.2f}_{order_mode}_{max_side}_{saturation_boost:.2f}_{detail_level:.2f}_{enable_gradients}_{gradient_steps_n}_{gradient_transition_mode}_{gradient_transition_width}_{enable_glaze}"
+    # Include PIPELINE_VERSION so changes to the processing pipeline
+    # (e.g. orientation handling) invalidate old cache entries.
+    params = f"{PIPELINE_VERSION}_{n_colors}_{overpaint_mm:.2f}_{order_mode}_{max_side}_{saturation_boost:.2f}_{detail_level:.2f}_{enable_gradients}_{gradient_steps_n}_{gradient_transition_mode}_{gradient_transition_width}_{enable_glaze}"
     
     # Combine image hash with parameters
     cache_key = f"{image_hash}_{params}"
@@ -1657,13 +1663,17 @@ def process_image(
     # Cache miss or load failed - process normally
     logger.info(f"Processing image (cache miss): {cache_key}")
     
-    # Load image
+    # Load image (BGR) and apply EXIF orientation so we start from the
+    # same upright view that cameras/phones intend.
     image = cv2.imread(image_path)
     if image is None:
         raise ValueError(f"Failed to load image from {image_path}. Check if file exists and is a valid image format.")
     
     if image.size == 0:
         raise ValueError("Loaded image is empty")
+    
+    # Apply EXIF orientation (cv2.imread ignores EXIF by default)
+    image = apply_exif_orientation(image, image_path)
     
     # Convert BGR to RGB
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -1678,6 +1688,19 @@ def process_image(
     # Check for invalid values
     if np.any(np.isnan(image)) or np.any(np.isinf(image)):
         raise ValueError("Image contains invalid (NaN or Inf) values after loading")
+    
+    # Auto-rotate portrait images 90 degrees counter-clockwise so they fit the canvas/screen better
+    h_raw, w_raw = image.shape[:2]
+    if h_raw > w_raw:
+        logger.info(f"Input image is portrait ({w_raw}x{h_raw}), rotating 90 degrees CCW for processing")
+        image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    
+    # Save an oriented copy of the original image (for projection viewer "original" toggle)
+    oriented_original_path = output_dir / "original_oriented.jpg"
+    try:
+        cv2.imwrite(str(oriented_original_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    except Exception as e:
+        logger.warning(f"Failed to save oriented original image to {oriented_original_path}: {e}")
     
     # Step 1: Normalize
     normalized, scale = normalize_image(image, max_side)
@@ -1796,6 +1819,11 @@ def process_image(
         mask_path = output_dir / f'layer_{regular_start_idx + layer_idx}_mask.png'
         cv2.imwrite(str(mask_path), mask)
         
+        # Pure mask: base mask before overpaint expansion (exact colour region only)
+        pure_mask = base_masks[palette_idx]
+        pure_mask_path = output_dir / f'layer_{regular_start_idx + layer_idx}_pure_mask.png'
+        cv2.imwrite(str(pure_mask_path), pure_mask)
+        
         # Generate outlines
         for outline_style in ['thin', 'thick', 'glow']:
             outline = generate_outline(mask, outline_style)
@@ -1806,6 +1834,7 @@ def process_image(
             'layer_index': regular_start_idx + layer_idx,
             'palette_index': palette_idx,
             'mask_url': f'/api/sessions/{output_dir.name}/layer_{regular_start_idx + layer_idx}_mask.png',
+            'mask_pure_url': f'/api/sessions/{output_dir.name}/layer_{regular_start_idx + layer_idx}_pure_mask.png',
             'outline_thin_url': f'/api/sessions/{output_dir.name}/layer_{regular_start_idx + layer_idx}_outline_thin.png',
             'outline_thick_url': f'/api/sessions/{output_dir.name}/layer_{regular_start_idx + layer_idx}_outline_thick.png',
             'outline_glow_url': f'/api/sessions/{output_dir.name}/layer_{regular_start_idx + layer_idx}_outline_glow.png'
@@ -1857,6 +1886,7 @@ def process_image(
         'order': order,
         'quantized_preview_url': f'/api/sessions/{output_dir.name}/preview.jpg',
         'layers': layers,
+        'original_url': f'/api/sessions/{output_dir.name}/original_oriented.jpg',
         'gradient_regions': gradient_regions_data
     }
     

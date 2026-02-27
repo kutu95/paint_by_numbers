@@ -48,6 +48,7 @@ interface SessionResponse {
   palette: PaletteColor[]
   order: number[]
   quantized_preview_url: string
+  original_url?: string
   layers: Layer[]
   gradient_regions?: GradientRegion[]
 }
@@ -64,7 +65,7 @@ export default function Home() {
   const [maxSide, setMaxSide] = useState(1920)
   const [saturationBoost, setSaturationBoost] = useState(1.0)
   const [detailLevel, setDetailLevel] = useState(0.5)
-  const [enableGradients, setEnableGradients] = useState(true)
+  const [enableGradients, setEnableGradients] = useState(false)
   const [gradientStepsN, setGradientStepsN] = useState(9)
   const [gradientTransitionMode, setGradientTransitionMode] = useState<'off' | 'dither' | 'feather-preview'>('dither')
   const [gradientTransitionWidth, setGradientTransitionWidth] = useState(25)
@@ -104,36 +105,53 @@ export default function Home() {
     if (file) {
       setImage(file)
       const reader = new FileReader()
-      reader.onload = (e) => {
-        const previewData = e.target?.result as string
-        setPreview(previewData)
+      reader.onload = (event) => {
+        const originalDataUrl = event.target?.result as string
         
-        // Compress image before saving to localStorage to avoid quota errors
+        // Compress image before saving to localStorage to avoid quota errors,
+        // and always rotate portrait images to landscape for preview.
         const img = new Image()
         img.onload = () => {
-          // Create canvas to compress image
-          const canvas = document.createElement('canvas')
           const maxWidth = 800 // Max width for compressed preview
           const maxHeight = 600 // Max height for compressed preview
+          const isPortrait = img.height > img.width
           
-          let width = img.width
-          let height = img.height
-          
-          // Calculate new dimensions while maintaining aspect ratio
-          if (width > maxWidth || height > maxHeight) {
-            const ratio = Math.min(maxWidth / width, maxHeight / height)
-            width = width * ratio
-            height = height * ratio
+          // Determine canvas size based on orientation, ensuring final preview is landscape
+          let canvasWidth: number
+          let canvasHeight: number
+          if (isPortrait) {
+            const ratio = Math.min(maxWidth / img.height, maxHeight / img.width, 1)
+            canvasWidth = img.height * ratio
+            canvasHeight = img.width * ratio
+          } else {
+            const ratio = Math.min(maxWidth / img.width, maxHeight / img.height, 1)
+            canvasWidth = img.width * ratio
+            canvasHeight = img.height * ratio
           }
           
-          canvas.width = width
-          canvas.height = height
+          const canvas = document.createElement('canvas')
+          canvas.width = canvasWidth
+          canvas.height = canvasHeight
           const ctx = canvas.getContext('2d')
           
           if (ctx) {
-            ctx.drawImage(img, 0, 0, width, height)
+            if (isPortrait) {
+              // Rotate 90 degrees counter-clockwise around canvas center
+              ctx.save()
+              ctx.translate(canvasWidth / 2, canvasHeight / 2)
+              ctx.rotate(-Math.PI / 2)
+              const scale = Math.min(canvasWidth / img.height, canvasHeight / img.width)
+              const drawWidth = img.width * scale
+              const drawHeight = img.height * scale
+              ctx.drawImage(img, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight)
+              ctx.restore()
+            } else {
+              ctx.drawImage(img, 0, 0, canvasWidth, canvasHeight)
+            }
+            
             // Convert to compressed JPEG (quality 0.7)
             const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.7)
+            setPreview(compressedDataUrl)
             
             // Try to save compressed preview to localStorage
             try {
@@ -152,7 +170,7 @@ export default function Home() {
             }
           }
         }
-        img.src = previewData
+        img.src = originalDataUrl
       }
       reader.readAsDataURL(file)
     }
@@ -646,7 +664,8 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Gradient-Aware Quantization Settings */}
+              {/* Gradient-Aware Quantization - disabled and hidden for now */}
+              {false && (
               <div className="col-span-2 border-t border-gray-700 pt-4 mt-4">
                 <h3 className="text-lg font-semibold mb-4">Gradient-Aware Quantization</h3>
                 <p className="text-sm text-gray-400 mb-4">
@@ -746,6 +765,7 @@ export default function Home() {
                   )}
                 </div>
               </div>
+              )}
             </div>
 
             <button

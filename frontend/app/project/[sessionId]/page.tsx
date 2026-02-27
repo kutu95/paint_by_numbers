@@ -8,6 +8,7 @@ interface Layer {
   layer_index: number
   palette_index: number
   mask_url: string
+  mask_pure_url?: string
   outline_thin_url: string
   outline_thick_url: string
   outline_glow_url: string
@@ -28,6 +29,8 @@ interface SessionData {
   palette: Array<{ index: number; hex: string; coverage: number }>
   order: number[]
   layers: Layer[]
+  quantized_preview_url?: string
+   original_url?: string
 }
 
 type OutlineMode = 'off' | 'thin' | 'thick' | 'glow'
@@ -53,6 +56,8 @@ export default function ProjectionViewer() {
   const [showDoneLayers, setShowDoneLayers] = useState(false)
   const [projectionScale, setProjectionScale] = useState(1.0)
   const [showFinalPreview, setShowFinalPreview] = useState(false)
+  const [showOriginalImage, setShowOriginalImage] = useState(false)
+  const [usePureMask, setUsePureMask] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const mouseTimerRef = useRef<NodeJS.Timeout>()
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null)
@@ -220,7 +225,16 @@ export default function ProjectionViewer() {
           setCrosshairs((prev) => !prev)
           break
         case 'g':
-          setGrid((prev) => !prev)
+          // G for original (Source) image
+          e.preventDefault()
+          setShowOriginalImage((prev) => {
+            const next = !prev
+            if (next) {
+              // When showing original, hide final preview
+              setShowFinalPreview(false)
+            }
+            return next
+          })
           break
         case 'i':
           setInverted((prev) => {
@@ -233,7 +247,7 @@ export default function ProjectionViewer() {
           })
           break
         case 'k':
-          // K for color (Kolor) - toggle actual color display
+          // K for color (Kolor) - toggle actual color display (using current mask mode)
           setShowColor((prev) => {
             const newShowColor = !prev
             // When enabling color, turn off invert
@@ -296,7 +310,23 @@ export default function ProjectionViewer() {
           break
         case 'f':
           // F for Final – toggle full-colour final image to see how current layer fits in
-          setShowFinalPreview((prev) => !prev)
+          e.preventDefault()
+          setShowFinalPreview((prev) => {
+            const next = !prev
+            if (next) {
+              // When showing final image, hide original
+              setShowOriginalImage(false)
+            }
+            return next
+          })
+          break
+        case 'l':
+          // L for Layer mask mode – toggle between expanded (with overpaint) and pure mask
+          setUsePureMask((prev) => !prev)
+          break
+        case 'x':
+          // X for grid (eXtra lines)
+          setGrid((prev) => !prev)
           break
         case 'escape':
         case 'Escape':
@@ -341,10 +371,15 @@ export default function ProjectionViewer() {
       return
     }
     
+    // Choose which mask to colorize based on current mask mode:
+    // - usePureMask = true  → prefer pure mask when available
+    // - usePureMask = false → always use expanded mask
+    const maskUrlForColor =
+      usePureMask && layerData.mask_pure_url ? layerData.mask_pure_url : layerData.mask_url
     // Load mask image and replace white pixels with palette color
     const img = new Image()
     img.crossOrigin = 'anonymous'
-    const maskUrl = `${API_BASE_URL}${layerData.mask_url}`
+    const maskUrl = `${API_BASE_URL}${maskUrlForColor}`
     
     img.onload = () => {
       try {
@@ -401,7 +436,7 @@ export default function ProjectionViewer() {
     
     img.src = maskUrl
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showColor, currentLayer, sessionData, API_BASE_URL])
+  }, [showColor, currentLayer, sessionData, API_BASE_URL, usePureMask])
 
   if (!sessionData) {
     return (
@@ -429,15 +464,19 @@ export default function ProjectionViewer() {
   }
 
   const baseUrl = API_BASE_URL
+  const originalImageUrl = sessionData.original_url ? `${baseUrl}${sessionData.original_url}` : null
   const outlineUrl =
     currentLayerData.is_finished || outlineMode === 'off'
       ? null
       : `${baseUrl}${currentLayerData[`outline_${outlineMode}_url` as keyof Layer]}`
   // URL for full-colour final image (preview) – used when showFinalPreview is on
   const finishedLayer = sessionData.layers.find((l) => l.is_finished)
-  const finalPreviewUrl = finishedLayer
-    ? `${baseUrl}${finishedLayer.finished_url || finishedLayer.mask_url}`
-    : null
+  const finalPreviewUrl =
+    finishedLayer
+      ? `${baseUrl}${finishedLayer.finished_url || finishedLayer.mask_url}`
+      : sessionData.quantized_preview_url
+        ? `${baseUrl}${sessionData.quantized_preview_url}`
+        : null
 
   return (
     <div
@@ -479,21 +518,38 @@ export default function ProjectionViewer() {
                 transformOrigin: 'center center',
               }}
             >
-              {/* Finished image, or Final preview toggle, or current layer mask */}
-              {currentLayerData.is_finished || showFinalPreview ? (
-              <img
-                src={showFinalPreview && finalPreviewUrl ? finalPreviewUrl : `${baseUrl}${currentLayerData.finished_url || currentLayerData.mask_url}`}
-                alt={showFinalPreview ? 'Final image preview' : 'Finished Image'}
-                className="absolute"
-                style={{
-                  opacity: registrationMode ? 0 : 1,
-                  filter: inverted ? 'invert(1)' : 'none',
-                  maxWidth: '100%',
-                  maxHeight: '100%',
-                  objectFit: 'contain',
-                }}
-              />
-            ) : (
+              {/* Original image, final image, or current layer mask */}
+              {showOriginalImage && originalImageUrl ? (
+                <img
+                  src={originalImageUrl}
+                  alt="Original image"
+                  className="absolute"
+                  style={{
+                    opacity: registrationMode ? 0 : 1,
+                    filter: inverted ? 'invert(1)' : 'none',
+                    maxWidth: '100%',
+                    maxHeight: '100%',
+                    objectFit: 'contain',
+                  }}
+                />
+              ) : currentLayerData.is_finished || showFinalPreview ? (
+                <img
+                  src={
+                    showFinalPreview && finalPreviewUrl
+                      ? finalPreviewUrl
+                      : `${baseUrl}${currentLayerData.finished_url || currentLayerData.mask_url}`
+                  }
+                  alt={showFinalPreview ? 'Final image preview' : 'Finished Image'}
+                  className="absolute"
+                  style={{
+                    opacity: registrationMode ? 0 : 1,
+                    filter: inverted ? 'invert(1)' : 'none',
+                    maxWidth: '100%',
+                    maxHeight: '100%',
+                    objectFit: 'contain',
+                  }}
+                />
+              ) : (
               <>
                 {/* Mask image - with color or monochrome */}
                 {showColor && layerColor && coloredMaskUrl ? (
@@ -510,7 +566,11 @@ export default function ProjectionViewer() {
                   />
                 ) : (
                   <img
-                    src={`${baseUrl}${currentLayerData.mask_url}`}
+                    src={`${baseUrl}${
+                      usePureMask && currentLayerData.mask_pure_url
+                        ? currentLayerData.mask_pure_url
+                        : currentLayerData.mask_url
+                    }`}
                     alt={`Layer ${currentLayer + 1}`}
                     className="absolute"
                     crossOrigin="anonymous"
@@ -647,14 +707,31 @@ export default function ProjectionViewer() {
             <div className="fixed bottom-4 left-4 right-4 bg-black bg-opacity-70 p-4 rounded text-white text-sm">
               <div className="flex flex-wrap gap-4">
                 <div>
-                  {showFinalPreview
+                  {showOriginalImage
+                    ? 'Original image'
+                    : showFinalPreview
                     ? `Final image (Layer: ${currentLayer + 1})`
                     : currentLayerData.is_finished
                     ? 'Finished Image'
                     : `Layer: ${currentLayer + 1} / ${sessionData.layers.length}`}
                 </div>
-                {showFinalPreview && (
-                  <div className="text-amber-300">F: Back to layer</div>
+                {finalPreviewUrl && (
+                  <button
+                    type="button"
+                    onClick={() => setShowFinalPreview((prev) => !prev)}
+                    className="px-2 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white text-sm"
+                  >
+                    {showFinalPreview ? 'Back to layer (F)' : 'Show final image (F)'}
+                  </button>
+                )}
+                {originalImageUrl && (
+                  <button
+                    type="button"
+                    onClick={() => setShowOriginalImage((prev) => !prev)}
+                    className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm"
+                  >
+                    {showOriginalImage ? 'Back to layer (G)' : 'Show original image (G)'}
+                  </button>
                 )}
                 {!currentLayerData.is_finished && (
                   <>
@@ -667,6 +744,7 @@ export default function ProjectionViewer() {
                               : 0}${currentLayerData.gradient_region_id ? ` (${currentLayerData.gradient_region_id})` : ''}`}
                       </div>
                     )}
+                    <div>Mask: {usePureMask ? 'Pure (no overpaint)' : 'Expanded (with overpaint)'}</div>
                     <div>Opacity: {maskOpacity}%</div>
                     <div>Outline: {outlineMode}</div>
                     <div>{showColor ? 'Color ON' : inverted ? 'Inverted' : 'Normal'}</div>
@@ -682,7 +760,7 @@ export default function ProjectionViewer() {
                 )}
               </div>
               <div className="mt-2 text-xs text-gray-400">
-                ← → / Space / Swipe: Navigate | D: Toggle Done | C: Crosshairs | G: Grid | I: Invert | K: Color | O: Outline | [ ]: Opacity | - +: Scale | F: Final image | R: Registration | B: Black | W: White | S: Show Done | H: HUD | Esc: Back
+                ← → / Space / Swipe: Navigate | D: Toggle Done | C: Crosshairs | X: Grid | I: Invert | K: Color | L: Mask mode (Pure/Expanded) | O: Outline | [ ]: Opacity | - +: Scale | F: Final image | G: Original image | R: Registration | B: Black | W: White | S: Show Done | H: HUD | Esc: Back
               </div>
             </div>
           )}

@@ -26,9 +26,13 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # CORS middleware - allow origins from environment or default to localhost
-# Default includes common ports for compatibility
-cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003")
-allowed_origins = [origin.strip() for origin in cors_origins_str.split(",")]
+# Always include localhost so local dev works even when CORS_ORIGINS is set for production
+default_origins = "http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003"
+cors_origins_str = os.getenv("CORS_ORIGINS", default_origins)
+allowed_origins = [o.strip() for o in cors_origins_str.split(",") if o.strip()]
+for origin in default_origins.split(","):
+    if origin.strip() not in allowed_origins:
+        allowed_origins.append(origin.strip())
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -75,7 +79,7 @@ async def create_session(
     max_side: int = Form(1920),
     saturation_boost: float = Form(1.0),
     detail_level: float = Form(0.5),
-    enable_gradients: str = Form("true"),
+    enable_gradients: str = Form("false"),
     gradient_steps_n: int = Form(9),
     gradient_transition_mode: str = Form("dither"),
     gradient_transition_width: int = Form(25),
@@ -107,17 +111,18 @@ async def create_session(
         logger.error(f"Invalid detail_level: {detail_level}")
         raise HTTPException(status_code=400, detail="detail_level must be between 0.0 and 1.0")
     
-    # Validate gradient parameters
+    # Validate gradient parameters (only when gradients are enabled)
     enable_gradients_bool = enable_gradients.lower() in ('true', '1', 'yes', 'on')
-    if gradient_steps_n < 5 or gradient_steps_n > 15:
-        logger.error(f"Invalid gradient_steps_n: {gradient_steps_n}")
-        raise HTTPException(status_code=400, detail="gradient_steps_n must be between 5 and 15")
-    if gradient_transition_mode not in ['off', 'dither', 'feather-preview']:
-        logger.error(f"Invalid gradient_transition_mode: {gradient_transition_mode}")
-        raise HTTPException(status_code=400, detail="gradient_transition_mode must be 'off', 'dither', or 'feather-preview'")
-    if gradient_transition_width < 5 or gradient_transition_width > 60:
-        logger.error(f"Invalid gradient_transition_width: {gradient_transition_width}")
-        raise HTTPException(status_code=400, detail="gradient_transition_width must be between 5 and 60")
+    if enable_gradients_bool:
+        if gradient_steps_n < 5 or gradient_steps_n > 15:
+            logger.error(f"Invalid gradient_steps_n: {gradient_steps_n}")
+            raise HTTPException(status_code=400, detail="gradient_steps_n must be between 5 and 15")
+        if gradient_transition_mode not in ['off', 'dither', 'feather-preview']:
+            logger.error(f"Invalid gradient_transition_mode: {gradient_transition_mode}")
+            raise HTTPException(status_code=400, detail="gradient_transition_mode must be 'off', 'dither', or 'feather-preview'")
+        if gradient_transition_width < 5 or gradient_transition_width > 60:
+            logger.error(f"Invalid gradient_transition_width: {gradient_transition_width}")
+            raise HTTPException(status_code=400, detail="gradient_transition_width must be between 5 and 60")
     enable_glaze_bool = enable_glaze.lower() in ('true', '1', 'yes', 'on')
     
     # Create session directory
@@ -156,6 +161,7 @@ async def create_session(
             enable_glaze=enable_glaze_bool
         )
         
+        # Attach session ID (original/oriented URLs are provided by process_image)
         result['session_id'] = session_id
         return result
     except Exception as e:
