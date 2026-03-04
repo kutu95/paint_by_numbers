@@ -2,6 +2,8 @@
 
 This guide will help you deploy LayerPainter to an Ubuntu server at IP `192.168.0.146`.
 
+**To upgrade an already-installed app from GitHub**, see [UPGRADE_FROM_GITHUB.md](UPGRADE_FROM_GITHUB.md).
+
 ## Prerequisites
 
 On your Ubuntu server, install:

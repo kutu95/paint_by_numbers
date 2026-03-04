@@ -55,7 +55,7 @@ data/mask_cache/
 data/paint/calibration/*.json
 data/paint/calibration/*.jpg
 data/paint/calibration/*.png
-# Library is per-server/per-user; do not track in git (avoids pull conflicts)
+# Paint library: stored on server only (single shared library for now; per-user later)
 data/paint/library.json
 
 # Deployment - allow service files in deployment directory

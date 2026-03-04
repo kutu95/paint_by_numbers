@@ -190,7 +190,7 @@ After mixing a recipe, you can:
 
 ## Deployment
 
-See [deployment/DEPLOYMENT.md](deployment/DEPLOYMENT.md) for detailed instructions on deploying to an Ubuntu server.
+See [deployment/DEPLOYMENT.md](deployment/DEPLOYMENT.md) for detailed instructions on deploying to an Ubuntu server. To **upgrade** an existing server from GitHub, see [deployment/UPGRADE_FROM_GITHUB.md](deployment/UPGRADE_FROM_GITHUB.md).
 
 Quick deployment steps:
 1. Copy files to server at `/opt/layerpainter/`

@@ -2,13 +2,14 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
+from typing import Optional
 import uuid
 import shutil
 from datetime import datetime, timedelta
 import os
 import traceback
 import logging
-from image_processor import process_image
+from image_processor import process_image, regenerate_pure_mask_from_labels
 from paint_manager import (
     load_library, save_library, slugify, atomic_write,
     sample_color_from_image, sample_color_from_region, normalize_calibration_samples,
@@ -47,7 +48,30 @@ app.add_middleware(
 DATA_DIR = Path(__file__).parent.parent / "data" / "sessions"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-SESSION_CLEANUP_HOURS = 24
+BACKEND_DIR = Path(__file__).parent
+ENV_FILE = BACKEND_DIR / ".env"
+
+
+def _get_openai_api_key() -> Optional[str]:
+    """Return OpenAI API key from environment or from backend/.env file."""
+    key = os.getenv("OPENAI_API_KEY")
+    if key and key.strip():
+        return key.strip()
+    if ENV_FILE.exists():
+        try:
+            with open(ENV_FILE) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("OPENAI_API_KEY="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if val:
+                            return val
+                        break
+        except Exception:
+            pass
+    return None
+
+SESSION_CLEANUP_HOURS = 24 * 30  # 30 days so project images persist when reopened
 
 
 def cleanup_old_sessions():
@@ -80,11 +104,8 @@ async def create_session(
     max_side: int = Form(1920),
     saturation_boost: float = Form(1.0),
     detail_level: float = Form(0.5),
-    enable_gradients: str = Form("false"),
-    gradient_steps_n: int = Form(9),
-    gradient_transition_mode: str = Form("dither"),
-    gradient_transition_width: int = Form(25),
-    enable_glaze: str = Form("false")
+    canvas_width_cm: float = Form(0),
+    canvas_height_cm: float = Form(0),
 ):
     """Create a new session and process the image."""
     try:
@@ -111,20 +132,6 @@ async def create_session(
     if detail_level < 0.0 or detail_level > 1.0:
         logger.error(f"Invalid detail_level: {detail_level}")
         raise HTTPException(status_code=400, detail="detail_level must be between 0.0 and 1.0")
-    
-    # Validate gradient parameters (only when gradients are enabled)
-    enable_gradients_bool = enable_gradients.lower() in ('true', '1', 'yes', 'on')
-    if enable_gradients_bool:
-        if gradient_steps_n < 5 or gradient_steps_n > 15:
-            logger.error(f"Invalid gradient_steps_n: {gradient_steps_n}")
-            raise HTTPException(status_code=400, detail="gradient_steps_n must be between 5 and 15")
-        if gradient_transition_mode not in ['off', 'dither', 'feather-preview']:
-            logger.error(f"Invalid gradient_transition_mode: {gradient_transition_mode}")
-            raise HTTPException(status_code=400, detail="gradient_transition_mode must be 'off', 'dither', or 'feather-preview'")
-        if gradient_transition_width < 5 or gradient_transition_width > 60:
-            logger.error(f"Invalid gradient_transition_width: {gradient_transition_width}")
-            raise HTTPException(status_code=400, detail="gradient_transition_width must be between 5 and 60")
-    enable_glaze_bool = enable_glaze.lower() in ('true', '1', 'yes', 'on')
     
     # Create session directory
     session_id = str(uuid.uuid4())
@@ -155,15 +162,12 @@ async def create_session(
             max_side,
             saturation_boost,
             detail_level,
-            enable_gradients=enable_gradients_bool,
-            gradient_steps_n=gradient_steps_n,
-            gradient_transition_mode=gradient_transition_mode,
-            gradient_transition_width=gradient_transition_width,
-            enable_glaze=enable_glaze_bool
         )
         
-        # Attach session ID (original/oriented URLs are provided by process_image)
+        # Attach session ID and canvas dimensions (original/oriented URLs from process_image)
         result['session_id'] = session_id
+        result['canvas_width_cm'] = max(0, float(canvas_width_cm))
+        result['canvas_height_cm'] = max(0, float(canvas_height_cm))
         return result
     except Exception as e:
         # Log the full traceback for debugging
@@ -172,6 +176,87 @@ async def create_session(
         # Cleanup on error
         shutil.rmtree(session_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+
+def _find_stored_input_path(session_dir: Path) -> Optional[Path]:
+    """Find the stored original image in a session directory (input.jpg, input.png, etc.)."""
+    for name in ["input.jpg", "input.jpeg", "input.png", "input.webp", "input.bmp", "input.gif"]:
+        p = session_dir / name
+        if p.exists() and p.is_file():
+            return p
+    # Fallback: any file starting with 'input.'
+    for f in session_dir.iterdir():
+        if f.is_file() and f.name.startswith("input."):
+            return f
+    return None
+
+
+@app.get("/api/sessions/{session_id}/info")
+async def get_session_info(session_id: str):
+    """Return minimal session info (e.g. original_url) so the client can show stored image without re-upload."""
+    session_dir = DATA_DIR / session_id
+    if not session_dir.exists() or not session_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    original_path = session_dir / "original_oriented.jpg"
+    has_stored = _find_stored_input_path(session_dir) is not None
+    return {
+        "session_id": session_id,
+        "original_url": f"/api/sessions/{session_id}/original_oriented.jpg" if original_path.exists() else None,
+        "has_stored_image": has_stored,
+    }
+
+
+@app.post("/api/sessions/{session_id}/reprocess")
+async def reprocess_session(
+    session_id: str,
+    n_colors: int = Form(16),
+    overpaint_mm: float = Form(5.0),
+    order_mode: str = Form("largest"),
+    max_side: int = Form(1920),
+    saturation_boost: float = Form(1.0),
+    detail_level: float = Form(0.5),
+    canvas_width_cm: float = Form(0),
+    canvas_height_cm: float = Form(0),
+):
+    """Reprocess a session using the stored original image (no upload). Use when editing project settings only."""
+    session_dir = DATA_DIR / session_id
+    if not session_dir.exists() or not session_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    image_path = _find_stored_input_path(session_dir)
+    if not image_path:
+        raise HTTPException(status_code=404, detail="No stored original image for this session. Upload a new image instead.")
+    # Validate same as create_session
+    if n_colors < 2 or n_colors > 100:
+        raise HTTPException(status_code=400, detail="n_colors must be between 2 and 100")
+    if overpaint_mm < 0 or overpaint_mm > 50:
+        raise HTTPException(status_code=400, detail="overpaint_mm must be between 0 and 50")
+    if order_mode not in ["largest", "smallest", "manual", "lightest"]:
+        raise HTTPException(status_code=400, detail="order_mode must be largest, smallest, manual, or lightest")
+    if max_side < 100 or max_side > 5000:
+        raise HTTPException(status_code=400, detail="max_side must be between 100 and 5000")
+    if saturation_boost < 0.5 or saturation_boost > 5.0:
+        raise HTTPException(status_code=400, detail="saturation_boost must be between 0.5 and 5.0")
+    if detail_level < 0.0 or detail_level > 1.0:
+        raise HTTPException(status_code=400, detail="detail_level must be between 0.0 and 1.0")
+    try:
+        result = process_image(
+            str(image_path),
+            session_dir,
+            n_colors,
+            overpaint_mm,
+            order_mode,
+            max_side,
+            saturation_boost,
+            detail_level,
+        )
+        result["session_id"] = session_id
+        result["canvas_width_cm"] = max(0, float(canvas_width_cm))
+        result["canvas_height_cm"] = max(0, float(canvas_height_cm))
+        return result
+    except Exception as e:
+        logger.error(f"Reprocess failed: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Reprocessing failed: {str(e)}")
 
 
 @app.options("/api/sessions/{session_id}/{filename}")
@@ -208,9 +293,29 @@ async def options_session_file(session_id: str, filename: str, request: Request)
 async def get_session_file(session_id: str, filename: str, request: Request):
     """Serve session files with CORS headers for canvas/image loading."""
     file_path = DATA_DIR / session_id / filename
-    
+
+    session_dir = DATA_DIR / session_id
     if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
+        # Pure mask: regenerate from labels when possible (exact quantized region, no gaps)
+        if filename.endswith("_pure_mask.png"):
+            try:
+                layer_index = int(filename.replace("layer_", "").replace("_pure_mask.png", ""))
+            except ValueError:
+                layer_index = -1
+            if layer_index >= 0 and regenerate_pure_mask_from_labels(session_dir, layer_index):
+                pass  # file_path now exists, fall through to serve
+            else:
+                raise HTTPException(status_code=404, detail="Pure mask unavailable")
+        else:
+            raise HTTPException(status_code=404, detail="File not found")
+    elif filename.endswith("_pure_mask.png"):
+        # Always regenerate pure mask from labels when available so display has no gaps
+        try:
+            layer_index = int(filename.replace("layer_", "").replace("_pure_mask.png", ""))
+        except ValueError:
+            layer_index = -1
+        if layer_index >= 0:
+            regenerate_pure_mask_from_labels(session_dir, layer_index)
     
     # Security check: ensure file is within session directory
     try:
@@ -250,6 +355,38 @@ async def get_session_file(session_id: str, filename: str, request: Request):
     return response
 
 
+# ===== Settings (OpenAI key) =====
+
+@app.get("/api/settings/openai-key/configured")
+async def get_openai_key_configured():
+    """Return whether an OpenAI API key is configured (without revealing it)."""
+    return {"configured": bool(_get_openai_api_key())}
+
+
+@app.post("/api/settings/openai-key")
+async def set_openai_key(request: Request):
+    """Save OpenAI API key to backend/.env. Takes effect immediately for recipe generation."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON body required")
+    key = body.get("key")
+    if key is None:
+        raise HTTPException(status_code=400, detail="Missing 'key'")
+    key = str(key).strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Key cannot be empty")
+    try:
+        temp_file = ENV_FILE.with_suffix(".env.tmp")
+        with open(temp_file, "w") as f:
+            f.write(f"OPENAI_API_KEY={key}\n")
+        temp_file.replace(ENV_FILE)
+    except Exception:
+        logger.exception("Failed to write .env")
+        raise HTTPException(status_code=500, detail="Failed to save key")
+    return {"ok": True}
+
+
 # ===== Paint Management Endpoints =====
 
 @app.get("/api/paint/library")
@@ -285,10 +422,33 @@ async def create_library_group(
         "version": 1,
         "paints": [],
         "group": group_id,
-        "name": name
+        "name": name,
+        "coverage_mg_per_cm2": None,
     }
     save_library(new_library, group_id)
     
+    return get_library_info(group_id)
+
+
+@app.put("/api/paint/library/groups/{group_id}/settings")
+async def update_library_settings(
+    group_id: str,
+    coverage_mg_per_cm2: Optional[float] = Form(None),
+):
+    """Update library-level settings (e.g. coverage for the whole library)."""
+    existing_groups = list_library_groups()
+    if group_id not in existing_groups:
+        raise HTTPException(status_code=404, detail=f"Library group '{group_id}' not found")
+    library = load_library(group_id)
+    if coverage_mg_per_cm2 not in (None, ""):
+        try:
+            val = float(coverage_mg_per_cm2)
+            library["coverage_mg_per_cm2"] = val if val > 0 else None
+        except (TypeError, ValueError):
+            library["coverage_mg_per_cm2"] = None
+    else:
+        library["coverage_mg_per_cm2"] = None
+    save_library(library, group_id)
     return get_library_info(group_id)
 
 
@@ -320,7 +480,7 @@ async def add_paint(
     name: str = Form(...),
     hex_approx: str = Form(...),
     notes: str = Form(""),
-    group: str = Form("default")
+    group: str = Form("default"),
 ):
     """Add a new paint to the library."""
     library = load_library(group)
@@ -336,7 +496,7 @@ async def add_paint(
         "name": name,
         "type": "base",
         "hex_approx": hex_approx,
-        "notes": notes
+        "notes": notes,
     }
     
     library['paints'].append(new_paint)
@@ -351,7 +511,7 @@ async def update_paint(
     name: str = Form(...),
     hex_approx: str = Form(...),
     notes: str = Form(""),
-    group: str = Form("default")
+    group: str = Form("default"),
 ):
     """Update an existing paint. If calibration exists, recalculate hex_approx from the 100% swatch."""
     library = load_library(group)
@@ -581,10 +741,10 @@ async def generate_recipes_from_palette(
             ]
         }
     
-    # Initialize OpenAI client
-    api_key = os.getenv("OPENAI_API_KEY")
+    # Initialize OpenAI client (key from env or backend/.env)
+    api_key = _get_openai_api_key()
     if not api_key:
-        logger.error("OPENAI_API_KEY environment variable not set")
+        logger.error("OPENAI API key not set (env or .env)")
         return {
             "recipes": [
                 {
@@ -966,4 +1126,3 @@ async def verify_swatch(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

@@ -32,6 +32,11 @@ Tech Stack (MANDATORY)
 
 ⸻
 
+Paint library & calibration
+	•	Paint library (data/paint/library.json) and calibration files live on the server only; they are not in git. For now there is a single shared library per server. Later, user logins will allow each user to have their own library.
+
+⸻
+
 User Flow
 
 A) Setup & Processing

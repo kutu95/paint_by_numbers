@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import { API_BASE_URL } from '@/lib/config'
 
 const CHART_WIDTH = 420
@@ -179,6 +180,7 @@ interface LibraryGroup {
   paint_count: number
   calibrated_count: number
   name: string
+  coverage_mg_per_cm2?: number | null
 }
 
 interface CalibrationSample {
@@ -203,6 +205,7 @@ export default function PaintsPage() {
   const [showAddForm, setShowAddForm] = useState(false)
   const [editingPaint, setEditingPaint] = useState<Paint | null>(null)
   const [formData, setFormData] = useState({ name: '', hex_approx: '#000000', notes: '' })
+  const [libraryCoverage, setLibraryCoverage] = useState<string>('')
   const [libraryGroups, setLibraryGroups] = useState<LibraryGroup[]>([])
   const [selectedGroup, setSelectedGroup] = useState<string>(() => {
     // Load last selected group from localStorage
@@ -289,10 +292,33 @@ export default function PaintsPage() {
       const response = await fetch(`${API_BASE_URL}/api/paint/library?group=${selectedGroup}`)
       const data = await response.json()
       setPaints(data.paints || [])
+      const cov = data.coverage_mg_per_cm2
+      setLibraryCoverage(cov != null && cov > 0 ? String(cov) : '')
     } catch (error) {
       console.error('Failed to load paints:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const saveLibraryCoverage = async () => {
+    if (!selectedGroup) return
+    const trimmed = libraryCoverage.trim()
+    const val = trimmed === '' ? null : parseFloat(trimmed)
+    const isValid = val != null && !Number.isNaN(val) && val > 0
+    try {
+      const form = new FormData()
+      if (isValid) form.append('coverage_mg_per_cm2', String(val))
+      const response = await fetch(`${API_BASE_URL}/api/paint/library/groups/${encodeURIComponent(selectedGroup)}/settings`, {
+        method: 'PUT',
+        body: form,
+      })
+      if (!response.ok) throw new Error('Failed to save')
+      const data = await response.json()
+      setLibraryGroups((prev) => prev.map((g) => g.group === selectedGroup ? { ...g, coverage_mg_per_cm2: data.coverage_mg_per_cm2 } : g))
+    } catch (e) {
+      console.error(e)
+      alert('Failed to save library coverage')
     }
   }
 
@@ -440,6 +466,9 @@ export default function PaintsPage() {
   return (
     <div className="min-h-screen bg-gray-900 text-white p-8">
       <div className="max-w-6xl mx-auto">
+        <Link href="/" className="inline-flex items-center text-gray-400 hover:text-white mb-6">
+          ← Back to menu
+        </Link>
         <div className="flex items-center justify-between mb-8">
           <h1 className="text-4xl font-bold">Paint Library</h1>
           <div className="flex gap-4">
@@ -453,9 +482,9 @@ export default function PaintsPage() {
               onClick={() => {
                 setShowAddForm(true)
                 setEditingPaint(null)
-                setFormData({ name: '', hex_approx: '#000000', notes: '' })
-              }}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded"
+                    setFormData({ name: '', hex_approx: '#000000', notes: '' })
+                  }}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded"
             >
               + Add Paint
             </button>
@@ -501,6 +530,32 @@ export default function PaintsPage() {
             >
               + New Group
             </button>
+          </div>
+          <div className="mt-4 pt-4 border-t border-gray-600">
+            <label className="block font-semibold mb-2">Library coverage (mg/cm²)</label>
+            <p className="text-sm text-gray-400 mb-2">
+              One value for this whole library: how many mg of paint cover 1 cm². Used for recipe weight calculations.
+            </p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <input
+                type="text"
+                inputMode="decimal"
+                placeholder="e.g. 5 or 0.008"
+                value={libraryCoverage}
+                onChange={(e) => {
+                  const v = e.target.value
+                  if (v === '' || /^-?\d*\.?\d*$/.test(v)) setLibraryCoverage(v)
+                }}
+                className="w-24 px-3 py-2 bg-gray-700 rounded border border-gray-600 text-white"
+              />
+              <button
+                type="button"
+                onClick={saveLibraryCoverage}
+                className="px-3 py-2 bg-green-600 hover:bg-green-500 rounded text-sm"
+              >
+                Save
+              </button>
+            </div>
           </div>
         </div>
 

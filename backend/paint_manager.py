@@ -203,7 +203,8 @@ def get_library_info(group: str) -> Dict:
         "group": group,
         "paint_count": paint_count,
         "calibrated_count": calibrated_count,
-        "name": name
+        "name": name,
+        "coverage_mg_per_cm2": library.get("coverage_mg_per_cm2"),
     }
 
 
