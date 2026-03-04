@@ -36,6 +36,12 @@ app = FastAPI()
 
 RECIPE_PROGRESS_LOCK = threading.Lock()
 RECIPE_PROGRESS: dict[str, dict] = {}
+
+# Async recipe jobs: avoid long-running HTTP so proxies (e.g. Cloudflare) don't timeout
+RECIPE_JOBS_LOCK = threading.Lock()
+RECIPE_JOBS: dict[str, dict] = {}
+RECIPE_JOB_TTL_SECONDS = 3600
+
 GAMUT_CACHE_DIR = PAINT_DIR / "gamut_cache"
 GAMUT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 PALETTE_OPTIMIZATION_CACHE_DIR = PAINT_DIR / "palette_optimization_cache"
@@ -1174,28 +1180,17 @@ async def get_palette_gamut_slice(
     return payload
 
 
-# Recipe generation
-@app.post("/api/paint/recipes/from-palette")
-async def generate_recipes_from_palette(
-    palette: str = Form(...),  # JSON string of palette
-    library_group: str = Form("default"),  # Library group to use
-    force_regenerate: str = Form("false"),  # Force regeneration, ignore cache
-    use_ai_second_pass: str = Form("false"),  # Refine poor deterministic recipes with AI
-    progress_id: str = Form(""),  # Optional progress tracking token
-):
-    """Generate deterministic recipes from palette colors using calibrated paint data."""
-    try:
-        palette_list = json.loads(palette)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid palette JSON: {e}")
-    if not isinstance(palette_list, list):
-        raise HTTPException(status_code=400, detail="Invalid palette JSON: expected a list")
-    force = force_regenerate.lower() == "true"
-    progress_key = (progress_id or "").strip() or None
-
-    # Load paints and build lookup maps
+# Recipe generation (shared async runner for both sync endpoint and async jobs)
+async def _compute_recipes_async(
+    palette_list: list,
+    library_group: str,
+    force: bool,
+    use_ai: bool,
+    progress_key: Optional[str] = None,
+) -> dict:
+    """Run recipe computation; returns {"recipes": [...]}. Used by sync endpoint and job worker."""
     library = load_library(library_group)
-    paints = library.get('paints', [])
+    paints = library.get("paints", [])
 
     def _set_progress(completed: int, total: int, status: str, current_index: int = -1, message: str = ""):
         if not progress_key:
@@ -1226,7 +1221,6 @@ async def generate_recipes_from_palette(
         }
 
     paints_by_id = {p.get("id"): p for p in paints if p.get("id")}
-    use_ai = use_ai_second_pass.lower() == "true"
 
     def _hex_to_rgb(value: str) -> Optional[list[int]]:
         v = (value or "").strip().lstrip("#")
@@ -1769,6 +1763,102 @@ async def generate_recipes_from_palette(
                 for i in range(len(palette_list))
             ]
         }
+
+
+@app.post("/api/paint/recipes/from-palette")
+async def generate_recipes_from_palette(
+    palette: str = Form(...),
+    library_group: str = Form("default"),
+    force_regenerate: str = Form("false"),
+    use_ai_second_pass: str = Form("false"),
+    progress_id: str = Form(""),
+):
+    """Generate deterministic recipes (sync). For long palettes use POST /api/paint/recipes/jobs to avoid proxy timeouts."""
+    try:
+        palette_list = json.loads(palette)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid palette JSON: {e}")
+    if not isinstance(palette_list, list):
+        raise HTTPException(status_code=400, detail="Invalid palette JSON: expected a list")
+    force = force_regenerate.lower() == "true"
+    use_ai = use_ai_second_pass.lower() == "true"
+    progress_key = (progress_id or "").strip() or None
+    try:
+        return await _compute_recipes_async(palette_list, library_group, force, use_ai, progress_key)
+    except Exception as e:
+        logger.exception("Recipe generation failed: %s", e)
+        return {
+            "recipes": [
+                {"palette_index": palette_list[i].get("index", i), "recipe": None, "error": f"Recipe generation failed: {e}"}
+                for i in range(len(palette_list))
+            ]
+        }
+
+
+@app.post("/api/paint/recipes/jobs")
+async def start_recipe_job(
+    palette: str = Form(...),
+    library_group: str = Form("default"),
+    force_regenerate: str = Form("false"),
+    use_ai_second_pass: str = Form("false"),
+):
+    """Start recipe generation as a background job. Returns job_id; poll GET /api/paint/recipes/jobs/{job_id} for result."""
+    try:
+        palette_list = json.loads(palette)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid palette JSON: {e}")
+    if not isinstance(palette_list, list):
+        raise HTTPException(status_code=400, detail="Invalid palette JSON: expected a list")
+    force = force_regenerate.lower() == "true"
+    use_ai = use_ai_second_pass.lower() == "true"
+    job_id = str(uuid.uuid4())
+    with RECIPE_JOBS_LOCK:
+        RECIPE_JOBS[job_id] = {
+            "status": "pending",
+            "created_at": datetime.now().isoformat(),
+            "total": len(palette_list),
+        }
+    asyncio.create_task(_run_recipe_job(job_id, palette_list, library_group, force, use_ai))
+    return Response(status_code=202, content=json.dumps({"job_id": job_id}), media_type="application/json")
+
+
+async def _run_recipe_job(
+    job_id: str,
+    palette_list: list,
+    library_group: str,
+    force: bool,
+    use_ai: bool,
+):
+    """Background task: run recipe computation and store result in RECIPE_JOBS[job_id]."""
+    try:
+        result = await _compute_recipes_async(palette_list, library_group, force, use_ai, progress_key=None)
+        with RECIPE_JOBS_LOCK:
+            if job_id in RECIPE_JOBS:
+                RECIPE_JOBS[job_id]["status"] = "completed"
+                RECIPE_JOBS[job_id]["result"] = result
+                RECIPE_JOBS[job_id]["completed_at"] = datetime.now().isoformat()
+    except Exception as e:
+        logger.exception("Recipe job %s failed: %s", job_id, e)
+        with RECIPE_JOBS_LOCK:
+            if job_id in RECIPE_JOBS:
+                RECIPE_JOBS[job_id]["status"] = "failed"
+                RECIPE_JOBS[job_id]["error"] = str(e)
+                RECIPE_JOBS[job_id]["completed_at"] = datetime.now().isoformat()
+
+
+@app.get("/api/paint/recipes/jobs/{job_id}")
+async def get_recipe_job(job_id: str):
+    """Poll for async recipe job result. Returns status (pending|completed|failed) and result when completed."""
+    with RECIPE_JOBS_LOCK:
+        job = RECIPE_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    out = {"job_id": job_id, "status": job["status"], "total": job.get("total", 0)}
+    if job.get("status") == "completed" and "result" in job:
+        out["recipes"] = job["result"].get("recipes", [])
+    if job.get("status") == "failed" and "error" in job:
+        out["error"] = job["error"]
+    return out
 
 
 @app.get("/api/paint/recipes/progress/{progress_id}")

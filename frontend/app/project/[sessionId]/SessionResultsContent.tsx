@@ -159,42 +159,46 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
     setRecipeProgressIndex(0)
     setRecipeProgressStatus('starting')
     try {
-      const allRecipes: any[] = []
-      const palette = sessionData.palette
-      for (let i = 0; i < palette.length; i += 1) {
-        setRecipeProgressIndex(i)
-        setRecipeProgressStatus('running')
-        const c = palette[i]
-        const formData = new FormData()
-        formData.append(
-          'palette',
-          JSON.stringify([
-            {
-              index: c.index,
-              hex: c.hex,
-              target_grams: getTotalWeightGrams(c.index),
-            },
-          ])
-        )
-        formData.append('library_group', selectedLibraryGroup)
-        formData.append('use_ai_second_pass', useAiSecondPass ? 'true' : 'false')
-        if (forceRegenerate) formData.append('force_regenerate', 'true')
+      const palettePayload = sessionData.palette.map((c) => ({
+        index: c.index,
+        hex: c.hex,
+        target_grams: getTotalWeightGrams(c.index),
+      }))
+      const formData = new FormData()
+      formData.append('palette', JSON.stringify(palettePayload))
+      formData.append('library_group', selectedLibraryGroup)
+      formData.append('use_ai_second_pass', useAiSecondPass ? 'true' : 'false')
+      if (forceRegenerate) formData.append('force_regenerate', 'true')
 
-        const response = await fetch(`${API_BASE_URL}/api/paint/recipes/from-palette`, {
-          method: 'POST',
-          body: formData,
+      const startRes = await fetch(`${API_BASE_URL}/api/paint/recipes/jobs`, {
+        method: 'POST',
+        body: formData,
+      })
+      if (!startRes.ok) {
+        const body = await startRes.text().catch(() => '')
+        throw new Error(`Failed to start recipe job: HTTP ${startRes.status} ${body}`.trim())
+      }
+      const { job_id } = await startRes.json()
+      if (!job_id) throw new Error('No job_id returned')
+
+      setRecipeProgressStatus('running')
+      const pollIntervalMs = 2000
+      for (;;) {
+        await new Promise((r) => setTimeout(r, pollIntervalMs))
+        const pollRes = await fetch(`${API_BASE_URL}/api/paint/recipes/jobs/${encodeURIComponent(job_id)}`, {
+          cache: 'no-store',
         })
-        if (!response.ok) {
-          const body = await response.text().catch(() => '')
-          throw new Error(`Colour ${i + 1}/${palette.length}: HTTP ${response.status} ${body}`.trim())
+        if (!pollRes.ok) throw new Error(`Job poll failed: HTTP ${pollRes.status}`)
+        const job = await pollRes.json()
+        if (job.status === 'completed' && Array.isArray(job.recipes)) {
+          setRecipes(job.recipes)
+          setRecipeProgressStatus('completed')
+          break
         }
-        const data = await response.json()
-        if (Array.isArray(data.recipes)) {
-          allRecipes.push(...data.recipes)
+        if (job.status === 'failed') {
+          throw new Error(job.error || 'Recipe generation failed')
         }
       }
-      setRecipes(allRecipes)
-      setRecipeProgressStatus('completed')
     } catch (e) {
       console.error(e)
       alert(e instanceof Error ? e.message : 'Failed to generate recipes')
@@ -306,11 +310,13 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
                 aria-hidden="true"
               />
               <span>
-                {recipeProgressIndex != null
-                  ? (recipeProgressStatus === 'finalizing'
-                      ? 'Finalizing recipes…'
-                      : `Creating colour ${Math.min(recipeProgressIndex + 1, sessionData.palette.length)} of ${sessionData.palette.length}…`)
-                  : `Preparing recipes for ${sessionData.palette.length} colour${sessionData.palette.length === 1 ? '' : 's'}…`}
+                {recipeProgressStatus === 'starting'
+                  ? `Starting recipe job for ${sessionData.palette.length} colour${sessionData.palette.length === 1 ? '' : 's'}…`
+                  : recipeProgressStatus === 'running'
+                    ? 'Generating recipes… (this may take a few minutes)'
+                    : recipeProgressStatus === 'completed'
+                      ? 'Done.'
+                      : `Preparing…`}
               </span>
             </div>
           )}

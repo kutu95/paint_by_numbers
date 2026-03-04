@@ -5,6 +5,7 @@ from itertools import combinations
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Callable
 from datetime import datetime
+import os
 import re
 import logging
 
@@ -1036,7 +1037,7 @@ def generate_recipes_for_palette(
         } for color in palette]
     
     recipes = []
-    
+
     total_colors = len(palette)
     for i, color in enumerate(palette):
         if progress_cb:
