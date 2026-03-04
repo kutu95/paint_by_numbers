@@ -1195,7 +1195,7 @@ export default function Home() {
 
             <button
               onClick={handleGenerate}
-              disabled={processing || (isNewProject && (!image || !projectName.trim())) || (!editSessionId && !image) || (editSessionId && !image && !editSessionOriginalUrl)}
+              disabled={Boolean(processing || (isNewProject && (!image || !projectName.trim())) || (!editSessionId && !image) || (editSessionId && !image && !editSessionOriginalUrl))}
               title={editSessionId && editSessionOriginalUrl ? 'Use stored image and current settings, or upload a new image to replace.' : undefined}
               className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
