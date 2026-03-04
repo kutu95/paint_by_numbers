@@ -1584,182 +1584,191 @@ async def generate_recipes_from_palette(
         updated["predicted_hex"] = predicted_hex
         return updated
 
-    fingerprint = _library_fingerprint()
-    recipes_by_index: dict[int, dict] = {}
-    missing_for_solver: list[dict] = []
-    completed_prefix = 0
-
-    # Normalize and load from cache where valid.
-    for color in palette_list:
-        idx = color.get("index")
-        target_hex = _normalize_target_hex(color)
-        if idx is None or not target_hex:
-            safe_idx = _safe_index(idx)
-            recipes_by_index[safe_idx] = {
-                "palette_index": idx,
-                "recipe": None,
-                "error": "Color format error: missing or invalid hex/rgb"
-            }
-            completed_prefix += 1
-            _set_progress(completed_prefix, len(palette_list), "running", min(completed_prefix, len(palette_list) - 1))
-            continue
-
-        color["__target_hex"] = target_hex
-        color["__target_rgb"] = _hex_to_rgb(target_hex)
-        target_grams = color.get("target_grams")
-        try:
-            target_grams = float(target_grams) if target_grams is not None else None
-        except Exception:
-            target_grams = None
-        color["__target_grams"] = target_grams if target_grams is not None and target_grams > 0 else None
-
-        if not force:
-            cached = get_cached_recipe(library_group, target_hex)
-            if cached and cached.get("type") == "deterministic" and cached.get("library_fingerprint") == fingerprint:
-                cached_recipe = _ensure_predicted_hex(cached.get("recipe"))
+    try:
+        fingerprint = _library_fingerprint()
+        recipes_by_index: dict[int, dict] = {}
+        missing_for_solver: list[dict] = []
+        completed_prefix = 0
+    
+        # Normalize and load from cache where valid.
+        for color in palette_list:
+            idx = color.get("index")
+            target_hex = _normalize_target_hex(color)
+            if idx is None or not target_hex:
                 safe_idx = _safe_index(idx)
                 recipes_by_index[safe_idx] = {
-                    "palette_index": safe_idx,
-                    "recipe": cached_recipe,
+                    "palette_index": idx,
+                    "recipe": None,
+                    "error": "Color format error: missing or invalid hex/rgb"
+                }
+                completed_prefix += 1
+                _set_progress(completed_prefix, len(palette_list), "running", min(completed_prefix, len(palette_list) - 1))
+                continue
+    
+            color["__target_hex"] = target_hex
+            color["__target_rgb"] = _hex_to_rgb(target_hex)
+            target_grams = color.get("target_grams")
+            try:
+                target_grams = float(target_grams) if target_grams is not None else None
+            except Exception:
+                target_grams = None
+            color["__target_grams"] = target_grams if target_grams is not None and target_grams > 0 else None
+    
+            if not force:
+                cached = get_cached_recipe(library_group, target_hex)
+                if cached and cached.get("type") == "deterministic" and cached.get("library_fingerprint") == fingerprint:
+                    cached_recipe = _ensure_predicted_hex(cached.get("recipe"))
+                    safe_idx = _safe_index(idx)
+                    recipes_by_index[safe_idx] = {
+                        "palette_index": safe_idx,
+                        "recipe": cached_recipe,
+                        "type": "deterministic"
+                    }
+                    completed_prefix += 1
+                    _set_progress(completed_prefix, len(palette_list), "running", min(completed_prefix, len(palette_list) - 1))
+                    continue
+            missing_for_solver.append(color)
+    
+        if missing_for_solver:
+            solver_palette = []
+            for color in missing_for_solver:
+                if color.get("__target_rgb") is None:
+                    safe_idx = _safe_index(color.get("index"))
+                    recipes_by_index[safe_idx] = {
+                        "palette_index": safe_idx,
+                        "recipe": None,
+                        "error": "Color format error: invalid RGB"
+                    }
+                    completed_prefix += 1
+                    _set_progress(completed_prefix, len(palette_list), "running", min(completed_prefix, len(palette_list) - 1))
+                    continue
+                solver_palette.append({
+                    "index": _safe_index(color.get("index")),
+                    "rgb": color["__target_rgb"],
+                })
+    
+            try:
+                def _solver_progress(done_missing: int, total_missing: int, status: str):
+                    overall_done = completed_prefix + max(0, int(done_missing))
+                    current_idx = min(max(0, overall_done), max(0, len(palette_list) - 1))
+                    _set_progress(overall_done, len(palette_list), "running" if status != "completed" else "finalizing", current_idx)
+    
+                generated_list = await asyncio.to_thread(
+                    generate_recipes_for_palette,
+                    "runtime",
+                    solver_palette,
+                    library_group,
+                    _solver_progress,
+                )
+            except Exception as e:
+                logger.exception("Recipe solver failed for library_group=%s: %s", library_group, e)
+                generated_list = []
+                for color in missing_for_solver:
+                    idx = _safe_index(color.get("index", -1))
+                    recipes_by_index[idx] = {
+                        "palette_index": idx,
+                        "recipe": None,
+                        "error": f"Recipe solver crashed for this color: {e}"
+                    }
+            generated_by_index = {int(r.get("palette_index")): r for r in generated_list if r.get("palette_index") is not None}
+    
+            for color in missing_for_solver:
+                idx = _safe_index(color.get("index"))
+                target_hex = color["__target_hex"]
+                target_grams = color["__target_grams"]
+                generated = generated_by_index.get(idx)
+                if not generated:
+                    recipes_by_index[idx] = {
+                        "palette_index": idx,
+                        "recipe": None,
+                        "error": "Recipe generation failed: no solver output"
+                    }
+                    continue
+                if not generated.get("recipe"):
+                    recipes_by_index[idx] = {
+                        "palette_index": idx,
+                        "recipe": None,
+                        "error": generated.get("error", "Recipe generation failed")
+                    }
+                    continue
+    
+                recipe_storage = _recipe_to_structured(target_hex, generated, target_grams)
+                try:
+                    cache_recipe(library_group, target_hex, {
+                        "type": "deterministic",
+                        "library_fingerprint": fingerprint,
+                        "recipe": recipe_storage,
+                    })
+                except Exception as e:
+                    logger.exception(
+                        "Failed to cache recipe for group=%s hex=%s index=%s: %s",
+                        library_group,
+                        target_hex,
+                        idx,
+                        e,
+                    )
+                recipes_by_index[idx] = {
+                    "palette_index": idx,
+                    "recipe": recipe_storage,
                     "type": "deterministic"
                 }
-                completed_prefix += 1
-                _set_progress(completed_prefix, len(palette_list), "running", min(completed_prefix, len(palette_list) - 1))
-                continue
-        missing_for_solver.append(color)
-
-    if missing_for_solver:
-        solver_palette = []
-        for color in missing_for_solver:
-            if color.get("__target_rgb") is None:
-                safe_idx = _safe_index(color.get("index"))
-                recipes_by_index[safe_idx] = {
-                    "palette_index": safe_idx,
-                    "recipe": None,
-                    "error": "Color format error: invalid RGB"
-                }
-                completed_prefix += 1
-                _set_progress(completed_prefix, len(palette_list), "running", min(completed_prefix, len(palette_list) - 1))
-                continue
-            solver_palette.append({
-                "index": _safe_index(color.get("index")),
-                "rgb": color["__target_rgb"],
-            })
-
-        try:
-            def _solver_progress(done_missing: int, total_missing: int, status: str):
-                overall_done = completed_prefix + max(0, int(done_missing))
-                current_idx = min(max(0, overall_done), max(0, len(palette_list) - 1))
-                _set_progress(overall_done, len(palette_list), "running" if status != "completed" else "finalizing", current_idx)
-
-            generated_list = await asyncio.to_thread(
-                generate_recipes_for_palette,
-                "runtime",
-                solver_palette,
-                library_group,
-                _solver_progress,
-            )
-        except Exception as e:
-            logger.exception("Recipe solver failed for library_group=%s: %s", library_group, e)
-            generated_list = []
-            for color in missing_for_solver:
-                idx = _safe_index(color.get("index", -1))
-                recipes_by_index[idx] = {
-                    "palette_index": idx,
-                    "recipe": None,
-                    "error": f"Recipe solver crashed for this color: {e}"
-                }
-        generated_by_index = {int(r.get("palette_index")): r for r in generated_list if r.get("palette_index") is not None}
-
-        for color in missing_for_solver:
-            idx = _safe_index(color.get("index"))
-            target_hex = color["__target_hex"]
-            target_grams = color["__target_grams"]
-            generated = generated_by_index.get(idx)
-            if not generated:
-                recipes_by_index[idx] = {
-                    "palette_index": idx,
-                    "recipe": None,
-                    "error": "Recipe generation failed: no solver output"
-                }
-                continue
-            if not generated.get("recipe"):
-                recipes_by_index[idx] = {
-                    "palette_index": idx,
-                    "recipe": None,
-                    "error": generated.get("error", "Recipe generation failed")
-                }
-                continue
-
-            recipe_storage = _recipe_to_structured(target_hex, generated, target_grams)
-            try:
-                cache_recipe(library_group, target_hex, {
-                    "type": "deterministic",
-                    "library_fingerprint": fingerprint,
-                    "recipe": recipe_storage,
-                })
-            except Exception as e:
-                logger.exception(
-                    "Failed to cache recipe for group=%s hex=%s index=%s: %s",
-                    library_group,
-                    target_hex,
-                    idx,
-                    e,
-                )
-            recipes_by_index[idx] = {
+    
+        ordered = []
+        for color in palette_list:
+            idx = _safe_index(color.get("index", -1))
+            ordered.append(recipes_by_index.get(idx, {
                 "palette_index": idx,
-                "recipe": recipe_storage,
-                "type": "deterministic"
-            }
-
-    ordered = []
-    for color in palette_list:
-        idx = _safe_index(color.get("index", -1))
-        ordered.append(recipes_by_index.get(idx, {
-            "palette_index": idx,
-            "recipe": None,
-            "error": "Recipe generation failed: missing result"
-        }))
-
-    if use_ai:
-        # AI second pass only for poor deterministic recipes to control latency/cost.
-        _set_progress(len(palette_list), len(palette_list), "finalizing", max(0, len(palette_list) - 1), "Refining poor recipes with AI")
-        calibration_ctx = _load_calibration_context()
-        try:
-            ai_refine_limit = max(0, int(os.getenv("AI_RECIPE_REFINE_LIMIT", "6")))
-        except Exception:
-            ai_refine_limit = 6
-        refined_count = 0
-        for item in ordered:
-            if refined_count >= ai_refine_limit:
-                break
-            recipe = item.get("recipe")
-            if not isinstance(recipe, dict):
-                continue
-            if recipe.get("type") != "deterministic":
-                continue
-            err = recipe.get("error")
+                "recipe": None,
+                "error": "Recipe generation failed: missing result"
+            }))
+    
+        if use_ai:
+            # AI second pass only for poor deterministic recipes to control latency/cost.
+            _set_progress(len(palette_list), len(palette_list), "finalizing", max(0, len(palette_list) - 1), "Refining poor recipes with AI")
+            calibration_ctx = _load_calibration_context()
             try:
-                err_val = float(err) if err is not None else None
+                ai_refine_limit = max(0, int(os.getenv("AI_RECIPE_REFINE_LIMIT", "6")))
             except Exception:
-                err_val = None
-            if err_val is not None and err_val < 6.0:
-                continue
-            target_hex = recipe.get("target_hex")
-            if not target_hex:
-                continue
-            idx = _safe_index(item.get("palette_index"))
-            grams = None
-            for c in palette_list:
-                if _safe_index(c.get("index")) == idx:
-                    grams = c.get("__target_grams")
+                ai_refine_limit = 6
+            refined_count = 0
+            for item in ordered:
+                if refined_count >= ai_refine_limit:
                     break
-            refined = _call_ai_refiner(target_hex, recipe, grams, calibration_ctx)
-            if refined:
-                item["recipe"] = refined
-                item["type"] = "ai_refined"
-                refined_count += 1
-    return {"recipes": ordered}
+                recipe = item.get("recipe")
+                if not isinstance(recipe, dict):
+                    continue
+                if recipe.get("type") != "deterministic":
+                    continue
+                err = recipe.get("error")
+                try:
+                    err_val = float(err) if err is not None else None
+                except Exception:
+                    err_val = None
+                if err_val is not None and err_val < 6.0:
+                    continue
+                target_hex = recipe.get("target_hex")
+                if not target_hex:
+                    continue
+                idx = _safe_index(item.get("palette_index"))
+                grams = None
+                for c in palette_list:
+                    if _safe_index(c.get("index")) == idx:
+                        grams = c.get("__target_grams")
+                        break
+                refined = _call_ai_refiner(target_hex, recipe, grams, calibration_ctx)
+                if refined:
+                    item["recipe"] = refined
+                    item["type"] = "ai_refined"
+                    refined_count += 1
+        return {"recipes": ordered}
+    except Exception as e:
+        logger.exception("Recipe generation failed: %s", e)
+        return {
+            "recipes": [
+                {"palette_index": palette_list[i].get("index", i), "recipe": None, "error": f"Recipe generation failed: {e}"}
+                for i in range(len(palette_list))
+            ]
+        }
 
 
 @app.get("/api/paint/recipes/progress/{progress_id}")

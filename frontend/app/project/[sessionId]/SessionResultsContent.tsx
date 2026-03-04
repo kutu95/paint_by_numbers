@@ -158,77 +158,47 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
     setLoadingRecipes(true)
     setRecipeProgressIndex(0)
     setRecipeProgressStatus('starting')
-    const progressId =
-      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`
-    let progressPoll: number | null = null
-    const startProgressPolling = () => {
-      progressPoll = window.setInterval(async () => {
-        try {
-          const res = await fetch(`${API_BASE_URL}/api/paint/recipes/progress/${encodeURIComponent(progressId)}`, {
-            cache: 'no-store',
-          })
-          if (!res.ok) return
-          const p = await res.json()
-          if (typeof p.current_index === 'number' && p.current_index >= 0) {
-            setRecipeProgressIndex(p.current_index)
-          } else if (typeof p.completed === 'number' && p.completed > 0) {
-            setRecipeProgressIndex(Math.min(p.completed, Math.max(0, sessionData.palette.length - 1)))
-          }
-          if (typeof p.status === 'string') {
-            setRecipeProgressStatus(p.status)
-          }
-        } catch {
-          // Ignore transient polling errors while generation is in-flight.
-        }
-      }, 700)
-    }
-    startProgressPolling()
     try {
-      const palettePayload = sessionData.palette.map((c) => ({
-        index: c.index,
-        hex: c.hex,
-        target_grams: getTotalWeightGrams(c.index),
-      }))
-      const formData = new FormData()
-      formData.append('palette', JSON.stringify(palettePayload))
-      formData.append('library_group', selectedLibraryGroup)
-      formData.append('use_ai_second_pass', useAiSecondPass ? 'true' : 'false')
-      formData.append('progress_id', progressId)
-      if (forceRegenerate) formData.append('force_regenerate', 'true')
+      const allRecipes: any[] = []
+      const palette = sessionData.palette
+      for (let i = 0; i < palette.length; i += 1) {
+        setRecipeProgressIndex(i)
+        setRecipeProgressStatus('running')
+        const c = palette[i]
+        const formData = new FormData()
+        formData.append(
+          'palette',
+          JSON.stringify([
+            {
+              index: c.index,
+              hex: c.hex,
+              target_grams: getTotalWeightGrams(c.index),
+            },
+          ])
+        )
+        formData.append('library_group', selectedLibraryGroup)
+        formData.append('use_ai_second_pass', useAiSecondPass ? 'true' : 'false')
+        if (forceRegenerate) formData.append('force_regenerate', 'true')
 
-      let response: Response | null = null
-      let lastError: Error | null = null
-      for (const delayMs of [0, 250, 600]) {
-        if (delayMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, delayMs))
+        const response = await fetch(`${API_BASE_URL}/api/paint/recipes/from-palette`, {
+          method: 'POST',
+          body: formData,
+        })
+        if (!response.ok) {
+          const body = await response.text().catch(() => '')
+          throw new Error(`Colour ${i + 1}/${palette.length}: HTTP ${response.status} ${body}`.trim())
         }
-        try {
-          response = await fetch(`${API_BASE_URL}/api/paint/recipes/from-palette`, {
-            method: 'POST',
-            body: formData,
-          })
-          if (!response.ok) {
-            const body = await response.text().catch(() => '')
-            throw new Error(`Failed to generate recipes (HTTP ${response.status}) ${body}`.trim())
-          }
-          break
-        } catch (err) {
-          lastError = err instanceof Error ? err : new Error(String(err))
+        const data = await response.json()
+        if (Array.isArray(data.recipes)) {
+          allRecipes.push(...data.recipes)
         }
       }
-      if (!response || !response.ok) {
-        throw lastError || new Error('Failed to generate recipes')
-      }
-
-      const data = await response.json()
-      setRecipes(Array.isArray(data.recipes) ? data.recipes : [])
+      setRecipes(allRecipes)
+      setRecipeProgressStatus('completed')
     } catch (e) {
       console.error(e)
-      alert('Failed to generate recipes')
+      alert(e instanceof Error ? e.message : 'Failed to generate recipes')
     } finally {
-      if (progressPoll != null) window.clearInterval(progressPoll)
       setLoadingRecipes(false)
       setRecipeProgressIndex(null)
       setRecipeProgressStatus('idle')
