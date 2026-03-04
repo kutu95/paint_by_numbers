@@ -5,6 +5,25 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { API_BASE_URL } from '@/lib/config'
 
+function formatRecipe(recipeData: any): string {
+  if (!recipeData?.recipe) return recipeData?.error || 'No recipe available'
+  const recipe = recipeData.recipe
+
+  if (recipe.ingredients && Array.isArray(recipe.ingredients) && recipe.ingredients.length > 0) {
+    const parts = recipe.ingredients
+      .map((ing: any) => {
+        if (ing?.paint_name == null) return null
+        const pct = ing.percentage != null ? Number(ing.percentage) : 0
+        const gramsText = ing.grams != null ? ` (${Number(ing.grams).toFixed(2)} g)` : ''
+        return `${ing.paint_name} ${pct.toFixed(2)}%${gramsText}`
+      })
+      .filter(Boolean)
+    if (parts.length > 0) return parts.join(' + ')
+  }
+  if (recipe.instructions) return recipe.instructions
+  return 'No recipe available'
+}
+
 const CHART_WIDTH = 420
 const CHART_HEIGHT = 180
 const PAD = { left: 36, right: 12, top: 12, bottom: 28 }
