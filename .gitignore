@@ -55,7 +55,8 @@ data/mask_cache/
 data/paint/calibration/*.json
 data/paint/calibration/*.jpg
 data/paint/calibration/*.png
-!data/paint/library.json
+# Library is per-server/per-user; do not track in git (avoids pull conflicts)
+data/paint/library.json
 
 # Deployment - allow service files in deployment directory
 !deployment/*.service
