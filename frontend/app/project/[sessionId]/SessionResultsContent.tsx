@@ -22,24 +22,48 @@ function hexToRgbObject(hex: string): { r: number; g: number; b: number } | null
     : null
 }
 
-function formatRecipe(recipeData: any): string {
+function formatRecipe(recipeData: any, totalWeightGrams: number | null = null): string {
   if (!recipeData.recipe) return recipeData.error || 'No recipe available'
   const recipe = recipeData.recipe
-  if (recipeData.type === 'chatgpt' || recipe.type === 'chatgpt') {
-    if (recipe.ingredients && Array.isArray(recipe.ingredients) && recipe.ingredients.length > 0) {
-      const parts = recipe.ingredients
-        .map((ing: any) => ing?.paint_name != null && (ing.percentage != null ? `${ing.paint_name} ${Number(ing.percentage).toFixed(2)}%` : ing.paint_name))
-        .filter(Boolean)
-      if (parts.length > 0) return parts.join(' + ')
-    }
-    return recipe.instructions || 'Recipe instructions from ChatGPT'
+  const total = totalWeightGrams ?? 0
+  const g = (pct: number) => (total > 0 ? ` (${((pct / 100) * total).toFixed(2)} g)` : '')
+
+  if (recipe.ingredients && Array.isArray(recipe.ingredients) && recipe.ingredients.length > 0) {
+    const parts = recipe.ingredients
+      .map((ing: any) => {
+        if (ing?.paint_name == null) return null
+        const pct = ing.percentage != null ? Number(ing.percentage) : 0
+        const gramsText =
+          ing.grams != null
+            ? ` (${Number(ing.grams).toFixed(2)} g)`
+            : g(pct)
+        return `${ing.paint_name} ${pct.toFixed(2)}%${gramsText}`
+      })
+      .filter(Boolean)
+    if (parts.length > 0) return parts.join(' + ')
   }
+  if (recipe.instructions) return recipe.instructions
   const warning = recipe.uncalibrated ? ' (Estimated - not calibrated) ' : ''
-  if (recipeData.type === 'one_pigment') return `${warning}White ${(recipe.white_ratio * 100).toFixed(1)}% + ${recipe.pigment_id} ${(recipe.pigment_ratio * 100).toFixed(1)}%`
-  if (recipeData.type === 'two_pigment') return `${warning}White ${(recipe.white_ratio * 100).toFixed(1)}% + ${recipe.pigment1_id} ${(recipe.pigment1_ratio * 100).toFixed(1)}% + ${recipe.pigment2_id} ${(recipe.pigment2_ratio * 100).toFixed(1)}%`
+  if (recipeData.type === 'one_pigment') {
+    const w = (recipe.white_ratio * 100)
+    const p = (recipe.pigment_ratio * 100)
+    return `${warning}White ${w.toFixed(1)}%${g(w)} + ${recipe.pigment_id} ${p.toFixed(1)}%${g(p)}`
+  }
+  if (recipeData.type === 'two_pigment') {
+    const w = (recipe.white_ratio * 100)
+    const p1 = (recipe.pigment1_ratio * 100)
+    const p2 = (recipe.pigment2_ratio * 100)
+    return `${warning}White ${w.toFixed(1)}%${g(w)} + ${recipe.pigment1_id} ${p1.toFixed(1)}%${g(p1)} + ${recipe.pigment2_id} ${p2.toFixed(1)}%${g(p2)}`
+  }
   if (['three_pigment', 'four_pigment', 'multi_pigment'].includes(recipeData.type) && recipe.pigment_ids?.length) {
-    const parts = recipe.pigment_ids.map((id: string, idx: number) => `${id} ${((recipe.pigment_ratios || [])[idx] * 100).toFixed(1)}%`)
-    return `${warning}White ${(recipe.white_ratio * 100).toFixed(1)}% + ${parts.join(' + ')}`
+    const whitePct = (recipe.white_ratio * 100)
+    const whitePart = `White ${whitePct.toFixed(1)}%${g(whitePct)}`
+    const pigmentParts = recipe.pigment_ids.map((id: string, idx: number) => {
+      const ratio = (recipe.pigment_ratios || [])[idx] ?? 0
+      const pct = ratio * 100
+      return `${id} ${pct.toFixed(1)}%${g(pct)}`
+    })
+    return `${warning}${whitePart} + ${pigmentParts.join(' + ')}`
   }
   return 'Unknown recipe type'
 }
@@ -52,6 +76,8 @@ export interface SessionResultsContentProps {
 export function SessionResultsContent({ sessionId, sessionData }: SessionResultsContentProps) {
   const [recipes, setRecipes] = useState<any[]>([])
   const [loadingRecipes, setLoadingRecipes] = useState(false)
+  const [recipeProgressIndex, setRecipeProgressIndex] = useState<number | null>(null)
+  const [recipeProgressStatus, setRecipeProgressStatus] = useState<string>('idle')
   const [selectedColor, setSelectedColor] = useState<{ index: number; hex: string; coverage: number } | null>(null)
   const [selectedLayerColor, setSelectedLayerColor] = useState<{
     hex: string
@@ -87,9 +113,30 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
 
   useEffect(() => {
     if (typeof window === 'undefined') return
-    fetch(`${API_BASE_URL}/api/paint/library/groups`)
-      .then((res) => res.json())
-      .then((data) => {
+    const url = `${API_BASE_URL}/api/paint/library/groups`
+    const load = async () => {
+      try {
+        let data: any = null
+        let lastError: unknown = null
+        for (const delayMs of [0, 400]) {
+          if (delayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, delayMs))
+          }
+          try {
+            const res = await fetch(url, { cache: 'no-store' })
+            if (!res.ok) {
+              throw new Error(`HTTP ${res.status}`)
+            }
+            data = await res.json()
+            break
+          } catch (error) {
+            lastError = error
+          }
+        }
+        if (!data) {
+          throw lastError || new Error('No response data')
+        }
+
         const groups = data.groups || []
         setLibraryGroups(groups)
         setLibraryGroupsLoaded(true)
@@ -99,26 +146,92 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
             : groups.find((g: any) => g.calibrated_count > 0)?.group ?? groups[0].group
           setSelectedLibraryGroup(lib)
         }
-      })
-      .catch(() => setLibraryGroupsLoaded(true))
+      } catch (error) {
+        console.error(`Failed to load library groups from ${url}:`, error)
+        setLibraryGroupsLoaded(true)
+      }
+    }
+    void load()
   }, [sessionId, project?.libraryGroup])
 
-  const handleGenerateRecipes = async (forceRegenerate: boolean = false) => {
+  const handleGenerateRecipes = async (forceRegenerate: boolean = false, useAiSecondPass: boolean = false) => {
     setLoadingRecipes(true)
+    setRecipeProgressIndex(0)
+    setRecipeProgressStatus('starting')
+    const progressId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    let progressPoll: number | null = null
+    const startProgressPolling = () => {
+      progressPoll = window.setInterval(async () => {
+        try {
+          const res = await fetch(`${API_BASE_URL}/api/paint/recipes/progress/${encodeURIComponent(progressId)}`, {
+            cache: 'no-store',
+          })
+          if (!res.ok) return
+          const p = await res.json()
+          if (typeof p.current_index === 'number' && p.current_index >= 0) {
+            setRecipeProgressIndex(p.current_index)
+          } else if (typeof p.completed === 'number' && p.completed > 0) {
+            setRecipeProgressIndex(Math.min(p.completed, Math.max(0, sessionData.palette.length - 1)))
+          }
+          if (typeof p.status === 'string') {
+            setRecipeProgressStatus(p.status)
+          }
+        } catch {
+          // Ignore transient polling errors while generation is in-flight.
+        }
+      }, 700)
+    }
+    startProgressPolling()
     try {
+      const palettePayload = sessionData.palette.map((c) => ({
+        index: c.index,
+        hex: c.hex,
+        target_grams: getTotalWeightGrams(c.index),
+      }))
       const formData = new FormData()
-      formData.append('palette', JSON.stringify(sessionData.palette.map((c) => ({ index: c.index, hex: c.hex }))))
+      formData.append('palette', JSON.stringify(palettePayload))
       formData.append('library_group', selectedLibraryGroup)
+      formData.append('use_ai_second_pass', useAiSecondPass ? 'true' : 'false')
+      formData.append('progress_id', progressId)
       if (forceRegenerate) formData.append('force_regenerate', 'true')
-      const response = await fetch(`${API_BASE_URL}/api/paint/recipes/from-palette`, { method: 'POST', body: formData })
-      if (!response.ok) throw new Error('Failed to generate recipes')
+
+      let response: Response | null = null
+      let lastError: Error | null = null
+      for (const delayMs of [0, 250, 600]) {
+        if (delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs))
+        }
+        try {
+          response = await fetch(`${API_BASE_URL}/api/paint/recipes/from-palette`, {
+            method: 'POST',
+            body: formData,
+          })
+          if (!response.ok) {
+            const body = await response.text().catch(() => '')
+            throw new Error(`Failed to generate recipes (HTTP ${response.status}) ${body}`.trim())
+          }
+          break
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error(String(err))
+        }
+      }
+      if (!response || !response.ok) {
+        throw lastError || new Error('Failed to generate recipes')
+      }
+
       const data = await response.json()
-      setRecipes(data.recipes || [])
+      setRecipes(Array.isArray(data.recipes) ? data.recipes : [])
     } catch (e) {
       console.error(e)
       alert('Failed to generate recipes')
     } finally {
+      if (progressPoll != null) window.clearInterval(progressPoll)
       setLoadingRecipes(false)
+      setRecipeProgressIndex(null)
+      setRecipeProgressStatus('idle')
     }
   }
 
@@ -137,15 +250,6 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-3">
-        <Link href={`/upload?edit=${sessionId}&returnTo=home`} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded">
-          Edit image & settings
-        </Link>
-        <Link href="/paints" className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded">
-          Manage Paints
-        </Link>
-      </div>
-
       {sessionData.original_url && (
         <div>
           <h2 className="text-xl font-bold mb-2">Original image</h2>
@@ -173,6 +277,7 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
                 <span className="text-white font-bold text-lg drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">{color.index}</span>
               </div>
               <div className="text-xs mt-1">{color.coverage.toFixed(1)}%</div>
+              <div className="text-xs text-gray-400 font-mono">{color.hex.toUpperCase()}</div>
               {(() => {
                 const w = getTotalWeightGrams(color.index)
                 return w != null ? <div className="text-xs text-gray-500">{w.toFixed(2)} g</div> : null
@@ -200,13 +305,45 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
           )}
         </div>
 
-        <div className="flex gap-2 mb-4">
-          <button onClick={() => handleGenerateRecipes(false)} disabled={loadingRecipes} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50">
-            {loadingRecipes ? 'Generating…' : 'Generate Recipes'}
-          </button>
-          <button onClick={() => handleGenerateRecipes(true)} disabled={loadingRecipes} className="px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded disabled:opacity-50">
-            Force Regenerate
-          </button>
+        <div className="flex flex-col gap-2 mb-4">
+          <div className="flex gap-2">
+            <button
+              onClick={() => handleGenerateRecipes(false)}
+              disabled={loadingRecipes}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50"
+            >
+              {loadingRecipes ? 'Generating…' : 'Generate Recipes'}
+            </button>
+            <button
+              onClick={() => handleGenerateRecipes(true)}
+              disabled={loadingRecipes}
+              className="px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded disabled:opacity-50"
+            >
+              Force Regenerate
+            </button>
+            <button
+              onClick={() => handleGenerateRecipes(true, true)}
+              disabled={loadingRecipes}
+              className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-50"
+            >
+              Refine with AI
+            </button>
+          </div>
+          {loadingRecipes && (
+            <div className="flex items-center gap-2 text-sm text-gray-300">
+              <div
+                className="h-4 w-4 border-2 border-gray-500 border-t-transparent rounded-full animate-spin"
+                aria-hidden="true"
+              />
+              <span>
+                {recipeProgressIndex != null
+                  ? (recipeProgressStatus === 'finalizing'
+                      ? 'Finalizing recipes…'
+                      : `Creating colour ${Math.min(recipeProgressIndex + 1, sessionData.palette.length)} of ${sessionData.palette.length}…`)
+                  : `Preparing recipes for ${sessionData.palette.length} colour${sessionData.palette.length === 1 ? '' : 's'}…`}
+              </span>
+            </div>
+          )}
         </div>
 
         {recipes.length > 0 && (
@@ -216,20 +353,44 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
               const color = sessionData.palette.find((p) => p.index === recipeData.palette_index)
               if (!color) return null
               const recipe = recipeData.recipe
-              const errorInfo = recipe && recipeData.type !== 'chatgpt' && recipe.error != null ? getErrorLevel(recipe.error) : null
+              const errorInfo = recipe && recipe.error != null ? getErrorLevel(recipe.error) : null
+              const predictedHex = typeof recipe?.predicted_hex === 'string' ? recipe.predicted_hex : null
+              const totalWeight = getTotalWeightGrams(recipeData.palette_index)
               return (
                 <div key={recipeData.palette_index} className="flex items-center gap-4 p-4 bg-gray-700 rounded">
-                  <div className="w-16 h-16 rounded border border-gray-600 flex-shrink-0" style={{ backgroundColor: color.hex }} />
+                  <div className="flex gap-2 flex-shrink-0">
+                    <div className="text-center">
+                      <div className="w-16 h-16 rounded border border-gray-600" style={{ backgroundColor: color.hex }} />
+                      <div className="text-[10px] text-gray-400 mt-1">Target</div>
+                    </div>
+                    <div className="text-center">
+                      {predictedHex ? (
+                        <div
+                          className="w-16 h-16 rounded border border-gray-600"
+                          style={{ backgroundColor: predictedHex }}
+                          title={predictedHex}
+                        />
+                      ) : (
+                        <div
+                          className="w-16 h-16 rounded border border-red-500 bg-transparent flex items-center justify-center text-red-400 text-[10px]"
+                          title="Missing predicted color"
+                        >
+                          N/A
+                        </div>
+                      )}
+                      <div className="text-[10px] text-gray-400 mt-1">Expected Mix</div>
+                    </div>
+                  </div>
                   <div className="flex-1">
                     <div className="font-bold">Palette Color {recipeData.palette_index}</div>
-                    <div className="text-sm text-gray-300">{formatRecipe(recipeData)}</div>
-                    {recipe && (recipeData.type === 'chatgpt' || recipe.type === 'chatgpt') && recipe.ingredients && (
-                      <div className="text-xs text-gray-400 mt-2 space-y-1">
-                        {recipe.mixing_strategy && <div><strong>Strategy:</strong> {recipe.mixing_strategy}</div>}
-                        {recipe.expected_result && <div><strong>Expected:</strong> {recipe.expected_result}</div>}
-                      </div>
-                    )}
-                    {recipe && recipeData.type !== 'chatgpt' && recipe.type !== 'chatgpt' && errorInfo && (
+                    <div className="text-xs text-gray-400">
+                      Total paint: {totalWeight != null ? `${totalWeight.toFixed(2)} g` : '—'}
+                    </div>
+                    <div className="text-xs text-gray-400">
+                      Target hex: {color.hex.toUpperCase()}
+                    </div>
+                    <div className="text-sm text-gray-300">{formatRecipe(recipeData, getTotalWeightGrams(recipeData.palette_index) ?? null)}</div>
+                    {recipe && errorInfo && (
                       <span className="inline-block mt-1 px-2 py-0.5 rounded text-xs" style={{ backgroundColor: errorInfo.color === 'green' ? '#16a34a' : errorInfo.color === 'yellow' ? '#ca8a04' : '#dc2626' }}>
                         {recipe.error?.toFixed(2)} ΔE – {errorInfo.level}
                       </span>
@@ -349,7 +510,21 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
               return (
                 <div className="mt-6 pt-6 border-t border-gray-700">
                   <h4 className="text-lg font-bold mb-3">Mixing Recipe</h4>
-                  <div className="text-sm text-gray-300">{formatRecipe(recipeData)}</div>
+                  {(() => {
+                    const totalWeight = getTotalWeightGrams(selectedLayerColor.paletteIndex!)
+                    const paletteColor = sessionData.palette.find((p) => p.index === selectedLayerColor.paletteIndex!)
+                    return (
+                      <div className="mb-1 space-y-0.5">
+                        <div className="text-xs text-gray-400">
+                          Total paint: {totalWeight != null ? `${totalWeight.toFixed(2)} g` : '—'}
+                        </div>
+                        <div className="text-xs text-gray-400">
+                          Target hex: {paletteColor?.hex?.toUpperCase() ?? '—'}
+                        </div>
+                      </div>
+                    )
+                  })()}
+                  <div className="text-sm text-gray-300">{formatRecipe(recipeData, getTotalWeightGrams(selectedLayerColor.paletteIndex!) ?? null)}</div>
                 </div>
               )
             })()}

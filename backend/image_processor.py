@@ -238,18 +238,36 @@ def clean_mask(mask: np.ndarray, min_area_ratio: float = 0.0002, coverage: float
 
 
 def calculate_lightness(rgb: List[int]) -> float:
-    """Calculate relative luminance (lightness) from RGB values."""
-    # Use standard relative luminance formula
-    # Convert to 0-1 range first
-    r, g, b = [c / 255.0 for c in rgb]
-    # Relative luminance formula
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    """Calculate Lab lightness L* normalized to 0..1."""
+    rgb_arr = np.array([[rgb]], dtype=np.uint8)
+    lab = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2LAB)[0, 0]
+    # OpenCV uint8 Lab encoding: L in 0..255
+    return float(lab[0]) / 255.0
+
+
+def calculate_base_color_bonus(rgb: List[int]) -> float:
+    """Estimate base-color bonus from chroma (saturated colors get a small boost)."""
+    rgb_arr = np.array([[rgb]], dtype=np.uint8)
+    lab = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2LAB)[0, 0].astype(np.float32)
+    # Convert OpenCV Lab a,b from 0..255 to signed-ish range around 0.
+    a = float(lab[1] - 128.0)
+    b = float(lab[2] - 128.0)
+    chroma = float(np.sqrt((a * a) + (b * b)))
+    return max(0.0, min(1.0, chroma / 100.0))
 
 
 def order_layers(palette: List[Dict], order_mode: str) -> List[int]:
     """Order layers by coverage, lightness, or return manual order."""
-    if order_mode == 'largest':
-        sorted_palette = sorted(palette, key=lambda x: x['coverage'], reverse=True)
+    if order_mode in ('auto', 'largest'):
+        # Automatic priority: large/light/base-color layers first, dark detail later.
+        # priority = 0.6 * area_score + 0.3 * lightness_score + 0.1 * base_color_bonus
+        def layer_priority(p: Dict) -> float:
+            area_score = max(0.0, min(1.0, float(p.get('coverage', 0.0)) / 100.0))
+            lightness_score = calculate_lightness(p['rgb'])
+            base_color_bonus = calculate_base_color_bonus(p['rgb'])
+            return (0.6 * area_score) + (0.3 * lightness_score) + (0.1 * base_color_bonus)
+
+        sorted_palette = sorted(palette, key=layer_priority, reverse=True)
         return [p['index'] for p in sorted_palette]
     elif order_mode == 'smallest':
         sorted_palette = sorted(palette, key=lambda x: x['coverage'])
@@ -542,11 +560,15 @@ def generate_outline(mask: np.ndarray, style: str = 'thin') -> np.ndarray:
 
 
 def compute_cache_key(image_path: str, n_colors: int, overpaint_mm: float, order_mode: str,
-                     max_side: int, saturation_boost: float, detail_level: float) -> str:
+                     max_side: int, saturation_boost: float, detail_level: float,
+                     mask_dilation_px: int = 0) -> str:
     """Compute cache key from image hash and processing parameters."""
     with open(image_path, 'rb') as f:
         image_hash = hashlib.sha256(f.read()).hexdigest()[:16]
-    params = f"{PIPELINE_VERSION}_{n_colors}_{overpaint_mm:.2f}_{order_mode}_{max_side}_{saturation_boost:.2f}_{detail_level:.2f}"
+    params = (
+        f"{PIPELINE_VERSION}_{n_colors}_{overpaint_mm:.2f}_{order_mode}_{max_side}_"
+        f"{saturation_boost:.2f}_{detail_level:.2f}_d{int(mask_dilation_px)}"
+    )
     cache_key = f"{image_hash}_{params}"
     logger.info(f"Computed cache key: {cache_key}")
     return cache_key
@@ -822,13 +844,14 @@ def process_image(
     max_side: int,
     saturation_boost: float = 1.0,
     detail_level: float = 0.5,
+    mask_dilation_px: int = 0,
 ) -> Dict:
     """Main processing pipeline with caching support."""
     logger.info(f"process_image called: image_path={image_path}, n_colors={n_colors}, cache_dir={MASK_CACHE_DIR}")
 
     # Compute cache key (gradients removed from pipeline)
     cache_key = compute_cache_key(image_path, n_colors, overpaint_mm, order_mode,
-                                  max_side, saturation_boost, detail_level)
+                                  max_side, saturation_boost, detail_level, mask_dilation_px)
     
     # Check cache first
     cached_dir = check_mask_cache(cache_key)
@@ -917,6 +940,13 @@ def process_image(
     
     # Step 5.6: Fill holes in each layer where a later layer will paint (paint-through for easier painting)
     expanded_masks = fill_holes_covered_by_later_layers(expanded_masks, order)
+
+    # Step 5.7: Optional uniform mask dilation to thicken paint regions for projection workflow.
+    if mask_dilation_px > 0:
+        r = int(max(1, mask_dilation_px))
+        kernel = np.ones((r * 2 + 1, r * 2 + 1), np.uint8)
+        for palette_idx in order:
+            expanded_masks[palette_idx] = cv2.dilate(expanded_masks[palette_idx], kernel, iterations=1)
 
     # Save labels and order so pure masks can be regenerated on demand (no gaps)
     np.save(str(output_dir / "labels.npy"), labels)

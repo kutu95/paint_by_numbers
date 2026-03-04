@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { API_BASE_URL } from '@/lib/config'
@@ -74,6 +74,7 @@ function CalibrationResultsView({ data }: { data: CalibrationData }) {
               <tr className="text-left text-gray-400 border-b border-gray-600">
                 <th className="py-1 pr-3">Ratio</th>
                 <th className="py-1 pr-2">Color</th>
+                <th className="py-1 pr-2">Hex</th>
                 <th className="py-1 pr-2">L</th>
                 <th className="py-1 pr-2">a*</th>
                 <th className="py-1">b*</th>
@@ -82,17 +83,25 @@ function CalibrationResultsView({ data }: { data: CalibrationData }) {
             <tbody>
               {samples.map((s, i) => (
                 <tr key={i} className="border-b border-gray-700">
+                  {(() => {
+                    const hex = rgbToHex(s.rgb[0], s.rgb[1], s.rgb[2])
+                    return (
+                      <>
                   <td className="py-1.5 pr-3">{(s.ratio * 100).toFixed(1)}%</td>
                   <td className="py-1.5 pr-2">
                     <span
                       className="inline-block w-6 h-6 rounded border border-gray-600"
-                      style={{ backgroundColor: rgbToHex(s.rgb[0], s.rgb[1], s.rgb[2]) }}
-                      title={rgbToHex(s.rgb[0], s.rgb[1], s.rgb[2])}
+                      style={{ backgroundColor: hex }}
+                      title={hex}
                     />
                   </td>
+                  <td className="py-1.5 pr-2 font-mono text-xs">{hex.toUpperCase()}</td>
                   <td className="py-1.5 pr-2">{s.lab[0].toFixed(1)}</td>
                   <td className="py-1.5 pr-2">{s.lab[1].toFixed(1)}</td>
                   <td className="py-1.5">{s.lab[2].toFixed(1)}</td>
+                      </>
+                    )
+                  })()}
                 </tr>
               ))}
             </tbody>
@@ -218,6 +227,12 @@ export default function PaintsPage() {
   const [newGroupName, setNewGroupName] = useState('')
   const [renamingGroup, setRenamingGroup] = useState<string | null>(null)
   const [renameGroupName, setRenameGroupName] = useState('')
+  const [downloadingCalibrationExport, setDownloadingCalibrationExport] = useState(false)
+  const [gamutL, setGamutL] = useState<number>(50)
+  const [gamutLoading, setGamutLoading] = useState(false)
+  const [gamutData, setGamutData] = useState<any | null>(null)
+  const [selectedGamutCell, setSelectedGamutCell] = useState<any | null>(null)
+  const gamutCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const [calibrationPanelOpen, setCalibrationPanelOpen] = useState(false)
   const [calibrationData, setCalibrationData] = useState<CalibrationData | null>(null)
   const [calibrationLoading, setCalibrationLoading] = useState(false)
@@ -261,9 +276,28 @@ export default function PaintsPage() {
   }, [editingPaint, calibrationPanelOpen])
 
   const loadLibraryGroups = async () => {
+    const url = `${API_BASE_URL}/api/paint/library/groups`
     try {
-      const response = await fetch(`${API_BASE_URL}/api/paint/library/groups`)
-      const data = await response.json()
+      let data: any = null
+      let lastError: unknown = null
+      for (const delayMs of [0, 400]) {
+        if (delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs))
+        }
+        try {
+          const response = await fetch(url, { cache: 'no-store' })
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`)
+          }
+          data = await response.json()
+          break
+        } catch (error) {
+          lastError = error
+        }
+      }
+      if (!data) {
+        throw lastError || new Error('No response data')
+      }
       setLibraryGroups(data.groups || [])
       
       // If we have a saved group, verify it still exists, otherwise use first available
@@ -281,7 +315,7 @@ export default function PaintsPage() {
         }
       }
     } catch (error) {
-      console.error('Failed to load library groups:', error)
+      console.error(`Failed to load library groups from ${url}:`, error)
     }
   }
 
@@ -289,7 +323,10 @@ export default function PaintsPage() {
     if (!selectedGroup) return
     setLoading(true)
     try {
-      const response = await fetch(`${API_BASE_URL}/api/paint/library?group=${selectedGroup}`)
+      const response = await fetch(`${API_BASE_URL}/api/paint/library?group=${encodeURIComponent(selectedGroup)}`)
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
       const data = await response.json()
       setPaints(data.paints || [])
       const cov = data.coverage_mg_per_cm2
@@ -454,6 +491,120 @@ export default function PaintsPage() {
     }
   }
 
+  const handleDownloadCalibrationExport = async () => {
+    if (!selectedGroup) return
+    setDownloadingCalibrationExport(true)
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/paint/calibration-export?group=${encodeURIComponent(selectedGroup)}`
+      )
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `calibration_export_${selectedGroup}.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (error) {
+      console.error('Failed to download calibration export:', error)
+      alert('Failed to download calibration export')
+    } finally {
+      setDownloadingCalibrationExport(false)
+    }
+  }
+
+  const loadGamutSlice = async (refresh: boolean = false) => {
+    if (!selectedGroup) return
+    setGamutLoading(true)
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/paint/gamut/slice?group=${encodeURIComponent(selectedGroup)}&l=${gamutL}&refresh=${refresh ? 'true' : 'false'}`,
+        { cache: 'no-store' }
+      )
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const data = await response.json()
+      setGamutData(data)
+      setSelectedGamutCell(null)
+    } catch (error) {
+      console.error('Failed to load gamut slice:', error)
+      alert('Failed to load gamut slice')
+    } finally {
+      setGamutLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!gamutData || !gamutCanvasRef.current) return
+    const canvas = gamutCanvasRef.current
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    const step = Number(gamutData.step || 5)
+    const aMin = Number(gamutData.a_min ?? -100)
+    const aMax = Number(gamutData.a_max ?? 100)
+    const bMin = Number(gamutData.b_min ?? -100)
+    const bMax = Number(gamutData.b_max ?? 100)
+    const cols = Math.floor((aMax - aMin) / step) + 1
+    const rows = Math.floor((bMax - bMin) / step) + 1
+    const cell = 9
+    canvas.width = cols * cell
+    canvas.height = rows * cell
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+    for (const c of gamutData.cells || []) {
+      const a = Number(c.a)
+      const b = Number(c.b)
+      const x = Math.round((a - aMin) / step)
+      const yGrid = Math.round((b - bMin) / step)
+      const y = (rows - 1 - yGrid)
+      ctx.fillStyle = c.target_hex || '#000000'
+      ctx.fillRect(x * cell, y * cell, cell, cell)
+
+      let overlay = ''
+      if (c.band === 'excellent') overlay = 'rgba(34,197,94,0.35)'
+      else if (c.band === 'good') overlay = 'rgba(234,179,8,0.35)'
+      else if (c.band === 'poor') overlay = 'rgba(239,68,68,0.45)'
+      else if (c.band === 'mid') overlay = 'rgba(249,115,22,0.35)'
+      if (overlay) {
+        ctx.fillStyle = overlay
+        ctx.fillRect(x * cell, y * cell, cell, cell)
+      }
+    }
+  }, [gamutData])
+
+  const handleGamutCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!gamutData || !gamutCanvasRef.current) return
+    const rect = gamutCanvasRef.current.getBoundingClientRect()
+    const xPx = e.clientX - rect.left
+    const yPx = e.clientY - rect.top
+
+    const step = Number(gamutData.step || 5)
+    const aMin = Number(gamutData.a_min ?? -100)
+    const aMax = Number(gamutData.a_max ?? 100)
+    const bMin = Number(gamutData.b_min ?? -100)
+    const bMax = Number(gamutData.b_max ?? 100)
+    const cols = Math.floor((aMax - aMin) / step) + 1
+    const rows = Math.floor((bMax - bMin) / step) + 1
+    const cell = 9
+
+    const x = Math.floor(xPx / cell)
+    const y = Math.floor(yPx / cell)
+    if (x < 0 || y < 0 || x >= cols || y >= rows) return
+
+    const a = aMin + x * step
+    const b = bMin + (rows - 1 - y) * step
+    const hit = (gamutData.cells || []).find((c: any) => Number(c.a) === a && Number(c.b) === b) || null
+    setSelectedGamutCell(hit)
+  }
+
 
   if (loading) {
     return (
@@ -529,6 +680,13 @@ export default function PaintsPage() {
               className="px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm"
             >
               + New Group
+            </button>
+            <button
+              onClick={handleDownloadCalibrationExport}
+              disabled={downloadingCalibrationExport}
+              className="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-sm disabled:opacity-50"
+            >
+              {downloadingCalibrationExport ? 'Downloading…' : 'Download Calibrations JSON'}
             </button>
           </div>
           <div className="mt-4 pt-4 border-t border-gray-600">
@@ -759,6 +917,84 @@ export default function PaintsPage() {
           ))}
         </div>
 
+        <div className="mt-8 p-4 bg-gray-800 rounded">
+          <h2 className="text-2xl font-bold mb-3">Palette Gamut Analysis</h2>
+          <p className="text-sm text-gray-400 mb-3">
+            Fixed-L slice over Lab a/b. Pixel color is target color with ΔE heat overlay
+            (green {'<'}2, yellow {'<'}5, red {'>'}10). Click a pixel to inspect the suggested recipe.
+          </p>
+          <div className="flex items-center gap-3 flex-wrap mb-3">
+            <label className="text-sm font-semibold">L slice:</label>
+            <select
+              value={gamutL}
+              onChange={(e) => setGamutL(Number(e.target.value))}
+              className="px-3 py-2 bg-gray-700 rounded border border-gray-600"
+            >
+              {Array.from({ length: 21 }, (_, i) => i * 5).map((v) => (
+                <option key={v} value={v}>{v}</option>
+              ))}
+            </select>
+            <button
+              onClick={() => loadGamutSlice(false)}
+              disabled={gamutLoading}
+              className="px-3 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm disabled:opacity-50"
+            >
+              {gamutLoading ? 'Generating…' : 'Generate Slice'}
+            </button>
+            <button
+              onClick={() => loadGamutSlice(true)}
+              disabled={gamutLoading}
+              className="px-3 py-2 bg-orange-600 hover:bg-orange-700 rounded text-sm disabled:opacity-50"
+            >
+              Refresh
+            </button>
+          </div>
+
+          {gamutData && (
+            <div className="flex flex-col lg:flex-row gap-4">
+              <div>
+                <canvas
+                  ref={gamutCanvasRef}
+                  onClick={handleGamutCanvasClick}
+                  className="border border-gray-600 rounded cursor-crosshair max-w-full h-auto"
+                />
+                <div className="text-xs text-gray-400 mt-2">
+                  a*: -100 → 100 (left to right), b*: 100 → -100 (top to bottom)
+                </div>
+              </div>
+              <div className="flex-1 min-w-[260px] p-3 bg-gray-900 rounded border border-gray-700">
+                <h3 className="font-bold mb-2">Selected Pixel</h3>
+                {!selectedGamutCell && (
+                  <p className="text-sm text-gray-400">Click a pixel on the heatmap to inspect the recommended recipe.</p>
+                )}
+                {selectedGamutCell && (
+                  <div className="space-y-2 text-sm">
+                    <div className="flex items-center gap-2">
+                      <div
+                        className="w-6 h-6 rounded border border-gray-600"
+                        style={{ backgroundColor: selectedGamutCell.target_hex || '#000000' }}
+                      />
+                      <span className="font-mono">{selectedGamutCell.target_hex}</span>
+                    </div>
+                    <div>a*: {selectedGamutCell.a}, b*: {selectedGamutCell.b}, L*: {gamutL}</div>
+                    <div>
+                      ΔE: {selectedGamutCell.error != null ? Number(selectedGamutCell.error).toFixed(2) : 'N/A'}
+                    </div>
+                    <div className="pt-2 border-t border-gray-700">
+                      <div className="font-semibold mb-1">Recommended recipe</div>
+                      <div className="text-gray-300">
+                        {selectedGamutCell.recipe_data
+                          ? formatRecipe(selectedGamutCell.recipe_data)
+                          : 'No recipe available'}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
         {paints.length === 0 && !showAddForm && (
           <div className="text-center py-12 text-gray-400">
             No paints in library. Click "Add Paint" to get started.
@@ -768,4 +1004,3 @@ export default function PaintsPage() {
     </div>
   )
 }
-

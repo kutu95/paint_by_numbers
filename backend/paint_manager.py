@@ -1,11 +1,14 @@
 import json
 import cv2
 import numpy as np
+from itertools import combinations
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Callable
 from datetime import datetime
 import re
 import logging
+
+logger = logging.getLogger(__name__)
 
 
 # Data directories
@@ -18,6 +21,45 @@ LIBRARIES_DIR = PAINT_DIR / "libraries"
 LIBRARIES_DIR.mkdir(parents=True, exist_ok=True)
 RECIPES_CACHE_DIR = PAINT_DIR / "recipes_cache"
 RECIPES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _empty_library(group: str) -> Dict:
+    return {"version": 1, "paints": [], "group": group}
+
+
+def _coerce_library_shape(data: object, group: str) -> Dict:
+    """Normalize library payload to a safe shape."""
+    if not isinstance(data, dict):
+        return _empty_library(group)
+
+    paints = data.get("paints", [])
+    if not isinstance(paints, list):
+        paints = []
+    paints = [p for p in paints if isinstance(p, dict)]
+
+    normalized = dict(data)
+    normalized["version"] = int(normalized.get("version", 1) or 1)
+    normalized["group"] = str(normalized.get("group") or group)
+    normalized["paints"] = paints
+    return normalized
+
+
+def get_white_mix_limits(target_lab: List[float]) -> Tuple[float, float]:
+    """Return (min_white_ratio, max_total_pigment) based on target lightness."""
+    lightness = float(target_lab[0]) if target_lab and len(target_lab) > 0 else 60.0
+    # Keep constraints permissive; strict minimum white causes large chroma errors.
+    if lightness < 25.0:
+        min_white_ratio = 0.01
+    elif lightness < 40.0:
+        min_white_ratio = 0.03
+    elif lightness < 55.0:
+        min_white_ratio = 0.08
+    elif lightness < 70.0:
+        min_white_ratio = 0.15
+    else:
+        min_white_ratio = 0.30
+    max_total_pigment = 1.0 - min_white_ratio
+    return min_white_ratio, max_total_pigment
 
 
 def slugify(text: str) -> str:
@@ -47,18 +89,25 @@ def load_library(group: str = "default") -> Dict:
     """
     # For backward compatibility, check old library.json first
     if group == "default" and LIBRARY_FILE.exists():
-        with open(LIBRARY_FILE, 'r') as f:
-            data = json.load(f)
-            # Migrate to new structure if needed
-            if "groups" not in data:
-                return data
+        try:
+            with open(LIBRARY_FILE, 'r') as f:
+                data = json.load(f)
+                # Migrate to new structure if needed
+                if isinstance(data, dict) and "groups" not in data:
+                    return _coerce_library_shape(data, group)
+        except (json.JSONDecodeError, OSError, ValueError) as e:
+            logger.warning("Failed to load legacy library file %s: %s", LIBRARY_FILE, e)
     
     # Load from group-specific file
     library_file = LIBRARIES_DIR / f"{group}.json"
     if not library_file.exists():
-        return {"version": 1, "paints": [], "group": group}
-    with open(library_file, 'r') as f:
-        return json.load(f)
+        return _empty_library(group)
+    try:
+        with open(library_file, 'r') as f:
+            return _coerce_library_shape(json.load(f), group)
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        logger.warning("Failed to load library group file %s: %s", library_file, e)
+        return _empty_library(group)
 
 
 def save_library(data: Dict, group: str = "default"):
@@ -192,9 +241,12 @@ def cache_recipe(group: str, hex_color: str, recipe: Dict):
 def get_library_info(group: str) -> Dict:
     """Get information about a library group."""
     library = load_library(group)
-    paint_count = len(library.get('paints', []))
-    calibrated_count = sum(1 for p in library.get('paints', []) 
-                          if (CALIBRATION_DIR / f"{p.get('id', '')}.json").exists())
+    paints = [p for p in library.get('paints', []) if isinstance(p, dict)]
+    paint_count = len(paints)
+    calibrated_count = sum(
+        1 for p in paints
+        if (CALIBRATION_DIR / f"{p.get('id', '')}.json").exists()
+    )
     
     # Use stored name if available, otherwise generate from group ID
     name = library.get('name', group.replace("-", " ").title())
@@ -209,22 +261,54 @@ def get_library_info(group: str) -> Dict:
 
 
 def rgb_to_lab(rgb: List[float]) -> List[float]:
-    """Convert RGB to Lab color space."""
-    rgb_array = np.array([[rgb]], dtype=np.uint8)
+    """Convert RGB (0..255) to CIELAB (L* 0..100, a*/b* approx -128..127)."""
+    rgb_clamped = [max(0.0, min(255.0, float(c))) for c in rgb]
+    rgb_array = np.array([[rgb_clamped]], dtype=np.float32) / 255.0
     lab_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2LAB)
-    return lab_array[0, 0].tolist()
+    return [float(v) for v in lab_array[0, 0].tolist()]
 
 
 def lab_to_rgb(lab: List[float]) -> List[float]:
-    """Convert Lab to RGB color space."""
-    lab_array = np.array([[lab]], dtype=np.uint8)
+    """Convert CIELAB (L* 0..100, a*/b*) to RGB (0..255)."""
+    lab_array = np.array([[[
+        float(lab[0]),
+        float(lab[1]),
+        float(lab[2]),
+    ]]], dtype=np.float32)
     rgb_array = cv2.cvtColor(lab_array, cv2.COLOR_LAB2RGB)
-    return rgb_array[0, 0].tolist()
+    rgb_255 = np.clip(np.round(rgb_array[0, 0] * 255.0), 0, 255).astype(np.uint8)
+    return rgb_255.tolist()
+
+
+def _opencv_u8_lab_to_cielab(lab: List[float]) -> List[float]:
+    """Convert OpenCV uint8-style Lab encoding to CIELAB."""
+    l, a, b = float(lab[0]), float(lab[1]), float(lab[2])
+    return [
+        (l * 100.0) / 255.0,
+        a - 128.0,
+        b - 128.0,
+    ]
+
+
+def _coerce_lab_to_cielab(lab: List[float]) -> List[float]:
+    """Best-effort conversion of possibly-legacy Lab values to CIELAB."""
+    if len(lab) < 3:
+        return [0.0, 0.0, 0.0]
+    l, a, b = float(lab[0]), float(lab[1]), float(lab[2])
+
+    # Already plausible CIELAB range.
+    if 0.0 <= l <= 100.0 and -128.0 <= a <= 127.0 and -128.0 <= b <= 127.0:
+        return [l, a, b]
+
+    # Otherwise, treat as OpenCV uint8-style Lab encoding.
+    return _opencv_u8_lab_to_cielab([l, a, b])
 
 
 def delta_e_lab(lab1: List[float], lab2: List[float]) -> float:
     """Calculate Euclidean distance in Lab space (simple ΔE)."""
-    return np.sqrt(sum((a - b) ** 2 for a, b in zip(lab1, lab2)))
+    c1 = _coerce_lab_to_cielab(lab1)
+    c2 = _coerce_lab_to_cielab(lab2)
+    return np.sqrt(sum((a - b) ** 2 for a, b in zip(c1, c2)))
 
 
 def sample_color_from_image(image_path: str, x: int, y: int, radius: int = 5) -> Tuple[List[int], List[float]]:
@@ -331,9 +415,12 @@ def normalize_calibration_samples(
     Returns:
         New list of samples with same structure but lab values normalized. RGB unchanged.
     """
-    ref_w = reference_strip.get("reference_white", {}).get("lab")
-    ref_m = reference_strip.get("reference_mid_grey", {}).get("lab")
-    ref_b = reference_strip.get("reference_black", {}).get("lab")
+    ref_w_raw = reference_strip.get("reference_white", {}).get("lab")
+    ref_m_raw = reference_strip.get("reference_mid_grey", {}).get("lab")
+    ref_b_raw = reference_strip.get("reference_black", {}).get("lab")
+    ref_w = _coerce_lab_to_cielab(ref_w_raw) if ref_w_raw else None
+    ref_m = _coerce_lab_to_cielab(ref_m_raw) if ref_m_raw else None
+    ref_b = _coerce_lab_to_cielab(ref_b_raw) if ref_b_raw else None
     if not ref_w or not ref_m or not ref_b:
         return samples
 
@@ -350,7 +437,8 @@ def normalize_calibration_samples(
 
     out = []
     for s in samples:
-        L, a, b = s["lab"][0], s["lab"][1], s["lab"][2]
+        l_raw = s.get("lab", [0.0, 0.0, 0.0])
+        L, a, b = _coerce_lab_to_cielab(l_raw)
         # Piecewise linear L: map [L_b,L_m] -> [0,50], [L_m,L_w] -> [50,100]
         if L <= L_m:
             L_corr = 50.0 * (L - L_b) / denom_low
@@ -377,7 +465,7 @@ def interpolate_lab_from_calibration(calibration: Dict, ratio: float) -> Optiona
     # Sort by ratio
     sorted_samples = sorted(samples, key=lambda x: x['ratio'])
     ratios = [s['ratio'] for s in sorted_samples]
-    labs = [s['lab'] for s in sorted_samples]
+    labs = [_coerce_lab_to_cielab(s['lab']) for s in sorted_samples]
     
     # Find bounding ratios
     if ratio <= ratios[0]:
@@ -399,6 +487,85 @@ def interpolate_lab_from_calibration(calibration: Dict, ratio: float) -> Optiona
     return None
 
 
+def get_calibration_max_ratio(calibration: Dict) -> float:
+    """Return the maximum calibrated pigment ratio available for a paint."""
+    samples = calibration.get('samples', [])
+    ratios = []
+    for s in samples:
+        if not isinstance(s, dict):
+            continue
+        try:
+            ratios.append(float(s.get('ratio', 0)))
+        except Exception:
+            continue
+    if not ratios:
+        return 0.0
+    return max(ratios)
+
+
+def _rgb_to_linear(rgb: List[float]) -> np.ndarray:
+    arr = np.array([max(0.0, min(255.0, float(c))) / 255.0 for c in rgb], dtype=np.float64)
+    return np.power(arr, 2.2)
+
+
+def _linear_to_rgb(linear_rgb: np.ndarray) -> List[float]:
+    clamped = np.clip(np.asarray(linear_rgb, dtype=np.float64), 0.0, 1.0)
+    srgb = np.power(clamped, 1.0 / 2.2) * 255.0
+    return [float(v) for v in np.clip(np.round(srgb), 0, 255)]
+
+
+def _predict_mix_lab_from_components(
+    components: List[Tuple[Optional[Dict], Optional[List[int]], float]],
+    white_ratio: float,
+) -> Optional[List[float]]:
+    """Predict mixed Lab from components using calibration curves + white-aware effective ratios.
+
+    Each pigment is first converted to its calibrated tint shade at ratio:
+      eff = pigment_ratio / (pigment_ratio + white_ratio)
+    then blended with other pigments by pigment share in linear RGB.
+    """
+    white_ratio = max(0.0, min(1.0, float(white_ratio)))
+    total_pigment = sum(max(0.0, float(r)) for _, _, r in components)
+    if total_pigment <= 0:
+        return [100.0, 0.0, 0.0]
+
+    mixed_linear = np.zeros(3, dtype=np.float64)
+    used = 0.0
+
+    for calibration, hex_rgb, pigment_ratio in components:
+        p = max(0.0, float(pigment_ratio))
+        if p <= 0:
+            continue
+        share = p / total_pigment
+        eff_ratio = p / (p + white_ratio) if (p + white_ratio) > 0 else 0.0
+        eff_ratio = max(0.0, min(1.0, eff_ratio))
+
+        rgb: Optional[List[float]] = None
+        if calibration is not None:
+            lab = interpolate_lab_from_calibration(calibration, eff_ratio)
+            if lab is not None:
+                rgb = lab_to_rgb(lab)
+        elif hex_rgb is not None:
+            # Uncalibrated fallback: tint paint hex toward white by effective ratio.
+            paint_lin = _rgb_to_linear([float(c) for c in hex_rgb])
+            white_lin = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+            tint_lin = (paint_lin * eff_ratio) + (white_lin * (1.0 - eff_ratio))
+            rgb = _linear_to_rgb(tint_lin)
+
+        if rgb is None:
+            continue
+
+        mixed_linear += _rgb_to_linear(rgb) * share
+        used += share
+
+    if used <= 0.0:
+        return None
+    if used < 0.999:
+        mixed_linear /= used
+    mixed_rgb = _linear_to_rgb(mixed_linear)
+    return rgb_to_lab(mixed_rgb)
+
+
 def find_best_one_pigment_recipe(target_lab: List[float], paint_id: str, paint_hex: str = None) -> Optional[Dict]:
     """Find best mixing ratio for one pigment + white to match target Lab.
     
@@ -412,6 +579,8 @@ def find_best_one_pigment_recipe(target_lab: List[float], paint_id: str, paint_h
     """
     calibration_file = CALIBRATION_DIR / f"{paint_id}.json"
     
+    min_white_ratio, max_total_pigment = get_white_mix_limits(target_lab)
+
     # If calibration exists, use it (more accurate)
     if calibration_file.exists():
         with open(calibration_file, 'r') as f:
@@ -419,12 +588,16 @@ def find_best_one_pigment_recipe(target_lab: List[float], paint_id: str, paint_h
         
         samples = calibration.get('samples', [])
         if samples:
+            cal_max_ratio = max(0.0, min(1.0, get_calibration_max_ratio(calibration)))
+            if cal_max_ratio <= 0.0:
+                return None
             # Search for best ratio
             best_ratio = None
             best_error = float('inf')
             
-            # Test ratios from 0 to 0.5 in small steps
-            for test_ratio in np.arange(0.0, 0.51, 0.01):
+            # Test pigment ratios across target-appropriate range.
+            upper_ratio = min(max_total_pigment, cal_max_ratio)
+            for test_ratio in np.arange(0.0, upper_ratio + 0.001, 0.01):
                 predicted_lab = interpolate_lab_from_calibration(calibration, test_ratio)
                 if predicted_lab:
                     error = delta_e_lab(target_lab, predicted_lab)
@@ -457,14 +630,14 @@ def find_best_one_pigment_recipe(target_lab: List[float], paint_id: str, paint_h
             # If target is much lighter, use less pigment
             lightness_diff = target_lightness - paint_lightness
             
-            # Estimate pigment ratio (0.0 to 0.5 range)
+            # Estimate pigment ratio over target-appropriate range.
             # If target is lighter, use less pigment
             if lightness_diff > 0:
                 # Target is lighter - use less pigment
-                estimated_ratio = max(0.05, min(0.5, 0.5 - (lightness_diff / 200.0)))
+                estimated_ratio = max(0.02, min(max_total_pigment, max_total_pigment - (lightness_diff / 200.0)))
             else:
                 # Target is darker - use more pigment
-                estimated_ratio = max(0.1, min(0.5, 0.5 + (abs(lightness_diff) / 200.0)))
+                estimated_ratio = max(0.05, min(max_total_pigment, max_total_pigment + (abs(lightness_diff) / 200.0)))
             
             # Calculate approximate error (will be higher than calibrated)
             # Use a simple distance metric
@@ -507,6 +680,9 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
     """
     cal1_file = CALIBRATION_DIR / f"{paint_id1}.json"
     cal2_file = CALIBRATION_DIR / f"{paint_id2}.json"
+    min_white_ratio, max_total_pigment = get_white_mix_limits(target_lab)
+    min_ratio = 0.02
+    max_ratio_per_pigment = max_total_pigment - min_ratio
     
     # Try calibrated first if both exist
     if cal1_file.exists() and cal2_file.exists():
@@ -514,46 +690,42 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
             cal1 = json.load(f)
         with open(cal2_file, 'r') as f:
             cal2 = json.load(f)
+        cal1_max = max(0.0, min(1.0, get_calibration_max_ratio(cal1)))
+        cal2_max = max(0.0, min(1.0, get_calibration_max_ratio(cal2)))
+        if cal1_max <= 0.0 or cal2_max <= 0.0:
+            return None
         
         # Fine grid search for better accuracy
         best_error = float('inf')
         best_recipe = None
         
-        # Allow up to 60% total pigment (40% white minimum)
-        max_total_pigment = 0.6
-        for p1_ratio in np.arange(0.02, 0.35, 0.02):
-            for p2_ratio in np.arange(0.02, 0.35, 0.02):
+        for p1_ratio in np.arange(min_ratio, min(max_ratio_per_pigment, cal1_max) + 0.001, 0.02):
+            for p2_ratio in np.arange(min_ratio, min(max_ratio_per_pigment, cal2_max) + 0.001, 0.02):
                 if p1_ratio + p2_ratio > max_total_pigment:
                     continue
-                # Ensure minimum ratio for each pigment (at least 2% each)
-                if p1_ratio < 0.02 or p2_ratio < 0.02:
+                white_ratio = 1.0 - p1_ratio - p2_ratio
+                if white_ratio < min_white_ratio:
                     continue
-                
-                # Approximate: blend the two single-pigment Labs at their ratios
-                lab1 = interpolate_lab_from_calibration(cal1, p1_ratio)
-                lab2 = interpolate_lab_from_calibration(cal2, p2_ratio)
-                
-                if lab1 and lab2:
-                    # Simple weighted blend (approximation)
-                    white_ratio = 1.0 - p1_ratio - p2_ratio
-                    blended_lab = [
-                        lab1[0] * p1_ratio + lab2[0] * p2_ratio + 100.0 * white_ratio * 0.9,  # Approximate white Lab
-                        lab1[1] * p1_ratio + lab2[1] * p2_ratio,
-                        lab1[2] * p1_ratio + lab2[2] * p2_ratio
-                    ]
-                    
-                    error = delta_e_lab(target_lab, blended_lab)
-                    if error < best_error:
-                        best_error = error
-                        best_recipe = {
-                            'pigment1_id': paint_id1,
-                            'pigment1_ratio': p1_ratio,
-                            'pigment2_id': paint_id2,
-                            'pigment2_ratio': p2_ratio,
-                            'white_ratio': white_ratio,
-                            'error': best_error,
-                            'type': 'two_pigment'
-                        }
+
+                blended_lab = _predict_mix_lab_from_components(
+                    [(cal1, None, p1_ratio), (cal2, None, p2_ratio)],
+                    white_ratio,
+                )
+                if blended_lab is None:
+                    continue
+
+                error = delta_e_lab(target_lab, blended_lab)
+                if error < best_error:
+                    best_error = error
+                    best_recipe = {
+                        'pigment1_id': paint_id1,
+                        'pigment1_ratio': p1_ratio,
+                        'pigment2_id': paint_id2,
+                        'pigment2_ratio': p2_ratio,
+                        'white_ratio': white_ratio,
+                        'error': best_error,
+                        'type': 'two_pigment'
+                    }
         
         if best_recipe:
             return best_recipe
@@ -574,23 +746,21 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
             best_error = float('inf')
             best_recipe = None
             
-            # Allow up to 60% total pigment (40% white minimum)
-            max_total_pigment = 0.6
-            for p1_ratio in np.arange(0.02, 0.35, 0.02):
-                for p2_ratio in np.arange(0.02, 0.35, 0.02):
+            for p1_ratio in np.arange(min_ratio, max_ratio_per_pigment + 0.001, 0.02):
+                for p2_ratio in np.arange(min_ratio, max_ratio_per_pigment + 0.001, 0.02):
                     if p1_ratio + p2_ratio > max_total_pigment:
                         continue
-                    # Ensure minimum ratio for each pigment (at least 2% each)
-                    if p1_ratio < 0.02 or p2_ratio < 0.02:
-                        continue
-                    
                     white_ratio = 1.0 - p1_ratio - p2_ratio
-                    blended_lab = [
-                        lab1[0] * p1_ratio + lab2[0] * p2_ratio + 100.0 * white_ratio * 0.9,
-                        lab1[1] * p1_ratio + lab2[1] * p2_ratio,
-                        lab1[2] * p1_ratio + lab2[2] * p2_ratio
-                    ]
-                    
+                    if white_ratio < min_white_ratio:
+                        continue
+
+                    blended_lab = _predict_mix_lab_from_components(
+                        [(None, rgb1, p1_ratio), (None, rgb2, p2_ratio)],
+                        white_ratio,
+                    )
+                    if blended_lab is None:
+                        continue
+
                     error = delta_e_lab(target_lab, blended_lab)
                     # Add penalty for uncalibrated
                     error += 5.0
@@ -627,7 +797,6 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
         Recipe dict with pigment IDs, ratios, white_ratio, and error
     """
     n_pigments = len(paint_ids)
-    # ONLY handle 3+ pigments - no 2-pigment recipes
     if n_pigments < 3:
         return None
     
@@ -635,6 +804,7 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
     # We'll interpolate calibrated colors at the actual ratio being tested
     paint_calibrations = []
     paint_hex_colors = []
+    paint_max_ratios = []
     calibrated_count = 0
     
     for paint_id, paint_hex in zip(paint_ids, paint_hexes):
@@ -646,6 +816,10 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
             calibrated_count += 1
         
         paint_calibrations.append(calibration)
+        if calibration is not None:
+            paint_max_ratios.append(max(0.0, min(1.0, get_calibration_max_ratio(calibration))))
+        else:
+            paint_max_ratios.append(1.0)
         
         # Store hex color as fallback
         if paint_hex:
@@ -661,335 +835,115 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
     if len(paint_calibrations) != n_pigments:
         return None
     
-    # Grid search for best ratios
-    # For n pigments, we'll try different combinations
-    # Keep total pigment ratio <= 0.5 (white dominant)
-    best_error = float('inf')
-    best_recipe = None
-    
-    # Two-stage grid search: coarse first, then refine around best result
-    # Coarse grid search - use smaller steps for better accuracy
-    coarse_step = 0.02 if n_pigments == 3 else 0.015 if n_pigments == 4 else 0.015
-    
-    # Generate all combinations of ratios
-    # Allow more flexibility - total pigment can be up to 0.6 (white can be 0.4)
-    max_total_pigment = 0.6
-    max_ratio_per_pigment = max_total_pigment / n_pigments
-    
-    if n_pigments == 3:
-        # Stage 1: Coarse grid search
-        best_coarse_ratios = None
-        for p1_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, coarse_step):
-            for p2_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, coarse_step):
-                remaining = max_total_pigment - p1_ratio - p2_ratio
-                if remaining < 0.02:
-                    continue
-                p3_ratio = min(max_ratio_per_pigment * 2.5, remaining)
-                if p3_ratio < 0.02:
-                    continue
-                
-                white_ratio = 1.0 - p1_ratio - p2_ratio - p3_ratio
-                if white_ratio < 0.3:  # Keep at least 30% white
-                    continue
-                
-                # Get actual paint colors at these ratios (for calibrated paints)
-                paint_labs_at_ratio = []
-                for i, (cal, hex_rgb, ratio) in enumerate(zip(
-                    paint_calibrations, 
-                    paint_hex_colors, 
-                    [p1_ratio, p2_ratio, p3_ratio]
-                )):
-                    if cal:
-                        # Use calibrated color at this specific ratio
-                        lab = interpolate_lab_from_calibration(cal, ratio)
-                        if lab:
-                            paint_labs_at_ratio.append(lab)
-                        else:
-                            # Fallback to hex
-                            if hex_rgb:
-                                paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
-                            else:
-                                continue
-                    else:
-                        # Use hex color (uncalibrated)
-                        if hex_rgb:
-                            paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
-                        else:
-                            continue
-                
-                if len(paint_labs_at_ratio) != 3:
-                    continue
-                
-                # Blend the colors using actual ratios
-                # White is approximately Lab(100, 0, 0) but we use 0.9 factor for mixing
-                blended_lab = [
-                    paint_labs_at_ratio[0][0] * p1_ratio + paint_labs_at_ratio[1][0] * p2_ratio + paint_labs_at_ratio[2][0] * p3_ratio + 100.0 * white_ratio * 0.9,
-                    paint_labs_at_ratio[0][1] * p1_ratio + paint_labs_at_ratio[1][1] * p2_ratio + paint_labs_at_ratio[2][1] * p3_ratio,
-                    paint_labs_at_ratio[0][2] * p1_ratio + paint_labs_at_ratio[1][2] * p2_ratio + paint_labs_at_ratio[2][2] * p3_ratio
-                ]
-                
-                error = delta_e_lab(target_lab, blended_lab)
-                if calibrated_count < n_pigments:
-                    error += (n_pigments - calibrated_count) * 3.0  # Penalty for uncalibrated
-                
-                if error < best_error:
-                    best_error = error
-                    best_coarse_ratios = [p1_ratio, p2_ratio, p3_ratio]
-        
-        # Stage 2: Fine refinement around best coarse result
-        if best_coarse_ratios:
-            refine_step = 0.005  # Much finer step for refinement
-            refine_range = 0.03  # Search within ±3% of best coarse result
-            
-            for p1_ratio in np.arange(
-                max(0.02, best_coarse_ratios[0] - refine_range),
-                min(max_ratio_per_pigment * 2.5, best_coarse_ratios[0] + refine_range + refine_step),
-                refine_step
-            ):
-                for p2_ratio in np.arange(
-                    max(0.02, best_coarse_ratios[1] - refine_range),
-                    min(max_ratio_per_pigment * 2.5, best_coarse_ratios[1] + refine_range + refine_step),
-                    refine_step
-                ):
-                    remaining = max_total_pigment - p1_ratio - p2_ratio
-                    if remaining < 0.02:
-                        continue
-                    p3_ratio = min(max_ratio_per_pigment * 2.5, remaining)
-                    if p3_ratio < 0.02:
-                        continue
-                    
-                    white_ratio = 1.0 - p1_ratio - p2_ratio - p3_ratio
-                    if white_ratio < 0.3:
-                        continue
-                    
-                    # Get actual paint colors at these ratios (for calibrated paints)
-                    paint_labs_at_ratio = []
-                    for i, (cal, hex_rgb, ratio) in enumerate(zip(
-                        paint_calibrations, 
-                        paint_hex_colors, 
-                        [p1_ratio, p2_ratio, p3_ratio]
-                    )):
-                        if cal:
-                            # Use calibrated color at this specific ratio
-                            lab = interpolate_lab_from_calibration(cal, ratio)
-                            if lab:
-                                paint_labs_at_ratio.append(lab)
-                            else:
-                                # Fallback to hex
-                                if hex_rgb:
-                                    paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
-                                else:
-                                    break
-                        else:
-                            # Use hex color (uncalibrated)
-                            if hex_rgb:
-                                paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
-                            else:
-                                break
-                    
-                    if len(paint_labs_at_ratio) != 3:
-                        continue
-                    
-                    # Blend the colors using actual ratios
-                    blended_lab = [
-                        paint_labs_at_ratio[0][0] * p1_ratio + paint_labs_at_ratio[1][0] * p2_ratio + paint_labs_at_ratio[2][0] * p3_ratio + 100.0 * white_ratio * 0.9,
-                        paint_labs_at_ratio[0][1] * p1_ratio + paint_labs_at_ratio[1][1] * p2_ratio + paint_labs_at_ratio[2][1] * p3_ratio,
-                        paint_labs_at_ratio[0][2] * p1_ratio + paint_labs_at_ratio[1][2] * p2_ratio + paint_labs_at_ratio[2][2] * p3_ratio
-                    ]
-                    
-                    error = delta_e_lab(target_lab, blended_lab)
-                    if calibrated_count < n_pigments:
-                        error += (n_pigments - calibrated_count) * 3.0
-                    
-                    if error < best_error:
-                        best_error = error
-                        best_recipe = {
-                            'pigment_ids': paint_ids,
-                            'pigment_ratios': [p1_ratio, p2_ratio, p3_ratio],
-                            'white_ratio': white_ratio,
-                            'error': best_error,
-                            'type': 'three_pigment',
-                            'uncalibrated': calibrated_count < n_pigments
-                        }
-        
-        # If refinement didn't find better, use coarse result
-        if best_coarse_ratios and not best_recipe:
-            white_ratio = 1.0 - sum(best_coarse_ratios)
-            best_recipe = {
-                'pigment_ids': paint_ids,
-                'pigment_ratios': best_coarse_ratios,
-                'white_ratio': white_ratio,
-                'error': best_error,
-                'type': 'three_pigment',
-                'uncalibrated': calibrated_count < n_pigments
-            }
-    
-    elif n_pigments == 4:
-        # Stage 1: Coarse grid search (slightly coarser for 4 pigments due to complexity)
-        best_coarse_ratios = None
-        for p1_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, coarse_step):
-            for p2_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, coarse_step):
-                for p3_ratio in np.arange(0.02, max_ratio_per_pigment * 2.5, coarse_step):
-                    remaining = max_total_pigment - p1_ratio - p2_ratio - p3_ratio
-                    if remaining < 0.02:
-                        continue
-                    p4_ratio = min(max_ratio_per_pigment * 2.5, remaining)
-                    if p4_ratio < 0.02:
-                        continue
-                    
-                    white_ratio = 1.0 - p1_ratio - p2_ratio - p3_ratio - p4_ratio
-                    if white_ratio < 0.3:  # Keep at least 30% white
-                        continue
-                    
-                    # Get actual paint colors at these ratios (for calibrated paints)
-                    paint_labs_at_ratio = []
-                    for i, (cal, hex_rgb, ratio) in enumerate(zip(
-                        paint_calibrations, 
-                        paint_hex_colors, 
-                        [p1_ratio, p2_ratio, p3_ratio, p4_ratio]
-                    )):
-                        if cal:
-                            # Use calibrated color at this specific ratio
-                            lab = interpolate_lab_from_calibration(cal, ratio)
-                            if lab:
-                                paint_labs_at_ratio.append(lab)
-                            else:
-                                # Fallback to hex
-                                if hex_rgb:
-                                    paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
-                                else:
-                                    continue
-                        else:
-                            # Use hex color (uncalibrated)
-                            if hex_rgb:
-                                paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
-                            else:
-                                continue
-                    
-                    if len(paint_labs_at_ratio) != 4:
-                        continue
-                    
-                    # Blend the colors using actual ratios
-                    blended_lab = [
-                        paint_labs_at_ratio[0][0] * p1_ratio + paint_labs_at_ratio[1][0] * p2_ratio + 
-                        paint_labs_at_ratio[2][0] * p3_ratio + paint_labs_at_ratio[3][0] * p4_ratio + 100.0 * white_ratio * 0.9,
-                        paint_labs_at_ratio[0][1] * p1_ratio + paint_labs_at_ratio[1][1] * p2_ratio + 
-                        paint_labs_at_ratio[2][1] * p3_ratio + paint_labs_at_ratio[3][1] * p4_ratio,
-                        paint_labs_at_ratio[0][2] * p1_ratio + paint_labs_at_ratio[1][2] * p2_ratio + 
-                        paint_labs_at_ratio[2][2] * p3_ratio + paint_labs_at_ratio[3][2] * p4_ratio
-                    ]
-                    
-                    error = delta_e_lab(target_lab, blended_lab)
-                    if calibrated_count < n_pigments:
-                        error += (n_pigments - calibrated_count) * 4.0  # Penalty for uncalibrated
-                    
-                    if error < best_error:
-                        best_error = error
-                        best_coarse_ratios = [p1_ratio, p2_ratio, p3_ratio, p4_ratio]
-        
-        # Stage 2: Fine refinement around best coarse result
-        if best_coarse_ratios:
-            refine_step = 0.005  # Much finer step for refinement
-            refine_range = 0.03  # Search within ±3% of best coarse result
-            
-            for p1_ratio in np.arange(
-                max(0.02, best_coarse_ratios[0] - refine_range),
-                min(max_ratio_per_pigment * 2.5, best_coarse_ratios[0] + refine_range + refine_step),
-                refine_step
-            ):
-                for p2_ratio in np.arange(
-                    max(0.02, best_coarse_ratios[1] - refine_range),
-                    min(max_ratio_per_pigment * 2.5, best_coarse_ratios[1] + refine_range + refine_step),
-                    refine_step
-                ):
-                    for p3_ratio in np.arange(
-                        max(0.02, best_coarse_ratios[2] - refine_range),
-                        min(max_ratio_per_pigment * 2.5, best_coarse_ratios[2] + refine_range + refine_step),
-                        refine_step
-                    ):
-                        remaining = max_total_pigment - p1_ratio - p2_ratio - p3_ratio
-                        if remaining < 0.02:
-                            continue
-                        p4_ratio = min(max_ratio_per_pigment * 2.5, remaining)
-                        if p4_ratio < 0.02:
-                            continue
-                        
-                        white_ratio = 1.0 - p1_ratio - p2_ratio - p3_ratio - p4_ratio
-                        if white_ratio < 0.3:
-                            continue
-                        
-                        # Get actual paint colors at these ratios (for calibrated paints)
-                        paint_labs_at_ratio = []
-                        for i, (cal, hex_rgb, ratio) in enumerate(zip(
-                            paint_calibrations, 
-                            paint_hex_colors, 
-                            [p1_ratio, p2_ratio, p3_ratio, p4_ratio]
-                        )):
-                            if cal:
-                                # Use calibrated color at this specific ratio
-                                lab = interpolate_lab_from_calibration(cal, ratio)
-                                if lab:
-                                    paint_labs_at_ratio.append(lab)
-                                else:
-                                    # Fallback to hex
-                                    if hex_rgb:
-                                        paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
-                                    else:
-                                        break
-                            else:
-                                # Use hex color (uncalibrated)
-                                if hex_rgb:
-                                    paint_labs_at_ratio.append(rgb_to_lab(hex_rgb))
-                                else:
-                                    break
-                        
-                        if len(paint_labs_at_ratio) != 4:
-                            continue
-                        
-                        # Blend the colors using actual ratios
-                        blended_lab = [
-                            paint_labs_at_ratio[0][0] * p1_ratio + paint_labs_at_ratio[1][0] * p2_ratio + 
-                            paint_labs_at_ratio[2][0] * p3_ratio + paint_labs_at_ratio[3][0] * p4_ratio + 100.0 * white_ratio * 0.9,
-                            paint_labs_at_ratio[0][1] * p1_ratio + paint_labs_at_ratio[1][1] * p2_ratio + 
-                            paint_labs_at_ratio[2][1] * p3_ratio + paint_labs_at_ratio[3][1] * p4_ratio,
-                            paint_labs_at_ratio[0][2] * p1_ratio + paint_labs_at_ratio[1][2] * p2_ratio + 
-                            paint_labs_at_ratio[2][2] * p3_ratio + paint_labs_at_ratio[3][2] * p4_ratio
-                        ]
-                        
-                        error = delta_e_lab(target_lab, blended_lab)
-                        if calibrated_count < n_pigments:
-                            error += (n_pigments - calibrated_count) * 4.0
-                        
-                        if error < best_error:
-                            best_error = error
-                            best_recipe = {
-                                'pigment_ids': paint_ids,
-                                'pigment_ratios': [p1_ratio, p2_ratio, p3_ratio, p4_ratio],
-                                'white_ratio': white_ratio,
-                                'error': best_error,
-                                'type': 'four_pigment',
-                                'uncalibrated': calibrated_count < n_pigments
-                            }
-        
-        # If refinement didn't find better, use coarse result
-        if best_coarse_ratios and not best_recipe:
-            white_ratio = 1.0 - sum(best_coarse_ratios)
-            best_recipe = {
-                'pigment_ids': paint_ids,
-                'pigment_ratios': best_coarse_ratios,
-                'white_ratio': white_ratio,
-                'error': best_error,
-                'type': 'four_pigment',
-                'uncalibrated': calibrated_count < n_pigments
-            }
-    else:
-        # Reject any other number of pigments (including 2)
+    # Two-stage search with unbiased ratio enumeration.
+    min_ratio = 0.02
+    min_white_ratio, max_total_pigment = get_white_mix_limits(target_lab)
+    max_ratio_per_pigment = max_total_pigment - (n_pigments - 1) * min_ratio
+    if max_ratio_per_pigment < min_ratio:
         return None
-    
-    return best_recipe
+
+    ratio_type = {
+        3: 'three_pigment',
+        4: 'four_pigment',
+    }.get(n_pigments, f'{n_pigments}_pigment')
+
+    def evaluate(ratios: List[float]) -> Optional[float]:
+        white_ratio = 1.0 - sum(ratios)
+        if white_ratio < min_white_ratio:
+            return None
+        if sum(ratios) > max_total_pigment:
+            return None
+
+        components: List[Tuple[Optional[Dict], Optional[List[int]], float]] = []
+        for calibration, hex_rgb, ratio, max_ratio in zip(paint_calibrations, paint_hex_colors, ratios, paint_max_ratios):
+            if ratio - max_ratio > 1e-9:
+                return None
+            if calibration is None and hex_rgb is None:
+                return None
+            components.append((calibration, hex_rgb, ratio))
+
+        blended_lab = _predict_mix_lab_from_components(components, white_ratio)
+        if blended_lab is None:
+            return None
+
+        error = delta_e_lab(target_lab, blended_lab)
+        if calibrated_count < n_pigments:
+            error += (n_pigments - calibrated_count) * (3.0 if n_pigments == 3 else 4.0)
+        return error
+
+    def search(step: float, center: Optional[List[float]] = None, radius: float = 0.0) -> Tuple[Optional[List[float]], float]:
+        ratio_axes = []
+        for i in range(n_pigments):
+            low = min_ratio
+            high = max_ratio_per_pigment
+            if center is not None:
+                low = max(min_ratio, center[i] - radius)
+                high = min(max_ratio_per_pigment, center[i] + radius)
+            axis = np.arange(low, high + (step * 0.5), step)
+            if len(axis) == 0:
+                return None, float('inf')
+            ratio_axes.append(axis)
+
+        best_ratios = None
+        best_error = float('inf')
+
+        def walk(depth: int, chosen: List[float], total: float):
+            nonlocal best_ratios, best_error
+            remaining = n_pigments - depth
+            if depth == n_pigments:
+                error = evaluate(chosen)
+                if error is not None and error < best_error:
+                    best_error = error
+                    best_ratios = chosen.copy()
+                return
+
+            min_needed_for_rest = (remaining - 1) * min_ratio
+            max_this = min(
+                ratio_axes[depth][-1],
+                max_total_pigment - total - min_needed_for_rest
+            )
+            if max_this < min_ratio:
+                return
+
+            for ratio in ratio_axes[depth]:
+                r = float(ratio)
+                if r > max_this + 1e-9:
+                    break
+                walk(depth + 1, chosen + [r], total + r)
+
+        walk(0, [], 0.0)
+        return best_ratios, best_error
+
+    coarse_step = 0.02 if n_pigments == 3 else 0.015
+    coarse_ratios, coarse_error = search(coarse_step)
+    if coarse_ratios is None:
+        return None
+
+    # Keep refinement slightly coarser for runtime stability in API context.
+    fine_step = 0.01
+    fine_radius = 0.03
+    fine_ratios, fine_error = search(fine_step, center=coarse_ratios, radius=fine_radius)
+
+    best_ratios = fine_ratios if fine_ratios is not None and fine_error <= coarse_error else coarse_ratios
+    best_error = fine_error if fine_ratios is not None and fine_error <= coarse_error else coarse_error
+    white_ratio = 1.0 - sum(best_ratios)
+
+    return {
+        'pigment_ids': paint_ids,
+        'pigment_ratios': best_ratios,
+        'white_ratio': white_ratio,
+        'error': best_error,
+        'type': ratio_type,
+        'uncalibrated': calibrated_count < n_pigments
+    }
 
 
-def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_group: str = "default") -> List[Dict]:
+def generate_recipes_for_palette(
+    session_id: str,
+    palette: List[Dict],
+    library_group: str = "default",
+    progress_cb: Optional[Callable[[int, int, str], None]] = None,
+) -> List[Dict]:
     """Generate paint mixing recipes for each palette color.
     
     Args:
@@ -1045,6 +999,25 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
         
         return False
     
+    def is_white_paint(paint: Dict) -> bool:
+        """Check if paint behaves like white and should not be a pigment candidate."""
+        paint_id_lower = paint.get('id', '').lower()
+        paint_name_lower = paint.get('name', '').lower()
+        if 'white' in paint_id_lower or 'white' in paint_name_lower:
+            return True
+
+        hex_color = paint.get('hex_approx', '')
+        if hex_color:
+            try:
+                hex_clean = hex_color.lstrip('#')
+                r = int(hex_clean[0:2], 16)
+                g = int(hex_clean[2:4], 16)
+                b = int(hex_clean[4:6], 16)
+                return r > 240 and g > 240 and b > 240
+            except Exception:
+                return False
+        return False
+
     # Separate colored paints from achromatic ones
     colored_paints = [p for p in base_paints if not is_achromatic(p)]
     achromatic_paints = [p for p in base_paints if is_achromatic(p)]
@@ -1064,140 +1037,140 @@ def generate_recipes_for_palette(session_id: str, palette: List[Dict], library_g
     
     recipes = []
     
-    for color in palette:
-        target_rgb = color['rgb']
-        target_lab = rgb_to_lab([float(c) for c in target_rgb])
+    total_colors = len(palette)
+    for i, color in enumerate(palette):
+        if progress_cb:
+            try:
+                progress_cb(i, total_colors, "running")
+            except Exception:
+                pass
+        palette_index = color.get('index')
+        try:
+            target_rgb = color.get('rgb')
+            if not isinstance(target_rgb, (list, tuple)) or len(target_rgb) < 3:
+                recipes.append({
+                    'palette_index': palette_index,
+                    'recipe': None,
+                    'error': 'Color format error: missing or invalid rgb'
+                })
+                continue
+
+            target_lab = rgb_to_lab([float(c) for c in target_rgb[:3]])
         
-        # Check if target is essentially achromatic (gray/white/black)
-        target_is_achromatic = False
-        r, g, b = target_rgb
-        if abs(r - g) < 30 and abs(g - b) < 30 and abs(r - b) < 30:
-            max_channel = max(r, g, b)
-            min_channel = min(r, g, b)
-            if max_channel - min_channel < 40:  # Low saturation = gray
-                target_is_achromatic = True
+            # Check if target is essentially achromatic (gray/white/black)
+            target_is_achromatic = False
+            r, g, b = target_rgb
+            if abs(r - g) < 30 and abs(g - b) < 30 and abs(r - b) < 30:
+                max_channel = max(r, g, b)
+                min_channel = min(r, g, b)
+                if max_channel - min_channel < 40:  # Low saturation = gray
+                    target_is_achromatic = True
         
-        # Try one-pigment recipes first (prefer calibrated, fallback to approximate)
-        # Only use colored paints for colored targets
-        search_paints = colored_paints if not target_is_achromatic else base_paints
-        best_one_pigment = None
-        best_one_error = float('inf')
+            # Exclude white from pigment candidates because white is modeled by white_ratio.
+            non_white_colored_paints = [p for p in colored_paints if not is_white_paint(p)]
+            non_white_base_paints = [p for p in base_paints if not is_white_paint(p)]
+
+            # Try one-pigment recipes first across all non-white paints.
+            # Restricting to "colored only" often blocks good dark/neutral corrections.
+            search_paints = non_white_base_paints
+            if not search_paints:
+                search_paints = non_white_base_paints
+            best_one_pigment = None
+            best_one_error = float('inf')
+            one_pigment_candidates = []
         
-        for paint in search_paints:
-            paint_hex = paint.get('hex_approx', '')
-            recipe = find_best_one_pigment_recipe(target_lab, paint['id'], paint_hex)
-            if recipe:
-                # Add penalty if using achromatic paint for colored target
-                if not target_is_achromatic and is_achromatic(paint):
-                    recipe['error'] += 20.0  # Heavy penalty
-                
-                if recipe['error'] < best_one_error:
-                    best_one_error = recipe['error']
-                    best_one_pigment = recipe
+            for paint in search_paints:
+                paint_hex = paint.get('hex_approx', '')
+                recipe = find_best_one_pigment_recipe(target_lab, paint['id'], paint_hex)
+                if recipe:
+                    if recipe['error'] < best_one_error:
+                        best_one_error = recipe['error']
+                        best_one_pigment = recipe
+                    one_pigment_candidates.append({
+                        'paint': paint,
+                        'error': recipe['error']
+                    })
         
-        # Try multi-pigment recipes - ALWAYS use at least 3 colors (no 2-color fallback)
-        best_multi_pigment = None
-        best_multi_error = float('inf')
-        best_pigment_count = 0  # Track how many pigments in best recipe
-        
-        # Strategy: Try MORE pigments first, prefer recipes with more colors
-        # Try 4 pigments first if available (most flexibility)
-        if len(search_paints) >= 4:
-            for i, paint1 in enumerate(search_paints):
-                for j, paint2 in enumerate(search_paints[i+1:], i+1):
-                    for k, paint3 in enumerate(search_paints[j+1:], j+1):
-                        for paint4 in search_paints[k+1:]:
-                            # Don't allow too many achromatic paints
-                            if not target_is_achromatic:
-                                achromatic_count = sum([is_achromatic(p) for p in [paint1, paint2, paint3, paint4]])
-                                if achromatic_count >= 2:
-                                    continue
-                            
-                            recipe = find_best_multi_pigment_recipe(
-                                target_lab,
-                                [paint1['id'], paint2['id'], paint3['id'], paint4['id']],
-                                [paint1.get('hex_approx', ''), paint2.get('hex_approx', ''), 
-                                 paint3.get('hex_approx', ''), paint4.get('hex_approx', '')]
-                            )
-                            if recipe:
-                                # Add penalty if using achromatic paints
-                                if not target_is_achromatic:
-                                    for paint in [paint1, paint2, paint3, paint4]:
-                                        if is_achromatic(paint):
-                                            recipe['error'] += 8.0
-                                
-                                # Prefer 4-pigment recipes: accept if error is similar (within 2.0) or better
-                                adjusted_error = recipe['error']
-                                if best_pigment_count < 4:
-                                    # If we don't have a 4-pigment recipe yet, or this is better, use it
-                                    if best_multi_pigment is None or adjusted_error < best_multi_error + 2.0:
-                                        best_multi_error = adjusted_error
-                                        best_multi_pigment = recipe
-                                        best_pigment_count = 4
-                                elif adjusted_error < best_multi_error:
-                                    # If we already have 4-pigment, only replace if significantly better
-                                    best_multi_error = adjusted_error
-                                    best_multi_pigment = recipe
-        
-        # Try 3 pigments - REQUIRED minimum (no 2-color recipes)
-        if len(search_paints) >= 3:
-            for i, paint1 in enumerate(search_paints):
-                for j, paint2 in enumerate(search_paints[i+1:], i+1):
-                    for paint3 in search_paints[j+1:]:
-                        # Don't allow too many achromatic paints for colored targets
-                        if not target_is_achromatic:
-                            achromatic_count = sum([is_achromatic(p) for p in [paint1, paint2, paint3]])
-                            if achromatic_count >= 2:  # Don't allow 2+ achromatic in 3-pigment mix
-                                continue
-                        
-                        recipe = find_best_multi_pigment_recipe(
+            # Try multi-pigment recipes and pick the lowest error with a mild complexity tie-break.
+            best_multi_pigment = None
+            best_multi_error = float('inf')
+            best_multi_score = float('inf')
+
+            # Limit combinatorial explosion by using closest single-pigment candidates first.
+            ranked_paints = [p['paint'] for p in sorted(one_pigment_candidates, key=lambda x: x['error'])]
+            if ranked_paints:
+                multi_search_paints = ranked_paints[: min(7, len(ranked_paints))]
+            else:
+                multi_search_paints = search_paints[: min(7, len(search_paints))]
+
+            max_pigments = min(4, len(multi_search_paints))
+            for pigment_count in range(2, max_pigments + 1):
+                if best_multi_error <= 1.5:
+                    break
+                for combo in combinations(multi_search_paints, pigment_count):
+                    paint_ids = [p['id'] for p in combo]
+                    paint_hexes = [p.get('hex_approx', '') for p in combo]
+
+                    if pigment_count == 2:
+                        recipe = find_best_two_pigment_recipe(
                             target_lab,
-                            [paint1['id'], paint2['id'], paint3['id']],
-                            [paint1.get('hex_approx', ''), paint2.get('hex_approx', ''), paint3.get('hex_approx', '')]
+                            paint_ids[0],
+                            paint_ids[1],
+                            paint_hexes[0],
+                            paint_hexes[1]
                         )
-                        if recipe:
-                            # Add penalty if using achromatic paints
-                            if not target_is_achromatic:
-                                for paint in [paint1, paint2, paint3]:
-                                    if is_achromatic(paint):
-                                        recipe['error'] += 10.0
-                            
-                            # Use 3-pigment if we don't have 4-pigment, or if it's better
-                            if best_pigment_count < 3:
-                                if best_multi_pigment is None or recipe['error'] < best_multi_error:
-                                    best_multi_error = recipe['error']
-                                    best_multi_pigment = recipe
-                                    best_pigment_count = 3
-                            elif best_pigment_count == 3 and recipe['error'] < best_multi_error:
-                                best_multi_error = recipe['error']
-                                best_multi_pigment = recipe
-        
-        # NO 2-PIGMENT FALLBACK - we require at least 3 colors
-        
-        # Choose best recipe - REQUIRE multi-pigment (at least 3 colors)
-        # Only use one-pigment if we couldn't generate any multi-pigment recipe
-        if best_multi_pigment and best_pigment_count >= 3:
-            # We have a valid 3+ pigment recipe - use it
+                    else:
+                        recipe = find_best_multi_pigment_recipe(target_lab, paint_ids, paint_hexes)
+
+                    if not recipe:
+                        continue
+
+                    adjusted_error = recipe['error']
+
+                    complexity_penalty = max(0, pigment_count - 2) * 0.15
+                    score = adjusted_error + complexity_penalty
+                    if score < best_multi_score:
+                        best_multi_score = score
+                        best_multi_error = adjusted_error
+                        best_multi_pigment = recipe
+
+            # Choose best available recipe by error.
+            if best_multi_pigment and (not best_one_pigment or best_multi_error <= best_one_error):
+                recipes.append({
+                    'palette_index': palette_index,
+                    'recipe': best_multi_pigment,
+                    'type': best_multi_pigment.get('type', 'multi_pigment')
+                })
+            elif best_one_pigment:
+                recipes.append({
+                    'palette_index': palette_index,
+                    'recipe': best_one_pigment,
+                    'type': 'one_pigment'
+                })
+            else:
+                recipes.append({
+                    'palette_index': palette_index,
+                    'recipe': None,
+                    'error': 'Could not generate recipe (no valid candidate)'
+                })
+        except Exception as e:
+            logger.exception("Recipe generation failed for palette_index=%s: %s", palette_index, e)
             recipes.append({
-                'palette_index': color['index'],
-                'recipe': best_multi_pigment,
-                'type': best_multi_pigment.get('type', 'multi_pigment')
-            })
-        elif best_one_pigment:
-            # Fallback to one-pigment only if we couldn't generate 3+ pigment recipe
-            # This should rarely happen if we have 3+ paints available
-            recipes.append({
-                'palette_index': color['index'],
-                'recipe': best_one_pigment,
-                'type': 'one_pigment'
-            })
-        else:
-            # This shouldn't happen now, but just in case
-            recipes.append({
-                'palette_index': color['index'],
+                'palette_index': palette_index,
                 'recipe': None,
-                'error': 'Could not generate recipe (unexpected error)'
+                'error': f'Recipe generation failed for this color: {e}'
             })
+        finally:
+            if progress_cb:
+                try:
+                    progress_cb(i + 1, total_colors, "running")
+                except Exception:
+                    pass
+
+    if progress_cb:
+        try:
+            progress_cb(total_colors, total_colors, "completed")
+        except Exception:
+            pass
     
     return recipes
-

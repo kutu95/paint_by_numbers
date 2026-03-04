@@ -1,7 +1,17 @@
 /** @type {import('next').NextConfig} */
+// Use IPv4 loopback to avoid intermittent localhost (::1 vs 127.0.0.1) proxy failures.
+const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000'
+
 const nextConfig = {
   reactStrictMode: true,
+  async rewrites() {
+    return [
+      {
+        source: '/api/:path*',
+        destination: `${backendUrl}/api/:path*`,
+      },
+    ]
+  },
 }
 
 module.exports = nextConfig
-

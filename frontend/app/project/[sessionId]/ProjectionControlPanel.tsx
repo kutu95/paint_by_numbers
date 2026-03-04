@@ -251,36 +251,6 @@ export function ProjectionControlPanel({
             </button>
           </div>
 
-          <div className="bg-gray-800 rounded-lg p-6">
-            <h2 className="text-lg font-semibold mb-2">Current layer (in projection)</h2>
-            <p className="text-gray-400 text-sm mb-2">
-              Layer {currentLayer + 1} of {sessionData.layers.length}
-              {currentLayerData?.is_finished ? ' — Finished image' : ''}
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {sessionData.layers.map((layer, idx) => {
-                if (layer.is_finished) return null
-                const isCurrent = idx === currentLayer
-                return (
-                  <button
-                    key={layer.layer_index}
-                    type="button"
-                    onClick={() => {
-                      setCurrentLayer(idx)
-                      localStorage.setItem(PROJECTION_LAYER_KEY(sessionId), String(idx))
-                    }}
-                    className={`px-3 py-1 rounded text-sm ${isCurrent ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
-                  >
-                    {idx + 1}
-                  </button>
-                )
-              })}
-            </div>
-            <p className="text-xs text-gray-500 mt-2">
-              Changing the layer here updates the projection window if it is open (same session). You can also use the keyboard in the projection window.
-            </p>
-          </div>
-
           <SessionResultsContent sessionId={sessionId} sessionData={sessionData} />
         </>
       )}

@@ -5,7 +5,6 @@ import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { getProjects, getProjectBySessionId, saveProject, removeProject, type Project } from '@/lib/projects'
 import { ProjectionControlPanel } from '@/app/project/[sessionId]/ProjectionControlPanel'
-import { API_BASE_URL } from '@/lib/config'
 
 const TABS = ['file', 'settings', 'image', 'paint', 'layers', 'projection'] as const
 type TabId = (typeof TABS)[number]
@@ -25,10 +24,6 @@ export default function Home() {
   const [projects, setProjects] = useState<Project[]>([])
   const [mounted, setMounted] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const [openaiKeyConfigured, setOpenaiKeyConfigured] = useState(false)
-  const [openaiKeyInput, setOpenaiKeyInput] = useState('')
-  const [openaiKeySaving, setOpenaiKeySaving] = useState(false)
-  const [openaiKeyMessage, setOpenaiKeyMessage] = useState<string | null>(null)
   const [paintMarginPercent, setPaintMarginPercent] = useState(DEFAULT_PAINT_MARGIN_PERCENT)
   const [canvasWidthCm, setCanvasWidthCm] = useState(DEFAULT_CANVAS_WIDTH_CM)
   const [canvasHeightCm, setCanvasHeightCm] = useState(DEFAULT_CANVAS_HEIGHT_CM)
@@ -42,14 +37,6 @@ export default function Home() {
     if (!mounted || typeof window === 'undefined') return
     setProjects(getProjects())
   }, [mounted, activeTab])
-
-  useEffect(() => {
-    if (activeTab !== 'settings') return
-    fetch(`${API_BASE_URL}/api/settings/openai-key/configured`)
-      .then((r) => r.json())
-      .then((d) => setOpenaiKeyConfigured(!!d.configured))
-      .catch(() => setOpenaiKeyConfigured(false))
-  }, [activeTab])
 
   useEffect(() => {
     if (!mounted || typeof window === 'undefined') return
@@ -67,31 +54,6 @@ export default function Home() {
       } catch (_) {}
     }
   }, [mounted, activeTab])
-
-  const saveOpenaiKey = useCallback(async () => {
-    const key = openaiKeyInput.trim()
-    if (!key) return
-    setOpenaiKeySaving(true)
-    setOpenaiKeyMessage(null)
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/settings/openai-key`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key }),
-      })
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}))
-        throw new Error((d as { detail?: string }).detail || res.statusText)
-      }
-      setOpenaiKeyConfigured(true)
-      setOpenaiKeyInput('')
-      setOpenaiKeyMessage('Key saved. Recipe generation will use it immediately.')
-    } catch (e) {
-      setOpenaiKeyMessage(e instanceof Error ? e.message : 'Failed to save key')
-    } finally {
-      setOpenaiKeySaving(false)
-    }
-  }, [openaiKeyInput])
 
   const saveLocalSettings = useCallback(() => {
     if (typeof window === 'undefined') return
@@ -305,35 +267,6 @@ export default function Home() {
         <div className={activeTab !== 'settings' ? 'hidden' : ''}>
           <div className="max-w-lg mx-auto space-y-6">
             <h2 className="text-xl font-bold">Settings</h2>
-
-            <div className="bg-gray-800 rounded-lg p-6 space-y-4">
-              <h3 className="text-lg font-semibold">OpenAI API key</h3>
-              <p className="text-sm text-gray-400">
-                Used for recipe generation. Key is stored on the server and not shown after saving. {openaiKeyConfigured ? 'Currently configured.' : 'Not configured.'}
-              </p>
-              <input
-                type="password"
-                placeholder="sk-..."
-                value={openaiKeyInput}
-                onChange={(e) => setOpenaiKeyInput(e.target.value)}
-                className="w-full px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white placeholder-gray-500 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-              />
-              <div className="flex items-center gap-3 flex-wrap">
-                <button
-                  type="button"
-                  onClick={saveOpenaiKey}
-                  disabled={openaiKeySaving || !openaiKeyInput.trim()}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded font-medium"
-                >
-                  {openaiKeySaving ? 'Saving…' : 'Save key'}
-                </button>
-                {openaiKeyMessage && (
-                  <span className={`text-sm ${openaiKeyMessage.startsWith('Key saved') ? 'text-green-400' : 'text-amber-400'}`}>
-                    {openaiKeyMessage}
-                  </span>
-                )}
-              </div>
-            </div>
 
             <div className="bg-gray-800 rounded-lg p-6 space-y-4">
               <h3 className="text-lg font-semibold">Paint mix margin</h3>

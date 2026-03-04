@@ -2,30 +2,44 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
+import asyncio
 import uuid
 import shutil
 from datetime import datetime, timedelta
 import os
 import traceback
 import logging
+import hashlib
+import urllib.request
+import urllib.error
+import threading
+import cv2
+import numpy as np
+from sklearn.cluster import KMeans
 from image_processor import process_image, regenerate_pure_mask_from_labels
 from paint_manager import (
     load_library, save_library, slugify, atomic_write,
     sample_color_from_image, sample_color_from_region, normalize_calibration_samples,
     get_hex_from_calibration,
-    rgb_to_lab, delta_e_lab, CALIBRATION_DIR, PAINT_DIR,
+    rgb_to_lab, lab_to_rgb, delta_e_lab, CALIBRATION_DIR, PAINT_DIR,
     list_library_groups, get_library_info,
-    get_cached_recipe, cache_recipe
+    get_cached_recipe, cache_recipe, generate_recipes_for_palette
 )
 import json
-from openai import OpenAI
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+RECIPE_PROGRESS_LOCK = threading.Lock()
+RECIPE_PROGRESS: dict[str, dict] = {}
+GAMUT_CACHE_DIR = PAINT_DIR / "gamut_cache"
+GAMUT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+PALETTE_OPTIMIZATION_CACHE_DIR = PAINT_DIR / "palette_optimization_cache"
+PALETTE_OPTIMIZATION_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # CORS middleware - allow origins from environment or default to localhost
 # Always include localhost so local dev works even when CORS_ORIGINS is set for production
@@ -47,29 +61,6 @@ app.add_middleware(
 # Data directory relative to backend folder, go up one level to project root
 DATA_DIR = Path(__file__).parent.parent / "data" / "sessions"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-BACKEND_DIR = Path(__file__).parent
-ENV_FILE = BACKEND_DIR / ".env"
-
-
-def _get_openai_api_key() -> Optional[str]:
-    """Return OpenAI API key from environment or from backend/.env file."""
-    key = os.getenv("OPENAI_API_KEY")
-    if key and key.strip():
-        return key.strip()
-    if ENV_FILE.exists():
-        try:
-            with open(ENV_FILE) as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("OPENAI_API_KEY="):
-                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        if val:
-                            return val
-                        break
-        except Exception:
-            pass
-    return None
 
 SESSION_CLEANUP_HOURS = 24 * 30  # 30 days so project images persist when reopened
 
@@ -104,6 +95,7 @@ async def create_session(
     max_side: int = Form(1920),
     saturation_boost: float = Form(1.0),
     detail_level: float = Form(0.5),
+    mask_dilation_px: int = Form(0),
     canvas_width_cm: float = Form(0),
     canvas_height_cm: float = Form(0),
 ):
@@ -120,9 +112,9 @@ async def create_session(
     if overpaint_mm < 0 or overpaint_mm > 50:
         logger.error(f"Invalid overpaint_mm: {overpaint_mm}")
         raise HTTPException(status_code=400, detail="overpaint_mm must be between 0 and 50")
-    if order_mode not in ["largest", "smallest", "manual", "lightest"]:
+    if order_mode not in ["auto", "largest", "smallest", "manual", "lightest"]:
         logger.error(f"Invalid order_mode: {order_mode}")
-        raise HTTPException(status_code=400, detail="order_mode must be largest, smallest, manual, or lightest")
+        raise HTTPException(status_code=400, detail="order_mode must be auto, largest, smallest, manual, or lightest")
     if max_side < 100 or max_side > 5000:
         logger.error(f"Invalid max_side: {max_side}")
         raise HTTPException(status_code=400, detail="max_side must be between 100 and 5000")
@@ -132,6 +124,9 @@ async def create_session(
     if detail_level < 0.0 or detail_level > 1.0:
         logger.error(f"Invalid detail_level: {detail_level}")
         raise HTTPException(status_code=400, detail="detail_level must be between 0.0 and 1.0")
+    if mask_dilation_px < 0 or mask_dilation_px > 20:
+        logger.error(f"Invalid mask_dilation_px: {mask_dilation_px}")
+        raise HTTPException(status_code=400, detail="mask_dilation_px must be between 0 and 20")
     
     # Create session directory
     session_id = str(uuid.uuid4())
@@ -162,6 +157,7 @@ async def create_session(
             max_side,
             saturation_boost,
             detail_level,
+            mask_dilation_px,
         )
         
         # Attach session ID and canvas dimensions (original/oriented URLs from process_image)
@@ -215,6 +211,7 @@ async def reprocess_session(
     max_side: int = Form(1920),
     saturation_boost: float = Form(1.0),
     detail_level: float = Form(0.5),
+    mask_dilation_px: int = Form(0),
     canvas_width_cm: float = Form(0),
     canvas_height_cm: float = Form(0),
 ):
@@ -230,14 +227,16 @@ async def reprocess_session(
         raise HTTPException(status_code=400, detail="n_colors must be between 2 and 100")
     if overpaint_mm < 0 or overpaint_mm > 50:
         raise HTTPException(status_code=400, detail="overpaint_mm must be between 0 and 50")
-    if order_mode not in ["largest", "smallest", "manual", "lightest"]:
-        raise HTTPException(status_code=400, detail="order_mode must be largest, smallest, manual, or lightest")
+    if order_mode not in ["auto", "largest", "smallest", "manual", "lightest"]:
+        raise HTTPException(status_code=400, detail="order_mode must be auto, largest, smallest, manual, or lightest")
     if max_side < 100 or max_side > 5000:
         raise HTTPException(status_code=400, detail="max_side must be between 100 and 5000")
     if saturation_boost < 0.5 or saturation_boost > 5.0:
         raise HTTPException(status_code=400, detail="saturation_boost must be between 0.5 and 5.0")
     if detail_level < 0.0 or detail_level > 1.0:
         raise HTTPException(status_code=400, detail="detail_level must be between 0.0 and 1.0")
+    if mask_dilation_px < 0 or mask_dilation_px > 20:
+        raise HTTPException(status_code=400, detail="mask_dilation_px must be between 0 and 20")
     try:
         result = process_image(
             str(image_path),
@@ -248,6 +247,7 @@ async def reprocess_session(
             max_side,
             saturation_boost,
             detail_level,
+            mask_dilation_px,
         )
         result["session_id"] = session_id
         result["canvas_width_cm"] = max(0, float(canvas_width_cm))
@@ -353,38 +353,6 @@ async def get_session_file(session_id: str, filename: str, request: Request):
     response.headers["Access-Control-Max-Age"] = "86400"
     
     return response
-
-
-# ===== Settings (OpenAI key) =====
-
-@app.get("/api/settings/openai-key/configured")
-async def get_openai_key_configured():
-    """Return whether an OpenAI API key is configured (without revealing it)."""
-    return {"configured": bool(_get_openai_api_key())}
-
-
-@app.post("/api/settings/openai-key")
-async def set_openai_key(request: Request):
-    """Save OpenAI API key to backend/.env. Takes effect immediately for recipe generation."""
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="JSON body required")
-    key = body.get("key")
-    if key is None:
-        raise HTTPException(status_code=400, detail="Missing 'key'")
-    key = str(key).strip()
-    if not key:
-        raise HTTPException(status_code=400, detail="Key cannot be empty")
-    try:
-        temp_file = ENV_FILE.with_suffix(".env.tmp")
-        with open(temp_file, "w") as f:
-            f.write(f"OPENAI_API_KEY={key}\n")
-        temp_file.replace(ENV_FILE)
-    except Exception:
-        logger.exception("Failed to write .env")
-        raise HTTPException(status_code=500, detail="Failed to save key")
-    return {"ok": True}
 
 
 # ===== Paint Management Endpoints =====
@@ -714,22 +682,538 @@ async def get_calibration(paint_id: str):
         return json.load(f)
 
 
+@app.get("/api/paint/calibration-export")
+async def export_library_calibrations(group: str = "default"):
+    """Download all calibration data for paints in the selected library group."""
+    library = load_library(group)
+    paints = library.get("paints", [])
+
+    export_paints = []
+    for paint in paints:
+        paint_id = paint.get("id")
+        calibration = None
+        if paint_id:
+            cal_file = CALIBRATION_DIR / f"{paint_id}.json"
+            if cal_file.exists():
+                try:
+                    with open(cal_file, "r") as f:
+                        calibration = json.load(f)
+                except Exception:
+                    calibration = None
+        export_paints.append({
+            "paint_id": paint_id,
+            "paint_name": paint.get("name"),
+            "hex_approx": paint.get("hex_approx"),
+            "calibration": calibration,
+        })
+
+    payload = {
+        "generated_at": datetime.now().isoformat(),
+        "library_group": group,
+        "library_name": library.get("name"),
+        "paint_count": len(paints),
+        "paints": export_paints,
+    }
+
+    filename = f"calibration_export_{group}.json"
+    return Response(
+        content=json.dumps(payload, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _gamut_library_signature(group: str, library: dict) -> str:
+    paints = library.get("paints", [])
+    records = []
+    for p in sorted(paints, key=lambda x: str(x.get("id", ""))):
+        pid = p.get("id", "")
+        cal = CALIBRATION_DIR / f"{pid}.json"
+        cal_sig = ""
+        if cal.exists():
+            stat = cal.stat()
+            cal_sig = f"{stat.st_size}:{stat.st_mtime_ns}"
+        records.append({
+            "id": pid,
+            "name": p.get("name", ""),
+            "hex_approx": p.get("hex_approx", ""),
+            "calibration": cal_sig,
+        })
+    payload = {
+        "group": group,
+        "records": records,
+        "coverage_mg_per_cm2": library.get("coverage_mg_per_cm2"),
+        "gamut_version": "v1",
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+
+
+def _optimize_image_from_upload_bytes(image_bytes: bytes) -> np.ndarray:
+    arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise ValueError("Failed to decode image bytes")
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
+def _optimize_image_from_path(image_path: Path) -> np.ndarray:
+    bgr = cv2.imread(str(image_path))
+    if bgr is None:
+        raise ValueError(f"Failed to load image: {image_path}")
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
+def _downsample_longest_side(image_rgb: np.ndarray, longest_side: int = 150) -> np.ndarray:
+    h, w = image_rgb.shape[:2]
+    if max(h, w) <= longest_side:
+        return image_rgb
+    scale = float(longest_side) / float(max(h, w))
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    return cv2.resize(image_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def _paint_name_lookup(group: str) -> dict[str, str]:
+    library = load_library(group)
+    out: dict[str, str] = {}
+    for p in library.get("paints", []):
+        pid = str(p.get("id", "")).strip()
+        if not pid:
+            continue
+        out[pid] = str(p.get("name") or pid)
+    return out
+
+
+def _find_white_paint_id(group: str) -> str:
+    library = load_library(group)
+    for p in library.get("paints", []):
+        pid = str(p.get("id", "")).lower()
+        name = str(p.get("name", "")).lower()
+        if "white" in pid or "white" in name:
+            return str(p.get("id"))
+    return "white"
+
+
+def _recipe_ingredients_from_solver_recipe(
+    raw_recipe: Optional[dict[str, Any]],
+    paint_names: dict[str, str],
+    white_paint_id: str,
+) -> list[dict[str, Any]]:
+    if not raw_recipe:
+        return []
+
+    components: list[tuple[str, float]] = []
+    white_ratio = raw_recipe.get("white_ratio")
+    if white_ratio is not None:
+        try:
+            wr = float(white_ratio)
+            if wr > 0:
+                components.append((white_paint_id, wr))
+        except Exception:
+            pass
+
+    if raw_recipe.get("pigment_id") and raw_recipe.get("pigment_ratio") is not None:
+        try:
+            components.append((str(raw_recipe["pigment_id"]), float(raw_recipe["pigment_ratio"])))
+        except Exception:
+            pass
+    elif raw_recipe.get("pigment1_id") and raw_recipe.get("pigment1_ratio") is not None:
+        try:
+            components.append((str(raw_recipe["pigment1_id"]), float(raw_recipe["pigment1_ratio"])))
+        except Exception:
+            pass
+        if raw_recipe.get("pigment2_id") and raw_recipe.get("pigment2_ratio") is not None:
+            try:
+                components.append((str(raw_recipe["pigment2_id"]), float(raw_recipe["pigment2_ratio"])))
+            except Exception:
+                pass
+    elif isinstance(raw_recipe.get("pigment_ids"), list) and isinstance(raw_recipe.get("pigment_ratios"), list):
+        for pid, ratio in zip(raw_recipe.get("pigment_ids", []), raw_recipe.get("pigment_ratios", [])):
+            try:
+                components.append((str(pid), float(ratio)))
+            except Exception:
+                continue
+
+    total = sum(max(0.0, ratio) for _, ratio in components)
+    if total <= 0:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for pid, ratio in components:
+        if ratio <= 0:
+            continue
+        pct = round((ratio / total) * 100.0, 2)
+        out.append({
+            "paint_id": pid,
+            "paint_name": paint_names.get(pid, pid),
+            "percentage": pct,
+        })
+    pct_sum = round(sum(i["percentage"] for i in out), 2)
+    drift = round(100.0 - pct_sum, 2)
+    if out and abs(drift) >= 0.01:
+        out[-1]["percentage"] = round(out[-1]["percentage"] + drift, 2)
+    return out
+
+
+def _solver_recipe_pigment_count(raw_recipe: Optional[dict[str, Any]]) -> int:
+    if not raw_recipe:
+        return 0
+    if raw_recipe.get("pigment_id"):
+        return 1
+    if raw_recipe.get("pigment1_id"):
+        return 2 if raw_recipe.get("pigment2_id") else 1
+    pigment_ids = raw_recipe.get("pigment_ids")
+    if isinstance(pigment_ids, list):
+        return len([pid for pid in pigment_ids if pid])
+    return 0
+
+
+@app.post("/api/paint/optimize-palette")
+async def optimize_palette_size(
+    image: Optional[UploadFile] = File(None),
+    session_id: str = Form(""),
+    target_delta_e: float = Form(5.0),
+    max_palette_size: int = Form(16),
+    library_group: str = Form("default"),
+    prefer_simpler: str = Form("false"),
+):
+    """Find smallest palette size whose reconstructed error is <= target_delta_e."""
+    if target_delta_e < 1 or target_delta_e > 15:
+        raise HTTPException(status_code=400, detail="target_delta_e must be in range 1..15")
+    if max_palette_size < 4 or max_palette_size > 24:
+        raise HTTPException(status_code=400, detail="max_palette_size must be in range 4..24")
+
+    use_prefer_simpler = str(prefer_simpler).lower() == "true"
+    image_rgb: Optional[np.ndarray] = None
+    image_signature_bytes: Optional[bytes] = None
+
+    if image is not None:
+        image_bytes = await image.read()
+        if not image_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded image is empty")
+        try:
+            image_rgb = _optimize_image_from_upload_bytes(image_bytes)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid image upload: {e}")
+        image_signature_bytes = image_bytes
+    else:
+        sid = (session_id or "").strip()
+        if not sid:
+            raise HTTPException(status_code=400, detail="Provide either image or session_id")
+        session_dir = DATA_DIR / sid
+        if not session_dir.exists() or not session_dir.is_dir():
+            raise HTTPException(status_code=404, detail="Session not found")
+        stored = _find_stored_input_path(session_dir)
+        if not stored:
+            raise HTTPException(status_code=404, detail="No stored input image for this session")
+        try:
+            image_rgb = _optimize_image_from_path(stored)
+            image_signature_bytes = stored.read_bytes()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to load stored image: {e}")
+
+    assert image_rgb is not None
+    assert image_signature_bytes is not None
+
+    library = load_library(library_group)
+    fingerprint = _gamut_library_signature(library_group, library)
+    cache_key_payload = {
+        "image_sha": hashlib.sha256(image_signature_bytes).hexdigest(),
+        "target_delta_e": round(float(target_delta_e), 4),
+        "max_palette_size": int(max_palette_size),
+        "library_group": library_group,
+        "library_signature": fingerprint,
+        "prefer_simpler": use_prefer_simpler,
+        "algo_version": "palette_opt_v1",
+    }
+    cache_key = hashlib.sha256(json.dumps(cache_key_payload, sort_keys=True).encode("utf-8")).hexdigest()
+    cache_file = PALETTE_OPTIMIZATION_CACHE_DIR / f"{cache_key}.json"
+    if cache_file.exists():
+        try:
+            with open(cache_file, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    downsampled = _downsample_longest_side(image_rgb, longest_side=150)
+    height, width = downsampled.shape[:2]
+    rgb_norm = downsampled.astype(np.float32) / 255.0
+    lab_img = cv2.cvtColor(rgb_norm, cv2.COLOR_RGB2LAB)
+    lab_pixels = lab_img.reshape(-1, 3).astype(np.float32)
+    total_pixels = lab_pixels.shape[0]
+    paint_names = _paint_name_lookup(library_group)
+    white_paint_id = _find_white_paint_id(library_group)
+
+    def _compute() -> dict[str, Any]:
+        fallback_result: Optional[dict[str, Any]] = None
+
+        for palette_size in range(2, int(max_palette_size) + 1):
+            kmeans = KMeans(n_clusters=palette_size, random_state=42, n_init=8, init='k-means++')
+            labels = kmeans.fit_predict(lab_pixels)
+            centers = kmeans.cluster_centers_.astype(np.float32)
+
+            solver_palette = []
+            for idx, center in enumerate(centers):
+                rgb_center = lab_to_rgb([float(center[0]), float(center[1]), float(center[2])])
+                rgb_i = [int(max(0, min(255, round(c)))) for c in rgb_center]
+                solver_palette.append({"index": idx, "rgb": rgb_i})
+
+            solver_results = generate_recipes_for_palette(
+                "palette_optimization",
+                solver_palette,
+                library_group,
+                None,
+            )
+            by_index = {
+                int(item.get("palette_index", -1)): item
+                for item in solver_results
+                if item.get("palette_index") is not None
+            }
+
+            per_pixel_delta = np.zeros(total_pixels, dtype=np.float32)
+            palette_rows: list[dict[str, Any]] = []
+
+            for idx, center in enumerate(centers):
+                mask = labels == idx
+                if not np.any(mask):
+                    continue
+                center_diffs = lab_pixels[mask] - center
+                quant_err = np.sqrt(np.sum(center_diffs * center_diffs, axis=1))
+
+                solver_item = by_index.get(idx, {})
+                raw_recipe = solver_item.get("recipe")
+                solver_err = 50.0
+                if isinstance(raw_recipe, dict):
+                    try:
+                        solver_err = float(raw_recipe.get("error", 50.0))
+                    except Exception:
+                        solver_err = 50.0
+                if use_prefer_simpler:
+                    pigment_count = _solver_recipe_pigment_count(raw_recipe)
+                    if pigment_count > 2:
+                        solver_err += (pigment_count * 0.5)
+
+                combined = np.sqrt((quant_err * quant_err) + (solver_err * solver_err))
+                per_pixel_delta[mask] = combined.astype(np.float32)
+
+                rgb_center = lab_to_rgb([float(center[0]), float(center[1]), float(center[2])])
+                rgb_i = [int(max(0, min(255, round(c)))) for c in rgb_center]
+                target_hex = "#{:02X}{:02X}{:02X}".format(rgb_i[0], rgb_i[1], rgb_i[2])
+                ingredients = _recipe_ingredients_from_solver_recipe(raw_recipe, paint_names, white_paint_id)
+                recipe_error = None
+                if isinstance(raw_recipe, dict) and raw_recipe.get("error") is not None:
+                    try:
+                        recipe_error = float(raw_recipe.get("error"))
+                    except Exception:
+                        recipe_error = None
+                coverage = float(np.sum(mask)) / float(total_pixels)
+                palette_rows.append({
+                    "index": idx,
+                    "target_hex": target_hex,
+                    "coverage": round(coverage * 100.0, 2),
+                    "lab": [round(float(center[0]), 3), round(float(center[1]), 3), round(float(center[2]), 3)],
+                    "recipe": {
+                        "ingredients": ingredients,
+                        "error": round(recipe_error, 3) if recipe_error is not None else None,
+                        "type": solver_item.get("type"),
+                        "error_text": solver_item.get("error"),
+                    },
+                })
+
+            avg_delta = float(np.mean(per_pixel_delta)) if total_pixels > 0 else 999.0
+            max_delta = float(np.max(per_pixel_delta)) if total_pixels > 0 else 999.0
+
+            # Paint order heuristic: large + lighter + slightly more saturated first.
+            priorities: list[tuple[int, float]] = []
+            for row in palette_rows:
+                lab = row["lab"]
+                area_score = float(row["coverage"]) / 100.0
+                lightness_score = max(0.0, min(1.0, float(lab[0]) / 100.0))
+                chroma = (float(lab[1]) ** 2 + float(lab[2]) ** 2) ** 0.5
+                base_color_bonus = max(0.0, min(1.0, chroma / 181.0))
+                priority = 0.6 * area_score + 0.3 * lightness_score + 0.1 * base_color_bonus
+                priorities.append((int(row["index"]), float(priority)))
+            paint_order = [idx for idx, _ in sorted(priorities, key=lambda x: x[1], reverse=True)]
+
+            result_payload = {
+                "optimal_palette_size": int(palette_size),
+                "average_delta_e": round(avg_delta, 3),
+                "maximum_delta_e": round(max_delta, 3),
+                "target_delta_e": round(float(target_delta_e), 3),
+                "max_palette_size": int(max_palette_size),
+                "library_group": library_group,
+                "prefer_simpler": use_prefer_simpler,
+                "downsample": {"width": int(width), "height": int(height)},
+                "palette": sorted(palette_rows, key=lambda x: x["index"]),
+                "paint_order": paint_order,
+                "met_target": bool(avg_delta <= float(target_delta_e)),
+            }
+            fallback_result = result_payload
+            if avg_delta <= float(target_delta_e):
+                return result_payload
+
+        if fallback_result is None:
+            raise RuntimeError("Palette optimisation failed to produce a result")
+        return fallback_result
+
+    try:
+        result = await asyncio.to_thread(_compute)
+    except Exception as e:
+        logger.exception("Palette optimisation failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Palette optimisation failed: {e}")
+
+    try:
+        atomic_write(cache_file, result)
+    except Exception:
+        pass
+    return result
+
+
+@app.get("/api/paint/gamut/slice")
+async def get_palette_gamut_slice(
+    group: str = "default",
+    l: int = 50,
+    refresh: bool = False,
+):
+    """Return a gamut heatmap slice for fixed L over a,b grid using recipe solver error."""
+    if l < 0 or l > 100 or (l % 5 != 0):
+        raise HTTPException(status_code=400, detail="l must be in 0..100 with step 5")
+
+    library = load_library(group)
+    signature = _gamut_library_signature(group, library)
+    cache_file = GAMUT_CACHE_DIR / f"{group}_L{l}.json"
+
+    if not refresh and cache_file.exists():
+        try:
+            with open(cache_file, "r") as f:
+                cached = json.load(f)
+            if cached.get("signature") == signature:
+                return cached
+        except Exception:
+            pass
+
+    a_values = list(range(-100, 101, 5))
+    b_values = list(range(-100, 101, 5))
+    palette = []
+    idx = 0
+    for b_val in b_values:
+        for a_val in a_values:
+            rgb = lab_to_rgb([float(l), float(a_val), float(b_val)])
+            rgb_i = [int(max(0, min(255, round(c)))) for c in rgb]
+            hex_color = "#{:02X}{:02X}{:02X}".format(rgb_i[0], rgb_i[1], rgb_i[2])
+            palette.append({
+                "index": idx,
+                "hex": hex_color,
+                "rgb": rgb_i,
+            })
+            idx += 1
+
+    recipe_resp = await generate_recipes_from_palette(
+        palette=json.dumps(palette),
+        library_group=group,
+        force_regenerate="false",
+        use_ai_second_pass="false",
+        progress_id="",
+    )
+    recipe_items = recipe_resp.get("recipes", [])
+    recipe_by_idx = {int(r.get("palette_index", -1)): r for r in recipe_items}
+
+    cells = []
+    idx = 0
+    for b_val in b_values:
+        for a_val in a_values:
+            rgb = lab_to_rgb([float(l), float(a_val), float(b_val)])
+            rgb_i = [int(max(0, min(255, round(c)))) for c in rgb]
+            hex_color = "#{:02X}{:02X}{:02X}".format(rgb_i[0], rgb_i[1], rgb_i[2])
+            rec = recipe_by_idx.get(idx, {})
+            recipe_obj = rec.get("recipe")
+            error = None
+            if isinstance(recipe_obj, dict):
+                try:
+                    e = recipe_obj.get("error")
+                    error = float(e) if e is not None else None
+                except Exception:
+                    error = None
+            if error is None:
+                band = "unknown"
+            elif error < 2:
+                band = "excellent"
+            elif error < 5:
+                band = "good"
+            elif error > 10:
+                band = "poor"
+            else:
+                band = "mid"
+            cells.append({
+                "index": idx,
+                "a": a_val,
+                "b": b_val,
+                "target_hex": hex_color,
+                "error": error,
+                "band": band,
+                "recipe_data": rec,
+            })
+            idx += 1
+
+    payload = {
+        "generated_at": datetime.now().isoformat(),
+        "group": group,
+        "l": l,
+        "step": 5,
+        "a_min": -100,
+        "a_max": 100,
+        "b_min": -100,
+        "b_max": 100,
+        "signature": signature,
+        "cells": cells,
+    }
+    try:
+        atomic_write(cache_file, payload)
+    except Exception:
+        pass
+    return payload
+
+
 # Recipe generation
 @app.post("/api/paint/recipes/from-palette")
 async def generate_recipes_from_palette(
     palette: str = Form(...),  # JSON string of palette
     library_group: str = Form("default"),  # Library group to use
-    force_regenerate: str = Form("false")  # Force regeneration, ignore cache
+    force_regenerate: str = Form("false"),  # Force regeneration, ignore cache
+    use_ai_second_pass: str = Form("false"),  # Refine poor deterministic recipes with AI
+    progress_id: str = Form(""),  # Optional progress tracking token
 ):
-    """Generate recipes from a provided palette using ChatGPT."""
-    palette_list = json.loads(palette)
+    """Generate deterministic recipes from palette colors using calibrated paint data."""
+    try:
+        palette_list = json.loads(palette)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid palette JSON: {e}")
+    if not isinstance(palette_list, list):
+        raise HTTPException(status_code=400, detail="Invalid palette JSON: expected a list")
     force = force_regenerate.lower() == "true"
-    
-    # Load paints from the specified library group
+    progress_key = (progress_id or "").strip() or None
+
+    # Load paints and build lookup maps
     library = load_library(library_group)
     paints = library.get('paints', [])
-    
+
+    def _set_progress(completed: int, total: int, status: str, current_index: int = -1, message: str = ""):
+        if not progress_key:
+            return
+        with RECIPE_PROGRESS_LOCK:
+            RECIPE_PROGRESS[progress_key] = {
+                "completed": max(0, int(completed)),
+                "total": max(0, int(total)),
+                "status": status,
+                "current_index": int(current_index),
+                "message": message,
+                "updated_at": datetime.now().isoformat(),
+            }
+
+    _set_progress(0, len(palette_list), "starting", 0, "Preparing recipe generation")
+
     if not paints:
+        _set_progress(len(palette_list), len(palette_list), "completed", -1, "No paints available")
         return {
             "recipes": [
                 {
@@ -740,300 +1224,551 @@ async def generate_recipes_from_palette(
                 for color in palette_list
             ]
         }
-    
-    # Initialize OpenAI client (key from env or backend/.env)
-    api_key = _get_openai_api_key()
-    if not api_key:
-        logger.error("OPENAI API key not set (env or .env)")
-        return {
-            "recipes": [
-                {
-                    "palette_index": color['index'],
-                    "recipe": None,
-                    "error": "OpenAI API key not configured"
-                }
-                for color in palette_list
-            ]
-        }
-    
-    client = OpenAI(api_key=api_key)
-    
-    recipes = []
-    for color in palette_list:
+
+    paints_by_id = {p.get("id"): p for p in paints if p.get("id")}
+    use_ai = use_ai_second_pass.lower() == "true"
+
+    def _hex_to_rgb(value: str) -> Optional[list[int]]:
+        v = (value or "").strip().lstrip("#")
+        if len(v) != 6:
+            return None
         try:
-            # Support both 'hex' and 'rgb' format (for backward compatibility)
-            if 'hex' in color:
-                target_hex = color['hex']
-            elif 'rgb' in color:
-                # Convert RGB to hex
-                r, g, b = color['rgb']
-                target_hex = f"#{r:02x}{g:02x}{b:02x}"
-            else:
-                logger.error(f"No hex or rgb in color data: {color}")
-                recipes.append({
-                    "palette_index": color['index'],
-                    "recipe": None,
-                    "error": "Color format error: missing hex or rgb"
-                })
-                continue
-            
-            # Check if recipe is already cached (unless forcing regeneration)
-            # Recipes are cached by COLOR (hex value), not by layer/palette index
-            # This ensures recipes are reused across images when colors match
-            if not force:
-                cached = get_cached_recipe(library_group, target_hex)
-                if cached:
-                    # Validate that cached recipe is from ChatGPT (not old algorithm)
-                    cached_type = cached.get("type", "")
-                    if cached_type == "chatgpt" and cached.get("recipe", {}).get("type") == "chatgpt":
-                        logger.info(f"Using cached ChatGPT recipe for color {target_hex} in group {library_group}")
-                        recipes.append({
-                            "palette_index": color['index'],
-                            "recipe": cached.get("recipe"),
-                            "type": "chatgpt"
-                        })
-                        continue
-                    else:
-                        # Old cached recipe from previous algorithm - ignore and regenerate
-                        logger.warning(f"Found old cached recipe (type: {cached_type}) for color {target_hex}, regenerating with ChatGPT")
-            
-            # Recipe not in cache (or force regenerate), generate new one with ChatGPT
-            if force:
-                logger.info(f"Force regenerating recipe for color {target_hex} in group {library_group}")
-            else:
-                logger.info(f"Generating new recipe for color {target_hex} in group {library_group}")
-            
-            # Build paint set structure for function calling
-            paint_set_paints = []
-            for paint in paints:
-                paint_set_paints.append({
-                    "id": paint.get('id', paint.get('name', 'Unknown').upper()[:1]),
-                    "name": paint.get('name', paint.get('id', 'Unknown')),
-                    "pigments": paint.get('notes', 'Unknown')
-                })
-            
-            # Build paint set info (get library name if available)
-            library_name = library.get('name', library_group.replace("-", " ").title())
-            paint_set = {
-                "brand": library_name,  # Use library name as brand
-                "range": f"{library_name} Acrylics",
-                "paints": paint_set_paints
-            }
-            
-            # System prompt
-            system_prompt = """You are an expert paint mixer for artist acrylics and mural work.
+            return [int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16)]
+        except Exception:
+            return None
 
-Your task is to generate practical, repeatable paint mixing recipes that approximate given target colors using ONLY the provided paint set.
-
-You MUST call the provided function `return_paint_recipes` exactly once and return structured data that conforms strictly to the function schema. Do not output any prose or explanation outside the function call.
-
-Rules and constraints:
-- Use ONLY the paints provided. Never invent or substitute paints.
-- Default output is percentages that sum to 100.00 (±0.05).
-- If `total_grams` is provided and greater than zero, also calculate grams for each ingredient such that the total equals `total_grams` (±0.05g). Percentages must still be included.
-- Assume subtractive paint mixing; HEX values are approximations.
-- Prefer tints (mostly Titanium White) for light colors.
-- Use Carbon Black sparingly unless the target is near-black.
-- Neutralize saturation primarily with oxides rather than black.
-- Keep procedures practical and step-based; mixing order matters.
-- Provide a clear mixing strategy, expected result, adjustment ladder (micro tweaks), and practical tips.
-- Ingredient percentages and grams must be internally consistent and validated.
-
-Quality guidelines:
-- Light colors should be predominantly white.
-- Dark colors should start from black or deep blue-black.
-- Muted colors should be neutralized carefully to avoid muddiness.
-- Adjustment ladders must use very small increments (e.g. 0.01–0.05 parts).
-
-Now generate the recipes using the following inputs and return them via the function call only."""
-            
-            # Define function schema
-            tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "return_paint_recipes",
-                        "description": "Return paint mixing recipes for target HEX colors",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "recipes": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "target_hex": {
-                                                "type": "string",
-                                                "description": "Target color in HEX format (e.g., #FF0000)"
-                                            },
-                                            "ingredients": {
-                                                "type": "array",
-                                                "items": {
-                                                    "type": "object",
-                                                    "properties": {
-                                                        "paint_name": {
-                                                            "type": "string",
-                                                            "description": "Exact name of the paint as provided in the paint set"
-                                                        },
-                                                        "percentage": {
-                                                            "type": "number",
-                                                            "description": "Percentage of this ingredient (0-100)"
-                                                        },
-                                                        "grams": {
-                                                            "type": "number",
-                                                            "description": "Grams of this ingredient (only if total_grams was provided)"
-                                                        }
-                                                    },
-                                                    "required": ["paint_name", "percentage"]
-                                                },
-                                                "description": "List of paint ingredients with percentages"
-                                            },
-                                            "mixing_strategy": {
-                                                "type": "string",
-                                                "description": "Step-by-step mixing procedure"
-                                            },
-                                            "expected_result": {
-                                                "type": "string",
-                                                "description": "Description of the expected mixed color"
-                                            },
-                                            "adjustment_ladder": {
-                                                "type": "string",
-                                                "description": "Micro adjustments for fine-tuning (small increments)"
-                                            },
-                                            "tips": {
-                                                "type": "string",
-                                                "description": "Practical tips for mixing this color"
-                                            }
-                                        },
-                                        "required": ["target_hex", "ingredients", "mixing_strategy", "expected_result", "adjustment_ladder", "tips"]
-                                    }
-                                }
-                            },
-                            "required": ["recipes"]
-                        }
-                    }
-                }
-            ]
-            
-            # Build user message
-            user_message = json.dumps({
-                "paint_set": paint_set,
-                "targets": [target_hex]
-            })
-            
-            # Call ChatGPT with function calling
+    def _normalize_target_hex(color: dict) -> Optional[str]:
+        if color.get("hex"):
+            rgb = _hex_to_rgb(str(color["hex"]))
+            if rgb is not None:
+                return "#{:02X}{:02X}{:02X}".format(rgb[0], rgb[1], rgb[2])
+        if color.get("rgb") and len(color["rgb"]) >= 3:
+            r, g, b = color["rgb"][0], color["rgb"][1], color["rgb"][2]
             try:
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": system_prompt
-                        },
-                        {
-                            "role": "user",
-                            "content": user_message
-                        }
-                    ],
-                    tools=tools,
-                    tool_choice={"type": "function", "function": {"name": "return_paint_recipes"}},
-                    temperature=0.2
-                )
-                
-                if not response or not response.choices or len(response.choices) == 0:
-                    raise ValueError("ChatGPT returned empty response")
-                
-                message = response.choices[0].message
-                if not message:
-                    raise ValueError("ChatGPT response has no message")
-                
-                # Check for function call
-                if not message.tool_calls or len(message.tool_calls) == 0:
-                    # Log the full message to see what we got
-                    logger.error(f"ChatGPT did not call function. Message content: {message.content if hasattr(message, 'content') else 'N/A'}")
-                    logger.error(f"Full message: {message}")
-                    raise ValueError("ChatGPT did not call the required function")
-                
-                tool_call = message.tool_calls[0]
-                if tool_call.function.name != "return_paint_recipes":
-                    logger.error(f"ChatGPT called wrong function: {tool_call.function.name}")
-                    raise ValueError(f"ChatGPT called wrong function: {tool_call.function.name}")
-                
-                # Parse function arguments
-                try:
-                    function_args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse function arguments: {tool_call.function.arguments}")
-                    logger.error(f"JSON decode error: {e}")
-                    raise ValueError(f"Invalid JSON in function arguments: {e}")
-                
-                recipes_data = function_args.get("recipes", [])
-                
-                if not recipes_data or len(recipes_data) == 0:
-                    logger.error(f"ChatGPT returned no recipes. Function args: {function_args}")
-                    raise ValueError("ChatGPT returned no recipes")
-                
-                recipe_data = recipes_data[0]  # Get first (and only) recipe
-                
-                # Validate recipe data
-                if not recipe_data:
-                    logger.error(f"Recipe data is None or empty: {recipe_data}")
-                    raise ValueError("Recipe data is empty")
-                
-                ingredients = recipe_data.get("ingredients", [])
-                if not ingredients or len(ingredients) == 0:
-                    logger.error(f"Recipe has no ingredients. Recipe data: {recipe_data}")
-                    raise ValueError("Recipe has no ingredients")
-                
-                # Format recipe for storage (keep structured data)
-                recipe_storage = {
-                    "target_hex": recipe_data.get("target_hex", target_hex),
-                    "ingredients": ingredients,
-                    "mixing_strategy": recipe_data.get("mixing_strategy", ""),
-                    "expected_result": recipe_data.get("expected_result", ""),
-                    "adjustment_ladder": recipe_data.get("adjustment_ladder", ""),
-                    "tips": recipe_data.get("tips", ""),
-                    "type": "chatgpt"
-                }
-                
-                logger.info(f"ChatGPT generated recipe for {target_hex} with {len(ingredients)} ingredients: {[ing.get('paint_name') for ing in ingredients]}")
-                logger.debug(f"Full recipe storage: {json.dumps(recipe_storage, indent=2)}")
-                
-                # Cache the recipe for future use
-                cache_recipe(library_group, target_hex, {
-                    "recipe": recipe_storage,
-                    "type": "chatgpt"
-                })
-                
-                recipes.append({
-                    "palette_index": color['index'],
-                    "recipe": recipe_storage,
-                    "type": "chatgpt"
-                })
-                
-            except Exception as chatgpt_error:
-                error_msg = str(chatgpt_error)
-                logger.error(f"ChatGPT API error for color {target_hex}: {error_msg}")
-                logger.error(traceback.format_exc())
-                
-                # NO FALLBACK - throw clear error to user
-                recipes.append({
-                    "palette_index": color['index'],
-                    "recipe": None,
-                    "error": f"ChatGPT API error: {error_msg}. Please check OpenAI API key and try again."
-                })
-            
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"Error generating recipe for color {color.get('hex', 'unknown')}: {error_msg}")
-            logger.error(traceback.format_exc())
-            recipes.append({
-                "palette_index": color['index'],
-                "recipe": None,
-                "error": f"Recipe generation failed: {error_msg}"
+                return "#{:02X}{:02X}{:02X}".format(int(r), int(g), int(b))
+            except Exception:
+                return None
+        return None
+
+    def _safe_index(value) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return -1
+
+    def _is_white_paint(paint: dict) -> bool:
+        pid = str(paint.get("id", "")).lower()
+        name = str(paint.get("name", "")).lower()
+        if "white" in pid or "white" in name:
+            return True
+        rgb = _hex_to_rgb(str(paint.get("hex_approx", "")))
+        if rgb is None:
+            return False
+        return rgb[0] > 240 and rgb[1] > 240 and rgb[2] > 240
+
+    white_paint_id = next((p["id"] for p in paints if p.get("id") and _is_white_paint(p)), "white")
+
+    def _library_fingerprint() -> str:
+        # Invalidate cached recipes when paint definitions or calibrations change.
+        records = []
+        for p in sorted(paints, key=lambda x: str(x.get("id", ""))):
+            pid = p.get("id", "")
+            cal = CALIBRATION_DIR / f"{pid}.json"
+            cal_sig = ""
+            if cal.exists():
+                stat = cal.stat()
+                cal_sig = f"{stat.st_size}:{stat.st_mtime_ns}"
+            records.append({
+                "id": pid,
+                "name": p.get("name", ""),
+                "type": p.get("type", ""),
+                "hex_approx": p.get("hex_approx", ""),
+                "notes": p.get("notes", ""),
+                "calibration": cal_sig,
             })
-    
-    return {"recipes": recipes}
+        payload = {
+            "group": library_group,
+            "coverage_mg_per_cm2": library.get("coverage_mg_per_cm2"),
+            "records": records,
+            "solver_version": "deterministic_v2",
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:24]
+
+    def _build_ingredients(components: list[tuple[str, float]], total_grams: Optional[float]) -> list[dict]:
+        merged: dict[str, float] = {}
+        for pid, ratio in components:
+            if ratio is None:
+                continue
+            r = float(ratio)
+            if r <= 0:
+                continue
+            merged[str(pid)] = merged.get(str(pid), 0.0) + r
+        positive = list(merged.items())
+        total_ratio = sum(r for _, r in positive)
+        if total_ratio <= 0:
+            return []
+        out = []
+        for paint_id, ratio in positive:
+            pct = (ratio / total_ratio) * 100.0
+            paint = paints_by_id.get(paint_id, {})
+            ingredient = {
+                "paint_id": paint_id,
+                "paint_name": paint.get("name", paint_id),
+                "percentage": round(pct, 2),
+            }
+            if total_grams is not None and total_grams > 0:
+                ingredient["grams"] = round((pct / 100.0) * total_grams, 2)
+            out.append(ingredient)
+        # Force exact 100.00 after rounding by adjusting last ingredient.
+        pct_sum = round(sum(i["percentage"] for i in out), 2)
+        drift = round(100.0 - pct_sum, 2)
+        if out and abs(drift) >= 0.01:
+            out[-1]["percentage"] = round(out[-1]["percentage"] + drift, 2)
+        if total_grams is not None and total_grams > 0 and out:
+            # Force exact total grams after rounding by solving last ingredient.
+            prev_sum = round(sum(i.get("grams", 0.0) for i in out[:-1]), 2)
+            out[-1]["grams"] = round(total_grams - prev_sum, 2)
+        return out
+
+    def _predict_mix_hex(components: list[tuple[str, float]]) -> Optional[str]:
+        """Approximate expected mixed color from weighted paint hex values."""
+        merged: dict[str, float] = {}
+        for pid, ratio in components:
+            if ratio is None:
+                continue
+            try:
+                r = float(ratio)
+            except Exception:
+                continue
+            if r <= 0:
+                continue
+            key = str(pid)
+            merged[key] = merged.get(key, 0.0) + r
+
+        if not merged:
+            return None
+
+        total = sum(merged.values())
+        if total <= 0:
+            return None
+
+        lr = lg = lb = 0.0
+        used = 0.0
+        for paint_id, ratio in merged.items():
+            paint = paints_by_id.get(paint_id, {})
+            rgb = _hex_to_rgb(str(paint.get("hex_approx", "")))
+            if rgb is None:
+                continue
+            w = ratio / total
+            # Mix in linear RGB space for a more realistic expected color.
+            lr += ((rgb[0] / 255.0) ** 2.2) * w
+            lg += ((rgb[1] / 255.0) ** 2.2) * w
+            lb += ((rgb[2] / 255.0) ** 2.2) * w
+            used += w
+
+        if used <= 0:
+            return None
+
+        if used < 0.999:
+            lr /= used
+            lg /= used
+            lb /= used
+
+        r8 = max(0, min(255, int(round((max(0.0, min(1.0, lr)) ** (1.0 / 2.2)) * 255.0))))
+        g8 = max(0, min(255, int(round((max(0.0, min(1.0, lg)) ** (1.0 / 2.2)) * 255.0))))
+        b8 = max(0, min(255, int(round((max(0.0, min(1.0, lb)) ** (1.0 / 2.2)) * 255.0))))
+        return "#{:02X}{:02X}{:02X}".format(r8, g8, b8)
+
+    def _recipe_to_structured(
+        target_hex: str,
+        generated: dict,
+        total_grams: Optional[float],
+    ) -> dict:
+        r = generated.get("recipe")
+        if not r:
+            return {}
+
+        components: list[tuple[str, float]] = []
+        if r.get("white_ratio") is not None:
+            components.append((white_paint_id, float(r.get("white_ratio", 0.0))))
+        if r.get("pigment_ratio") is not None and r.get("pigment_id"):
+            components.append((str(r.get("pigment_id")), float(r.get("pigment_ratio", 0.0))))
+        if r.get("pigment1_ratio") is not None and r.get("pigment1_id"):
+            components.append((str(r.get("pigment1_id")), float(r.get("pigment1_ratio", 0.0))))
+        if r.get("pigment2_ratio") is not None and r.get("pigment2_id"):
+            components.append((str(r.get("pigment2_id")), float(r.get("pigment2_ratio", 0.0))))
+        if r.get("pigment_ids") and r.get("pigment_ratios"):
+            for pid, ratio in zip(r.get("pigment_ids", []), r.get("pigment_ratios", [])):
+                components.append((str(pid), float(ratio)))
+
+        ingredients = _build_ingredients(components, total_grams)
+        predicted_hex = _predict_mix_hex(components)
+        error_value = r.get("error")
+        try:
+            error_value = float(error_value) if error_value is not None else None
+        except Exception:
+            error_value = None
+
+        return {
+            "target_hex": target_hex,
+            "ingredients": ingredients,
+            "type": "deterministic",
+            "solver_recipe_type": generated.get("type", "unknown"),
+            "error": error_value,
+            "uncalibrated": bool(r.get("uncalibrated", False)),
+            "predicted_hex": predicted_hex,
+        }
+
+    def _structured_from_ingredients(
+        target_hex: str,
+        ingredients_in: list[dict],
+        total_grams: Optional[float],
+        recipe_type: str = "ai_refined",
+    ) -> Optional[dict]:
+        components: list[tuple[str, float]] = []
+        for ing in ingredients_in:
+            if not isinstance(ing, dict):
+                continue
+            pid = str(ing.get("paint_id", "")).strip()
+            if not pid or pid not in paints_by_id:
+                continue
+            pct = ing.get("percentage")
+            try:
+                ratio = float(pct) / 100.0
+            except Exception:
+                continue
+            if ratio <= 0:
+                continue
+            components.append((pid, ratio))
+        if not components:
+            return None
+        ingredients = _build_ingredients(components, total_grams)
+        if not ingredients:
+            return None
+        predicted_hex = _predict_mix_hex(components)
+        return {
+            "target_hex": target_hex,
+            "ingredients": ingredients,
+            "type": recipe_type,
+            "solver_recipe_type": recipe_type,
+            "error": None,
+            "uncalibrated": False,
+            "predicted_hex": predicted_hex,
+        }
+
+    def _load_calibration_context() -> dict:
+        out: dict[str, dict] = {}
+        for p in paints:
+            pid = p.get("id")
+            if not pid:
+                continue
+            cal_file = CALIBRATION_DIR / f"{pid}.json"
+            if not cal_file.exists():
+                continue
+            try:
+                with open(cal_file, "r") as f:
+                    cal = json.load(f)
+                samples = cal.get("samples", [])
+                compact_samples = []
+                for s in samples:
+                    if not isinstance(s, dict):
+                        continue
+                    compact_samples.append({
+                        "ratio": s.get("ratio"),
+                        "rgb": s.get("rgb"),
+                        "lab": s.get("lab"),
+                    })
+                out[pid] = {
+                    "samples": compact_samples,
+                    "reference_strip": cal.get("reference_strip"),
+                }
+            except Exception:
+                continue
+        return out
+
+    def _call_ai_refiner(target_hex: str, deterministic_recipe: dict, total_grams: Optional[float], calibration_ctx: dict) -> Optional[dict]:
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            return None
+        model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+
+        paints_context = []
+        for p in paints:
+            pid = p.get("id")
+            if not pid:
+                continue
+            paints_context.append({
+                "paint_id": pid,
+                "name": p.get("name"),
+                "hex_approx": p.get("hex_approx"),
+                "calibrated": pid in calibration_ctx,
+            })
+
+        payload = {
+            "model": model,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You refine paint-mixing recipes. Return strict JSON with key 'ingredients'. "
+                        "ingredients must be a list of objects: {paint_id, percentage}. "
+                        "Percentages should sum to 100. Use only provided paint_id values."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "task": "Refine deterministic paint recipe with full calibration context.",
+                            "target_hex": target_hex,
+                            "deterministic_recipe": deterministic_recipe,
+                            "paints": paints_context,
+                            "calibration_data": calibration_ctx,
+                            "constraints": {
+                                "max_ingredients": 4,
+                                "must_sum_to_100": True,
+                            },
+                        }
+                    ),
+                },
+            ],
+        }
+
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                raw = resp.read().decode("utf-8")
+            body = json.loads(raw)
+            content = body["choices"][0]["message"]["content"]
+            ai_json = json.loads(content)
+            ingredients = ai_json.get("ingredients", [])
+            return _structured_from_ingredients(target_hex, ingredients, total_grams, "ai_refined")
+        except (KeyError, ValueError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            return None
+
+    def _ensure_predicted_hex(recipe_obj: object) -> object:
+        if not isinstance(recipe_obj, dict):
+            return recipe_obj
+        if recipe_obj.get("predicted_hex"):
+            return recipe_obj
+        ingredients = recipe_obj.get("ingredients")
+        if not isinstance(ingredients, list):
+            return recipe_obj
+        components: list[tuple[str, float]] = []
+        for ing in ingredients:
+            if not isinstance(ing, dict):
+                continue
+            paint_id = ing.get("paint_id")
+            percentage = ing.get("percentage")
+            if paint_id is None or percentage is None:
+                continue
+            try:
+                ratio = float(percentage) / 100.0
+            except Exception:
+                continue
+            components.append((str(paint_id), ratio))
+        predicted_hex = _predict_mix_hex(components)
+        if not predicted_hex:
+            return recipe_obj
+        updated = dict(recipe_obj)
+        updated["predicted_hex"] = predicted_hex
+        return updated
+
+    fingerprint = _library_fingerprint()
+    recipes_by_index: dict[int, dict] = {}
+    missing_for_solver: list[dict] = []
+    completed_prefix = 0
+
+    # Normalize and load from cache where valid.
+    for color in palette_list:
+        idx = color.get("index")
+        target_hex = _normalize_target_hex(color)
+        if idx is None or not target_hex:
+            safe_idx = _safe_index(idx)
+            recipes_by_index[safe_idx] = {
+                "palette_index": idx,
+                "recipe": None,
+                "error": "Color format error: missing or invalid hex/rgb"
+            }
+            completed_prefix += 1
+            _set_progress(completed_prefix, len(palette_list), "running", min(completed_prefix, len(palette_list) - 1))
+            continue
+
+        color["__target_hex"] = target_hex
+        color["__target_rgb"] = _hex_to_rgb(target_hex)
+        target_grams = color.get("target_grams")
+        try:
+            target_grams = float(target_grams) if target_grams is not None else None
+        except Exception:
+            target_grams = None
+        color["__target_grams"] = target_grams if target_grams is not None and target_grams > 0 else None
+
+        if not force:
+            cached = get_cached_recipe(library_group, target_hex)
+            if cached and cached.get("type") == "deterministic" and cached.get("library_fingerprint") == fingerprint:
+                cached_recipe = _ensure_predicted_hex(cached.get("recipe"))
+                safe_idx = _safe_index(idx)
+                recipes_by_index[safe_idx] = {
+                    "palette_index": safe_idx,
+                    "recipe": cached_recipe,
+                    "type": "deterministic"
+                }
+                completed_prefix += 1
+                _set_progress(completed_prefix, len(palette_list), "running", min(completed_prefix, len(palette_list) - 1))
+                continue
+        missing_for_solver.append(color)
+
+    if missing_for_solver:
+        solver_palette = []
+        for color in missing_for_solver:
+            if color.get("__target_rgb") is None:
+                safe_idx = _safe_index(color.get("index"))
+                recipes_by_index[safe_idx] = {
+                    "palette_index": safe_idx,
+                    "recipe": None,
+                    "error": "Color format error: invalid RGB"
+                }
+                completed_prefix += 1
+                _set_progress(completed_prefix, len(palette_list), "running", min(completed_prefix, len(palette_list) - 1))
+                continue
+            solver_palette.append({
+                "index": _safe_index(color.get("index")),
+                "rgb": color["__target_rgb"],
+            })
+
+        try:
+            def _solver_progress(done_missing: int, total_missing: int, status: str):
+                overall_done = completed_prefix + max(0, int(done_missing))
+                current_idx = min(max(0, overall_done), max(0, len(palette_list) - 1))
+                _set_progress(overall_done, len(palette_list), "running" if status != "completed" else "finalizing", current_idx)
+
+            generated_list = await asyncio.to_thread(
+                generate_recipes_for_palette,
+                "runtime",
+                solver_palette,
+                library_group,
+                _solver_progress,
+            )
+        except Exception as e:
+            logger.exception("Recipe solver failed for library_group=%s: %s", library_group, e)
+            generated_list = []
+            for color in missing_for_solver:
+                idx = _safe_index(color.get("index", -1))
+                recipes_by_index[idx] = {
+                    "palette_index": idx,
+                    "recipe": None,
+                    "error": f"Recipe solver crashed for this color: {e}"
+                }
+        generated_by_index = {int(r.get("palette_index")): r for r in generated_list if r.get("palette_index") is not None}
+
+        for color in missing_for_solver:
+            idx = _safe_index(color.get("index"))
+            target_hex = color["__target_hex"]
+            target_grams = color["__target_grams"]
+            generated = generated_by_index.get(idx)
+            if not generated:
+                recipes_by_index[idx] = {
+                    "palette_index": idx,
+                    "recipe": None,
+                    "error": "Recipe generation failed: no solver output"
+                }
+                continue
+            if not generated.get("recipe"):
+                recipes_by_index[idx] = {
+                    "palette_index": idx,
+                    "recipe": None,
+                    "error": generated.get("error", "Recipe generation failed")
+                }
+                continue
+
+            recipe_storage = _recipe_to_structured(target_hex, generated, target_grams)
+            try:
+                cache_recipe(library_group, target_hex, {
+                    "type": "deterministic",
+                    "library_fingerprint": fingerprint,
+                    "recipe": recipe_storage,
+                })
+            except Exception as e:
+                logger.exception(
+                    "Failed to cache recipe for group=%s hex=%s index=%s: %s",
+                    library_group,
+                    target_hex,
+                    idx,
+                    e,
+                )
+            recipes_by_index[idx] = {
+                "palette_index": idx,
+                "recipe": recipe_storage,
+                "type": "deterministic"
+            }
+
+    ordered = []
+    for color in palette_list:
+        idx = _safe_index(color.get("index", -1))
+        ordered.append(recipes_by_index.get(idx, {
+            "palette_index": idx,
+            "recipe": None,
+            "error": "Recipe generation failed: missing result"
+        }))
+
+    if use_ai:
+        # AI second pass only for poor deterministic recipes to control latency/cost.
+        _set_progress(len(palette_list), len(palette_list), "finalizing", max(0, len(palette_list) - 1), "Refining poor recipes with AI")
+        calibration_ctx = _load_calibration_context()
+        try:
+            ai_refine_limit = max(0, int(os.getenv("AI_RECIPE_REFINE_LIMIT", "6")))
+        except Exception:
+            ai_refine_limit = 6
+        refined_count = 0
+        for item in ordered:
+            if refined_count >= ai_refine_limit:
+                break
+            recipe = item.get("recipe")
+            if not isinstance(recipe, dict):
+                continue
+            if recipe.get("type") != "deterministic":
+                continue
+            err = recipe.get("error")
+            try:
+                err_val = float(err) if err is not None else None
+            except Exception:
+                err_val = None
+            if err_val is not None and err_val < 6.0:
+                continue
+            target_hex = recipe.get("target_hex")
+            if not target_hex:
+                continue
+            idx = _safe_index(item.get("palette_index"))
+            grams = None
+            for c in palette_list:
+                if _safe_index(c.get("index")) == idx:
+                    grams = c.get("__target_grams")
+                    break
+            refined = _call_ai_refiner(target_hex, recipe, grams, calibration_ctx)
+            if refined:
+                item["recipe"] = refined
+                item["type"] = "ai_refined"
+                refined_count += 1
+    return {"recipes": ordered}
+
+
+@app.get("/api/paint/recipes/progress/{progress_id}")
+async def get_recipe_progress(progress_id: str):
+    with RECIPE_PROGRESS_LOCK:
+        progress = RECIPE_PROGRESS.get(progress_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="Progress not found")
+    return progress
 
 
 # Verification endpoints

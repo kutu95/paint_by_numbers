@@ -55,6 +55,42 @@ interface SessionResponse {
   gradient_regions?: GradientRegion[]
 }
 
+interface OptimizedPaletteRecipe {
+  ingredients: Array<{
+    paint_id: string
+    paint_name: string
+    percentage: number
+  }>
+  error?: number | null
+  type?: string
+  error_text?: string
+}
+
+interface OptimizedPaletteColor {
+  index: number
+  target_hex: string
+  coverage: number
+  lab: [number, number, number]
+  recipe: OptimizedPaletteRecipe
+}
+
+interface PaletteOptimizationResult {
+  optimal_palette_size: number
+  average_delta_e: number
+  maximum_delta_e: number
+  target_delta_e: number
+  max_palette_size: number
+  library_group: string
+  prefer_simpler: boolean
+  downsample: {
+    width: number
+    height: number
+  }
+  palette: OptimizedPaletteColor[]
+  paint_order: number[]
+  met_target: boolean
+}
+
 export default function Home() {
   const [image, setImage] = useState<File | null>(null)
   const [preview, setPreview] = useState<string | null>(null)
@@ -75,6 +111,11 @@ export default function Home() {
   const [gradientTransitionWidth, setGradientTransitionWidth] = useState(25)
   const [enableGlaze, setEnableGlaze] = useState(false)
   const [processing, setProcessing] = useState(false)
+  const [optimizingPalette, setOptimizingPalette] = useState(false)
+  const [targetErrorDeltaE, setTargetErrorDeltaE] = useState(5)
+  const [maxPaletteSize, setMaxPaletteSize] = useState(16)
+  const [preferSimplerMixes, setPreferSimplerMixes] = useState(false)
+  const [paletteOptimization, setPaletteOptimization] = useState<PaletteOptimizationResult | null>(null)
   const [sessionData, setSessionData] = useState<SessionResponse | null>(null)
   const [manualOrder, setManualOrder] = useState<number[]>([])
   const [recipes, setRecipes] = useState<any[]>([])
@@ -467,6 +508,45 @@ export default function Home() {
     }
   }
 
+  const handleComputeOptimalPalette = async () => {
+    const useStoredImage = editSessionId && !image && editSessionOriginalUrl
+    if (!image && !useStoredImage) {
+      alert('Please select an image first (or open an editable project with a stored image).')
+      return
+    }
+
+    setOptimizingPalette(true)
+    try {
+      const formData = new FormData()
+      formData.append('target_delta_e', targetErrorDeltaE.toString())
+      formData.append('max_palette_size', maxPaletteSize.toString())
+      formData.append('library_group', selectedLibraryGroup)
+      formData.append('prefer_simpler', preferSimplerMixes ? 'true' : 'false')
+      if (image) {
+        formData.append('image', image)
+      } else if (editSessionId) {
+        formData.append('session_id', editSessionId)
+      }
+
+      const response = await fetch(`${API_BASE_URL}/api/paint/optimize-palette`, {
+        method: 'POST',
+        body: formData,
+      })
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(text || `HTTP ${response.status}`)
+      }
+      const data: PaletteOptimizationResult = await response.json()
+      setPaletteOptimization(data)
+      setNColors(data.optimal_palette_size)
+    } catch (error) {
+      console.error('Failed to compute optimal palette:', error)
+      alert('Failed to compute optimal palette. Check console for details.')
+    } finally {
+      setOptimizingPalette(false)
+    }
+  }
+
   const moveLayer = (index: number, direction: 'up' | 'down') => {
     if (!sessionData || orderMode !== 'manual') return
     const newOrder = [...manualOrder]
@@ -517,31 +597,30 @@ export default function Home() {
 
     const recipe = recipeData.recipe
     
-    // Handle ChatGPT-generated recipes (structured format)
-    if (recipeData.type === 'chatgpt' || recipe.type === 'chatgpt') {
-      // New structured format with ingredients
-      if (recipe.ingredients && Array.isArray(recipe.ingredients) && recipe.ingredients.length > 0) {
-        const ingredientParts = recipe.ingredients.map((ing: any) => {
-          if (!ing || !ing.paint_name) {
-            console.warn('Invalid ingredient in recipe:', ing)
-            return null
-          }
-          const percentage = ing.percentage !== undefined ? ing.percentage : 0
-          if (ing.grams !== undefined) {
-            return `${ing.paint_name} ${percentage.toFixed(2)}% (${ing.grams.toFixed(2)}g)`
-          }
-          return `${ing.paint_name} ${percentage.toFixed(2)}%`
-        }).filter((part: string | null) => part !== null)
-        if (ingredientParts.length > 0) {
-          return ingredientParts.join(' + ')
+    // Structured ingredient recipes (ChatGPT or deterministic)
+    if (recipe.ingredients && Array.isArray(recipe.ingredients) && recipe.ingredients.length > 0) {
+      const ingredientParts = recipe.ingredients.map((ing: any) => {
+        if (!ing || !ing.paint_name) {
+          console.warn('Invalid ingredient in recipe:', ing)
+          return null
         }
+        const percentage = ing.percentage !== undefined ? ing.percentage : 0
+        if (ing.grams !== undefined) {
+          return `${ing.paint_name} ${percentage.toFixed(2)}% (${ing.grams.toFixed(2)}g)`
+        }
+        return `${ing.paint_name} ${percentage.toFixed(2)}%`
+      }).filter((part: string | null) => part !== null)
+      if (ingredientParts.length > 0) {
+        return ingredientParts.join(' + ')
       }
+    }
+
+    if (recipe.instructions) {
       // Log if we have recipe but no valid ingredients
       if (recipe.ingredients) {
         console.warn('Recipe has ingredients array but no valid ingredients:', recipe)
       }
-      // Fallback to old instructions format for backward compatibility
-      return recipe.instructions || 'Recipe instructions from ChatGPT'
+      return recipe.instructions
     }
     
     // Legacy recipe formats (for backwards compatibility)
@@ -584,9 +663,28 @@ export default function Home() {
 
   const loadLibraryGroups = async (editSessionIdParam?: string | null) => {
     if (typeof window === 'undefined') return
+    const url = `${API_BASE_URL}/api/paint/library/groups`
     try {
-      const response = await fetch(`${API_BASE_URL}/api/paint/library/groups`)
-      const data = await response.json()
+      let data: any = null
+      let lastError: unknown = null
+      for (const delayMs of [0, 400]) {
+        if (delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs))
+        }
+        try {
+          const response = await fetch(url, { cache: 'no-store' })
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`)
+          }
+          data = await response.json()
+          break
+        } catch (error) {
+          lastError = error
+        }
+      }
+      if (!data) {
+        throw lastError || new Error('No response data')
+      }
       const groups = data.groups || []
       setLibraryGroups(groups)
       setLibraryGroupsLoaded(true)
@@ -596,7 +694,7 @@ export default function Home() {
         setSelectedLibraryGroup(calibratedGroup ? calibratedGroup.group : groups[0].group)
       }
     } catch (error) {
-      console.error('Failed to load library groups:', error)
+      console.error(`Failed to load library groups from ${url}:`, error)
       setLibraryGroupsLoaded(true) // Set to true even on error to prevent infinite waiting
     }
   }
@@ -883,6 +981,112 @@ export default function Home() {
                     Loading library groups...
                   </div>
                 )}
+              </div>
+
+              <div className="col-span-2 border border-gray-700 rounded-lg p-4 bg-gray-800/50">
+                <h3 className="text-lg font-semibold mb-3">Palette Optimisation</h3>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block mb-2">
+                      Target error (ΔE): {targetErrorDeltaE.toFixed(0)}
+                    </label>
+                    <input
+                      type="range"
+                      min="1"
+                      max="15"
+                      step="1"
+                      value={targetErrorDeltaE}
+                      onChange={(e) => setTargetErrorDeltaE(parseInt(e.target.value, 10))}
+                      className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                    />
+                    <div className="flex justify-between text-xs text-gray-400 mt-1">
+                      <span>1</span>
+                      <span>15</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block mb-2">
+                      Maximum palette size: {maxPaletteSize}
+                    </label>
+                    <input
+                      type="range"
+                      min="4"
+                      max="24"
+                      step="1"
+                      value={maxPaletteSize}
+                      onChange={(e) => setMaxPaletteSize(parseInt(e.target.value, 10))}
+                      className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                    />
+                    <div className="flex justify-between text-xs text-gray-400 mt-1">
+                      <span>4</span>
+                      <span>24</span>
+                    </div>
+                  </div>
+
+                  <label className="flex items-center gap-3 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={preferSimplerMixes}
+                      onChange={(e) => setPreferSimplerMixes(e.target.checked)}
+                      className="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500"
+                    />
+                    Prefer simpler mixes
+                  </label>
+
+                  <button
+                    onClick={handleComputeOptimalPalette}
+                    disabled={optimizingPalette || (!image && !(editSessionId && editSessionOriginalUrl))}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    {optimizingPalette && (
+                      <svg
+                        className="animate-spin h-4 w-4 text-white"
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                      >
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                        ></path>
+                      </svg>
+                    )}
+                    {optimizingPalette ? 'Computing…' : 'Compute Optimal Palette'}
+                  </button>
+
+                  {paletteOptimization && (
+                    <div className="mt-3 p-3 rounded border border-gray-700 bg-gray-900/60 space-y-2">
+                      <div className="text-sm">
+                        Optimal palette size: <span className="font-semibold">{paletteOptimization.optimal_palette_size} colours</span>
+                      </div>
+                      <div className="text-sm">
+                        Average ΔE: <span className="font-semibold">{paletteOptimization.average_delta_e.toFixed(2)}</span>
+                      </div>
+                      <div className="text-sm">
+                        Maximum ΔE: <span className="font-semibold">{paletteOptimization.maximum_delta_e.toFixed(2)}</span>
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        Number of Colors has been set to {paletteOptimization.optimal_palette_size}. Generate layers to apply.
+                      </div>
+                      <div className="grid grid-cols-8 gap-2 pt-1">
+                        {paletteOptimization.palette.map((color) => (
+                          <div key={color.index} className="flex flex-col items-center">
+                            <div
+                              className="w-7 h-7 rounded border border-gray-600"
+                              style={{ backgroundColor: color.target_hex }}
+                              title={`Color ${color.index}: ${color.target_hex}`}
+                            />
+                            <span className="text-[10px] text-gray-400 mt-1">{color.index}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Gradient-Aware Quantization - disabled and hidden for now */}
@@ -1191,7 +1395,7 @@ export default function Home() {
                 if (!recipeData) return null
                 
                 const recipe = recipeData.recipe
-                const errorInfo = recipe && recipeData.type !== 'chatgpt' && recipe.error !== undefined 
+                const errorInfo = recipe && recipe.error !== undefined 
                   ? getErrorLevel(recipe.error) 
                   : null
                 
@@ -1202,26 +1406,8 @@ export default function Home() {
                       {formatRecipe(recipeData)}
                     </div>
                     
-                    {/* Recipe details for ChatGPT recipes */}
-                    {recipe && (recipeData.type === 'chatgpt' || recipe.type === 'chatgpt') && recipe.ingredients && (
-                      <div className="text-xs text-gray-400 mt-2 space-y-1">
-                        {recipe.mixing_strategy && (
-                          <div><strong>Strategy:</strong> {recipe.mixing_strategy}</div>
-                        )}
-                        {recipe.expected_result && (
-                          <div><strong>Expected:</strong> {recipe.expected_result}</div>
-                        )}
-                        {recipe.adjustment_ladder && (
-                          <div><strong>Adjustments:</strong> {recipe.adjustment_ladder}</div>
-                        )}
-                        {recipe.tips && (
-                          <div><strong>Tips:</strong> {recipe.tips}</div>
-                        )}
-                      </div>
-                    )}
-                    
-                    {/* Recipe metadata for non-ChatGPT recipes */}
-                    {recipe && recipeData.type !== 'chatgpt' && recipe.type !== 'chatgpt' && (
+                    {/* Recipe metadata */}
+                    {recipe && (
                       <div className="text-xs text-gray-400 mt-2 flex items-center gap-2 flex-wrap">
                         {recipe.uncalibrated && (
                           <span className="px-2 py-0.5 rounded text-xs bg-yellow-600/30 text-yellow-300 border border-yellow-500/50">
@@ -1261,4 +1447,3 @@ export default function Home() {
     </div>
   )
 }
-
