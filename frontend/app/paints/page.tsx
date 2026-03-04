@@ -4,6 +4,168 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { API_BASE_URL } from '@/lib/config'
 
+const CHART_WIDTH = 420
+const CHART_HEIGHT = 180
+const PAD = { left: 36, right: 12, top: 12, bottom: 28 }
+
+function CalibrationResultsView({ data }: { data: CalibrationData }) {
+  const samples = [...(data.samples || [])].sort((a, b) => a.ratio - b.ratio)
+  if (samples.length === 0) return <p className="text-gray-400">No samples.</p>
+
+  const ratios = samples.map((s) => s.ratio)
+  const L = samples.map((s) => s.lab[0])
+  const a = samples.map((s) => s.lab[1])
+  const b = samples.map((s) => s.lab[2])
+  const minRatio = Math.min(...ratios)
+  const maxRatio = Math.max(...ratios)
+  const minL = Math.min(0, ...L)
+  const maxL = Math.max(100, ...L)
+  const abExtent = Math.max(1, ...a.map(Math.abs), ...b.map(Math.abs), 50)
+  const minAb = -abExtent
+  const maxAb = abExtent
+
+  // X: logarithmic scale, reversed (100% left, most diluted right); equal spacing per dilution step
+  const logMin = Math.log2(Math.max(minRatio, 1e-6))
+  const logMax = Math.log2(maxRatio)
+  const logRange = logMax - logMin || 1
+  const innerW = CHART_WIDTH - PAD.left - PAD.right
+  const toX = (ratio: number) => {
+    const t = (logMax - Math.log2(Math.max(ratio, 1e-6))) / logRange
+    return PAD.left + t * innerW
+  }
+  const toYL = (v: number) =>
+    PAD.top + (1 - (v - minL) / (maxL - minL || 1)) * (CHART_HEIGHT - PAD.top - PAD.bottom)
+  const toYAb = (v: number) =>
+    PAD.top + (1 - (v - minAb) / (maxAb - minAb || 1)) * (CHART_HEIGHT - PAD.top - PAD.bottom)
+
+  const pathL = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYL(s.lab[0])}`).join(' ')
+  const pathA = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYAb(s.lab[1])}`).join(' ')
+  const pathB = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYAb(s.lab[2])}`).join(' ')
+
+  // Red / green from a* (red = +a*, green = -a*); yellow / blue from b* (yellow = +b*, blue = -b*)
+  const redChroma = a.map((v) => Math.max(0, v))
+  const greenChroma = a.map((v) => Math.max(0, -v))
+  const yellowChroma = b.map((v) => Math.max(0, v))
+  const blueChroma = b.map((v) => Math.max(0, -v))
+  const maxChroma = Math.max(1, ...redChroma, ...greenChroma, ...yellowChroma, ...blueChroma)
+  const toYChroma = (v: number) =>
+    PAD.top + (1 - v / maxChroma) * (CHART_HEIGHT - PAD.top - PAD.bottom)
+  const pathRed = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYChroma(redChroma[i])}`).join(' ')
+  const pathGreen = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYChroma(greenChroma[i])}`).join(' ')
+  const pathYellow = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYChroma(yellowChroma[i])}`).join(' ')
+  const pathBlue = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYChroma(blueChroma[i])}`).join(' ')
+
+  const rgbToHex = (r: number, g: number, blue: number) =>
+    '#' + [r, g, blue].map((x) => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0')).join('')
+
+  return (
+    <div className="space-y-4">
+      {data.created_at && (
+        <p className="text-sm text-gray-400">
+          Calibrated: {new Date(data.created_at).toLocaleString()}
+        </p>
+      )}
+      <div>
+        <h4 className="text-sm font-medium text-gray-300 mb-2">Samples ({samples.length})</h4>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-gray-400 border-b border-gray-600">
+                <th className="py-1 pr-3">Ratio</th>
+                <th className="py-1 pr-2">Color</th>
+                <th className="py-1 pr-2">L</th>
+                <th className="py-1 pr-2">a*</th>
+                <th className="py-1">b*</th>
+              </tr>
+            </thead>
+            <tbody>
+              {samples.map((s, i) => (
+                <tr key={i} className="border-b border-gray-700">
+                  <td className="py-1.5 pr-3">{(s.ratio * 100).toFixed(1)}%</td>
+                  <td className="py-1.5 pr-2">
+                    <span
+                      className="inline-block w-6 h-6 rounded border border-gray-600"
+                      style={{ backgroundColor: rgbToHex(s.rgb[0], s.rgb[1], s.rgb[2]) }}
+                      title={rgbToHex(s.rgb[0], s.rgb[1], s.rgb[2])}
+                    />
+                  </td>
+                  <td className="py-1.5 pr-2">{s.lab[0].toFixed(1)}</td>
+                  <td className="py-1.5 pr-2">{s.lab[1].toFixed(1)}</td>
+                  <td className="py-1.5">{s.lab[2].toFixed(1)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div>
+        <h4 className="text-sm font-medium text-gray-300 mb-1">Luminance (L) vs dilution</h4>
+        <p className="text-xs text-gray-500 mb-1">L: 0 (dark) → 100 (light)</p>
+        <svg width={CHART_WIDTH} height={CHART_HEIGHT} className="overflow-visible">
+          <line x1={PAD.left} y1={PAD.top} x2={PAD.left} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <line x1={PAD.left} y1={CHART_HEIGHT - PAD.bottom} x2={CHART_WIDTH - PAD.right} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <text x={PAD.left - 8} y={PAD.top + 4} className="fill-gray-500 text-[10px]">100</text>
+          <text x={PAD.left - 8} y={CHART_HEIGHT - PAD.bottom + 4} className="fill-gray-500 text-[10px]">0</text>
+          {samples.map((s, i) => (
+            <g key={i}>
+              <line x1={toX(s.ratio)} y1={CHART_HEIGHT - PAD.bottom} x2={toX(s.ratio)} y2={CHART_HEIGHT - PAD.bottom + 4} stroke="#4b5563" strokeWidth="1" />
+              <text x={toX(s.ratio)} y={CHART_HEIGHT - 4} textAnchor="middle" className="fill-gray-500 text-[10px]">{(s.ratio * 100).toFixed(s.ratio >= 0.1 ? 0 : 1)}%</text>
+            </g>
+          ))}
+          <path d={pathL} fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </div>
+
+      <div>
+        <h4 className="text-sm font-medium text-gray-300 mb-1">Chroma (a*, b*) vs dilution</h4>
+        <p className="text-xs text-gray-500 mb-1">a* (green–red), b* (blue–yellow)</p>
+        <svg width={CHART_WIDTH} height={CHART_HEIGHT} className="overflow-visible">
+          <line x1={PAD.left} y1={PAD.top} x2={PAD.left} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <line x1={PAD.left} y1={CHART_HEIGHT - PAD.bottom} x2={CHART_WIDTH - PAD.right} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <text x={PAD.left - 8} y={PAD.top + 4} className="fill-gray-500 text-[10px]">{maxAb}</text>
+          <text x={PAD.left - 8} y={CHART_HEIGHT - PAD.bottom + 4} className="fill-gray-500 text-[10px]">{minAb}</text>
+          {samples.map((s, i) => (
+            <g key={i}>
+              <line x1={toX(s.ratio)} y1={CHART_HEIGHT - PAD.bottom} x2={toX(s.ratio)} y2={CHART_HEIGHT - PAD.bottom + 4} stroke="#4b5563" strokeWidth="1" />
+              <text x={toX(s.ratio)} y={CHART_HEIGHT - 4} textAnchor="middle" className="fill-gray-500 text-[10px]">{(s.ratio * 100).toFixed(s.ratio >= 0.1 ? 0 : 1)}%</text>
+            </g>
+          ))}
+          <path d={pathA} fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <path d={pathB} fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <text x={CHART_WIDTH - 80} y={PAD.top + 10} className="fill-[#ef4444] text-[10px]">a*</text>
+          <text x={CHART_WIDTH - 50} y={PAD.top + 10} className="fill-[#3b82f6] text-[10px]">b*</text>
+        </svg>
+      </div>
+
+      <div>
+        <h4 className="text-sm font-medium text-gray-300 mb-1">Red / Green / Blue / Yellow chroma vs dilution</h4>
+        <p className="text-xs text-gray-500 mb-1">From Lab: red = +a*, green = −a*, yellow = +b*, blue = −b*</p>
+        <svg width={CHART_WIDTH} height={CHART_HEIGHT} className="overflow-visible">
+          <line x1={PAD.left} y1={PAD.top} x2={PAD.left} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <line x1={PAD.left} y1={CHART_HEIGHT - PAD.bottom} x2={CHART_WIDTH - PAD.right} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <text x={PAD.left - 8} y={PAD.top + 4} className="fill-gray-500 text-[10px]">{maxChroma.toFixed(0)}</text>
+          <text x={PAD.left - 8} y={CHART_HEIGHT - PAD.bottom + 4} className="fill-gray-500 text-[10px]">0</text>
+          {samples.map((s, i) => (
+            <g key={i}>
+              <line x1={toX(s.ratio)} y1={CHART_HEIGHT - PAD.bottom} x2={toX(s.ratio)} y2={CHART_HEIGHT - PAD.bottom + 4} stroke="#4b5563" strokeWidth="1" />
+              <text x={toX(s.ratio)} y={CHART_HEIGHT - 4} textAnchor="middle" className="fill-gray-500 text-[10px]">{(s.ratio * 100).toFixed(s.ratio >= 0.1 ? 0 : 1)}%</text>
+            </g>
+          ))}
+          <path d={pathRed} fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <path d={pathGreen} fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <path d={pathYellow} fill="none" stroke="#eab308" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <path d={pathBlue} fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <text x={CHART_WIDTH - 120} y={PAD.top + 8} className="fill-[#ef4444] text-[10px]">red</text>
+          <text x={CHART_WIDTH - 95} y={PAD.top + 8} className="fill-[#22c55e] text-[10px]">green</text>
+          <text x={CHART_WIDTH - 68} y={PAD.top + 8} className="fill-[#eab308] text-[10px]">yellow</text>
+          <text x={CHART_WIDTH - 42} y={PAD.top + 8} className="fill-[#3b82f6] text-[10px]">blue</text>
+        </svg>
+      </div>
+    </div>
+  )
+}
+
 interface Paint {
   id: string
   name: string
@@ -17,6 +179,21 @@ interface LibraryGroup {
   paint_count: number
   calibrated_count: number
   name: string
+}
+
+interface CalibrationSample {
+  ratio: number
+  rgb: number[]
+  lab: number[]
+}
+
+interface CalibrationData {
+  paint_id: string
+  ratios: number[]
+  samples: CalibrationSample[]
+  reference_strip?: Record<string, { rgb: number[]; lab: number[] }>
+  created_at?: string
+  notes?: string
 }
 
 export default function PaintsPage() {
@@ -38,6 +215,10 @@ export default function PaintsPage() {
   const [newGroupName, setNewGroupName] = useState('')
   const [renamingGroup, setRenamingGroup] = useState<string | null>(null)
   const [renameGroupName, setRenameGroupName] = useState('')
+  const [calibrationPanelOpen, setCalibrationPanelOpen] = useState(false)
+  const [calibrationData, setCalibrationData] = useState<CalibrationData | null>(null)
+  const [calibrationLoading, setCalibrationLoading] = useState(false)
+  const [calibrationError, setCalibrationError] = useState<string | null>(null)
 
   useEffect(() => {
     loadLibraryGroups()
@@ -52,6 +233,29 @@ export default function PaintsPage() {
       loadPaints()
     }
   }, [selectedGroup])
+
+  useEffect(() => {
+    if (!editingPaint) {
+      setCalibrationPanelOpen(false)
+      setCalibrationData(null)
+      setCalibrationError(null)
+      return
+    }
+    if (!calibrationPanelOpen) return
+    setCalibrationLoading(true)
+    setCalibrationError(null)
+    fetch(`${API_BASE_URL}/api/paint/calibration/${editingPaint.id}`)
+      .then((res) => {
+        if (!res.ok) {
+          if (res.status === 404) throw new Error('No calibration data')
+          throw new Error(res.statusText)
+        }
+        return res.json()
+      })
+      .then((data: CalibrationData) => setCalibrationData(data))
+      .catch((err: Error) => setCalibrationError(err.message))
+      .finally(() => setCalibrationLoading(false))
+  }, [editingPaint, calibrationPanelOpen])
 
   const loadLibraryGroups = async () => {
     try {
@@ -110,6 +314,8 @@ export default function PaintsPage() {
           const errorData = await response.json().catch(() => ({}))
           throw new Error(errorData.detail || 'Failed to update paint')
         }
+        const updatedPaint: Paint = await response.json()
+        setPaints((prev) => prev.map((p) => (p.id === updatedPaint.id ? { ...p, ...updatedPaint } : p)))
       } else {
         const response = await fetch(`${API_BASE_URL}/api/paint/library`, {
           method: 'POST',
@@ -408,6 +614,33 @@ export default function PaintsPage() {
                   rows={3}
                 />
               </div>
+
+              {editingPaint && (
+                <div className="border border-gray-600 rounded overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setCalibrationPanelOpen((o) => !o)}
+                    className="w-full px-4 py-3 flex items-center justify-between bg-gray-750 hover:bg-gray-700 text-left"
+                  >
+                    <span className="font-medium">Calibration results</span>
+                    <span className="text-gray-400">{calibrationPanelOpen ? '▼' : '▶'}</span>
+                  </button>
+                  {calibrationPanelOpen && (
+                    <div className="p-4 bg-gray-800/80 border-t border-gray-600 space-y-4">
+                      {calibrationLoading && (
+                        <p className="text-gray-400">Loading calibration…</p>
+                      )}
+                      {calibrationError && (
+                        <p className="text-amber-400">{calibrationError}</p>
+                      )}
+                      {calibrationData && !calibrationLoading && (
+                        <CalibrationResultsView data={calibrationData} />
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="flex gap-2">
                 <button
                   type="submit"

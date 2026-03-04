@@ -17,9 +17,9 @@
     },
     {
       "id": "yellow",
-      "name": "Yellow",
+      "name": "Yellow1",
       "type": "base",
-      "hex_approx": "#ffff00",
+      "hex_approx": "#f5e010",
       "notes": ""
     },
     {
@@ -36,5 +36,6 @@
       "hex_approx": "#ffffff",
       "notes": ""
     }
-  ]
+  ],
+  "group": "default"
 }

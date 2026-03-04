@@ -11,7 +11,8 @@ import logging
 from image_processor import process_image
 from paint_manager import (
     load_library, save_library, slugify, atomic_write,
-    sample_color_from_image,
+    sample_color_from_image, sample_color_from_region, normalize_calibration_samples,
+    get_hex_from_calibration,
     rgb_to_lab, delta_e_lab, CALIBRATION_DIR, PAINT_DIR,
     list_library_groups, get_library_info,
     get_cached_recipe, cache_recipe
@@ -352,17 +353,40 @@ async def update_paint(
     notes: str = Form(""),
     group: str = Form("default")
 ):
-    """Update an existing paint."""
+    """Update an existing paint. If calibration exists, recalculate hex_approx from the 100% swatch."""
     library = load_library(group)
     paint = next((p for p in library['paints'] if p['id'] == paint_id), None)
     if not paint:
         raise HTTPException(status_code=404, detail="Paint not found")
     
     paint['name'] = name
-    paint['hex_approx'] = hex_approx
     paint['notes'] = notes
-    
+
+    # Recalculate hex from calibration 100% swatch when calibration exists; otherwise use form value
+    hex_from_cal = get_hex_from_calibration(paint_id)
+    if hex_from_cal:
+        paint['hex_approx'] = hex_from_cal
+        logger.info("Update paint: using hex from calibration for %s: %s", paint_id, hex_from_cal)
+    else:
+        paint['hex_approx'] = hex_approx
+
+    # Save current group
     save_library(library, group)
+
+    # Sync to other groups that contain this paint
+    if hex_from_cal:
+        for g in list_library_groups():
+            if g == group:
+                continue
+            lib = load_library(g)
+            for p in lib.get('paints', []):
+                if p.get('id') == paint_id:
+                    p['name'] = paint['name']
+                    p['hex_approx'] = paint['hex_approx']
+                    p['notes'] = paint['notes']
+                    save_library(lib, g)
+                    break
+
     return paint
 
 
@@ -433,28 +457,55 @@ async def get_calibration_temp_image(image_id: str, request: Request):
 async def sample_calibration_colors(
     image_id: str = Form(...),
     paint_id: str = Form(...),
-    points: str = Form(...),  # JSON string of [{x,y}, ...]
-    ratios: str = Form(...)   # JSON string of [ratio, ...]
+    points: str = Form(None),  # legacy: JSON [{x,y}, ...]
+    ratios: str = Form(...),  # JSON string of [ratio, ...]
+    regions: str = Form(None),  # JSON [{x1,y1,x2,y2}, ...] - user-drawn rectangles (preferred)
+    reference_points: str = Form(None),  # legacy: JSON [white, mid_grey, black] each {x,y}
+    reference_regions: str = Form(None),  # JSON [white, mid_grey, black] each {x1,y1,x2,y2}
 ):
-    """Sample colors from calibration photo and save calibration."""
+    """Sample colors from calibration photo and save calibration.
+    Use regions (and reference_regions) to average over user-selected rectangles; falls back to points if provided.
+    """
     image_path = CALIBRATION_DIR / "temp" / f"{image_id}.jpg"
     if not image_path.exists():
         raise HTTPException(status_code=404, detail="Image not found")
     
-    points_list = json.loads(points)
     ratios_list = json.loads(ratios)
-    
-    if len(points_list) != len(ratios_list):
-        raise HTTPException(status_code=400, detail="Points and ratios must have same length")
-    
     samples = []
-    for point, ratio in zip(points_list, ratios_list):
-        rgb, lab = sample_color_from_image(str(image_path), point['x'], point['y'])
-        samples.append({
-            "ratio": ratio,
-            "rgb": rgb,
-            "lab": lab
-        })
+    path = str(image_path)
+
+    if regions:
+        regions_list = json.loads(regions)
+        if len(regions_list) != len(ratios_list):
+            raise HTTPException(status_code=400, detail="Regions and ratios must have same length")
+        for reg, ratio in zip(regions_list, ratios_list):
+            rgb, lab = sample_color_from_region(path, reg['x1'], reg['y1'], reg['x2'], reg['y2'])
+            samples.append({"ratio": ratio, "rgb": rgb, "lab": lab})
+    elif points:
+        points_list = json.loads(points)
+        if len(points_list) != len(ratios_list):
+            raise HTTPException(status_code=400, detail="Points and ratios must have same length")
+        for point, ratio in zip(points_list, ratios_list):
+            rgb, lab = sample_color_from_image(path, point['x'], point['y'])
+            samples.append({"ratio": ratio, "rgb": rgb, "lab": lab})
+    else:
+        raise HTTPException(status_code=400, detail="Provide either regions or points")
+
+    reference = {}
+    if reference_regions:
+        ref_list = json.loads(reference_regions)
+        if len(ref_list) >= 3:
+            for key, reg in zip(("reference_white", "reference_mid_grey", "reference_black"), ref_list[:3]):
+                rgb, lab = sample_color_from_region(path, reg['x1'], reg['y1'], reg['x2'], reg['y2'])
+                reference[key] = {"rgb": rgb, "lab": lab}
+            samples = normalize_calibration_samples(samples, reference)
+    elif reference_points:
+        ref_list = json.loads(reference_points)
+        if len(ref_list) >= 3:
+            for key, point in zip(("reference_white", "reference_mid_grey", "reference_black"), ref_list[:3]):
+                rgb, lab = sample_color_from_image(path, point['x'], point['y'])
+                reference[key] = {"rgb": rgb, "lab": lab}
+            samples = normalize_calibration_samples(samples, reference)
     
     # Save calibration
     calibration = {
@@ -464,12 +515,30 @@ async def sample_calibration_colors(
         "created_at": datetime.now().isoformat(),
         "notes": ""
     }
+    if reference:
+        calibration["reference_strip"] = reference
     
     cal_file = CALIBRATION_DIR / f"{paint_id}.json"
     atomic_write(cal_file, calibration)
     
+    # Update the paint's approximate color (hex_approx) from the 100% (1.0) swatch in every library group that has this paint
+    sample_100 = next((s for s in samples if s.get("ratio", 0) >= 0.99), None)
+    if sample_100 and sample_100.get("rgb") and len(sample_100["rgb"]) >= 3:
+        r, g, b = sample_100["rgb"][0], sample_100["rgb"][1], sample_100["rgb"][2]
+        hex_from_calibration = "#{:02x}{:02x}{:02x}".format(
+            max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))
+        )
+        for group in list_library_groups():
+            lib = load_library(group)
+            for p in lib.get("paints", []):
+                if p.get("id") == paint_id:
+                    p["hex_approx"] = hex_from_calibration
+                    save_library(lib, group)
+                    break
+    
     return {
         "samples": samples,
+        "reference_strip": reference if reference else None,
         "calibration_saved": True
     }
 

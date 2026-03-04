@@ -254,6 +254,119 @@ def sample_color_from_image(image_path: str, x: int, y: int, radius: int = 5) ->
     return rgb_mean, lab
 
 
+def get_hex_from_calibration(paint_id: str) -> Optional[str]:
+    """Get the approximate hex color from a paint's calibration 100% swatch.
+    Returns None if no calibration or no valid sample.
+    """
+    cal_file = CALIBRATION_DIR / f"{paint_id}.json"
+    if not cal_file.exists():
+        return None
+    try:
+        with open(cal_file, 'r') as f:
+            cal = json.load(f)
+        samples = cal.get('samples', [])
+        if not samples:
+            return None
+        # Use the sample with the highest ratio (100% = pure paint)
+        best = max(samples, key=lambda s: s.get('ratio', 0))
+        rgb = best.get('rgb')
+        if not rgb or len(rgb) < 3:
+            return None
+        r, g, b = max(0, min(255, int(rgb[0]))), max(0, min(255, int(rgb[1]))), max(0, min(255, int(rgb[2])))
+        return "#{:02x}{:02x}{:02x}".format(r, g, b)
+    except Exception:
+        return None
+
+
+def sample_color_from_region(
+    image_path: str,
+    x1: int, y1: int, x2: int, y2: int
+) -> Tuple[List[int], List[float]]:
+    """Sample average color from a rectangular region (user-selected swatch area).
+    
+    Coordinates are normalized to top-left (x1,y1) and bottom-right (x2,y2);
+    order does not matter. Region is clamped to image bounds. All pixels in the
+    region are averaged, then converted to Lab.
+    """
+    from image_processor import apply_exif_orientation
+    
+    image = cv2.imread(image_path)
+    if image is None:
+        raise ValueError(f"Failed to load image: {image_path}")
+    
+    image = apply_exif_orientation(image, image_path)
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    h, w = image.shape[:2]
+    
+    x_min = max(0, min(x1, x2))
+    x_max = min(w, max(x1, x2))
+    y_min = max(0, min(y1, y2))
+    y_max = min(h, max(y1, y2))
+    
+    if x_max <= x_min or y_max <= y_min:
+        raise ValueError("Region has no area")
+    
+    crop = image[y_min:y_max, x_min:x_max]
+    rgb_mean = np.mean(crop.reshape(-1, 3), axis=0).astype(int).tolist()
+    lab = rgb_to_lab([float(c) for c in rgb_mean])
+    return rgb_mean, lab
+
+
+def normalize_calibration_samples(
+    samples: List[Dict],
+    reference_strip: Dict[str, Dict]
+) -> List[Dict]:
+    """Correct paint sample Lab values using the white / mid-grey / black reference strip.
+
+    Uses the reference strip to correct for lighting and camera response so that
+    the stored calibration is consistent across photos. Maps the measured L range
+    to a standard 0–50–100 scale and removes a global colour cast using mid-grey.
+
+    Args:
+        samples: List of {ratio, rgb, lab} from paint swatches (lab will be modified).
+        reference_strip: Dict with reference_white, reference_mid_grey, reference_black
+            each with {"rgb": [...], "lab": [L, a, b]}.
+
+    Returns:
+        New list of samples with same structure but lab values normalized. RGB unchanged.
+    """
+    ref_w = reference_strip.get("reference_white", {}).get("lab")
+    ref_m = reference_strip.get("reference_mid_grey", {}).get("lab")
+    ref_b = reference_strip.get("reference_black", {}).get("lab")
+    if not ref_w or not ref_m or not ref_b:
+        return samples
+
+    L_w, a_m, b_m = ref_w[0], ref_m[1], ref_m[2]
+    L_m, L_b = ref_m[0], ref_b[0]
+
+    # Avoid degenerate cases (wrong order or same values)
+    if L_m <= L_b or L_w <= L_m:
+        return samples
+    denom_low = L_m - L_b
+    denom_high = L_w - L_m
+    if denom_low <= 0 or denom_high <= 0:
+        return samples
+
+    out = []
+    for s in samples:
+        L, a, b = s["lab"][0], s["lab"][1], s["lab"][2]
+        # Piecewise linear L: map [L_b,L_m] -> [0,50], [L_m,L_w] -> [50,100]
+        if L <= L_m:
+            L_corr = 50.0 * (L - L_b) / denom_low
+        else:
+            L_corr = 50.0 + 50.0 * (L - L_m) / denom_high
+        L_corr = max(0.0, min(100.0, L_corr))
+        # Remove global cast by shifting a,b so mid-grey is neutral
+        a_corr = a - a_m
+        b_corr = b - b_m
+        out.append({
+            "ratio": s["ratio"],
+            "rgb": s["rgb"],
+            "lab": [L_corr, a_corr, b_corr],
+        })
+    return out
+
+
 def interpolate_lab_from_calibration(calibration: Dict, ratio: float) -> Optional[List[float]]:
     """Interpolate Lab color for a given ratio from calibration samples."""
     samples = calibration.get('samples', [])

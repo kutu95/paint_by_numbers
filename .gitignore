@@ -50,6 +50,7 @@ Thumbs.db
 
 # Application data
 data/sessions/
+data/mask_cache/
 # Keep paint library and calibration directory structure, but ignore large files
 data/paint/calibration/*.json
 data/paint/calibration/*.jpg
