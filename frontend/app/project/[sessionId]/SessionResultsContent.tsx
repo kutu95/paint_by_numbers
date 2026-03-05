@@ -5,6 +5,7 @@ import Link from 'next/link'
 import type { SessionData } from './types'
 import { API_BASE_URL } from '@/lib/config'
 import { getProjectBySessionId, syncProjectsFromServer } from '@/lib/projects'
+import { VirtualPaintMixer } from './VirtualPaintMixer'
 
 type LayerWithSource = SessionData['layers'][0] & { source_palette_indices?: number[] }
 
@@ -408,6 +409,10 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
               })()}
             </div>
           ))}
+        </div>
+
+        <div className="mb-4">
+          <VirtualPaintMixer sessionData={sessionData} selectedLibraryGroup={selectedLibraryGroup} />
         </div>
 
         <div className="mb-4">

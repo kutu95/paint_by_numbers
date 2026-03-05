@@ -710,6 +710,31 @@ def get_calibration_max_ratio(calibration: Dict) -> float:
     return max(ratios)
 
 
+def _interpolate_lab_from_calibration_batch(calibration: Optional[Dict], ratios: np.ndarray) -> Optional[np.ndarray]:
+    """(N,) ratios -> (N, 3) Lab in CIELAB. Returns None if calibration is None or empty."""
+    if calibration is None:
+        return None
+    samples = calibration.get('samples', [])
+    if not samples:
+        return None
+    sorted_samples = sorted(samples, key=lambda x: x['ratio'])
+    ratios_sorted = np.array([s['ratio'] for s in sorted_samples], dtype=np.float64)
+    labs_sorted = np.array([_coerce_lab_to_cielab(s['lab']) for s in sorted_samples], dtype=np.float64)
+    n = ratios.size
+    if n == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    ratios_flat = np.asarray(ratios, dtype=np.float64).ravel()
+    idx_low = np.searchsorted(ratios_sorted, ratios_flat, side='right') - 1
+    idx_low = np.clip(idx_low, 0, len(ratios_sorted) - 2)
+    idx_high = idx_low + 1
+    r_low = ratios_sorted[idx_low]
+    r_high = ratios_sorted[idx_high]
+    t = (ratios_flat - r_low) / (r_high - r_low + 1e-12)
+    t = np.clip(t, 0.0, 1.0)
+    lab = (1.0 - t)[:, None] * labs_sorted[idx_low] + t[:, None] * labs_sorted[idx_high]
+    return lab
+
+
 def _rgb_to_linear(rgb: List[float]) -> np.ndarray:
     arr = np.array([max(0.0, min(255.0, float(c))) / 255.0 for c in rgb], dtype=np.float64)
     return np.power(arr, 2.2)
@@ -719,6 +744,58 @@ def _linear_to_rgb(linear_rgb: np.ndarray) -> List[float]:
     clamped = np.clip(np.asarray(linear_rgb, dtype=np.float64), 0.0, 1.0)
     srgb = np.power(clamped, 1.0 / 2.2) * 255.0
     return [float(v) for v in np.clip(np.round(srgb), 0, 255)]
+
+
+# ----- Batch variants for multi-pigment search (reduce Python/call overhead) -----
+
+def _rgb_to_linear_batch(rgb: np.ndarray) -> np.ndarray:
+    """(N, 3) RGB 0..255 -> (N, 3) linear."""
+    arr = np.clip(np.asarray(rgb, dtype=np.float64), 0.0, 255.0) / 255.0
+    return np.power(arr, 2.2)
+
+
+def _linear_to_rgb_batch(linear_rgb: np.ndarray) -> np.ndarray:
+    """(N, 3) linear -> (N, 3) RGB 0..255."""
+    clamped = np.clip(np.asarray(linear_rgb, dtype=np.float64), 0.0, 1.0)
+    srgb = np.power(clamped, 1.0 / 2.2) * 255.0
+    return np.clip(np.round(srgb), 0, 255).astype(np.float64)
+
+
+def _opencv_lab_batch_to_cielab(lab: np.ndarray) -> np.ndarray:
+    """(N, 3) OpenCV Lab (L 0..255, a/b 0..255) -> (N, 3) CIELAB."""
+    lab = np.asarray(lab, dtype=np.float64)
+    out = np.empty_like(lab)
+    out[:, 0] = lab[:, 0] * 100.0 / 255.0
+    out[:, 1] = lab[:, 1] - 128.0
+    out[:, 2] = lab[:, 2] - 128.0
+    return out
+
+
+def _rgb_to_lab_batch(rgb: np.ndarray) -> np.ndarray:
+    """(N, 3) RGB 0..255 -> (N, 3) CIELAB. Uses cv2 in batch (uint8 for consistent LAB scale)."""
+    n = rgb.shape[0]
+    if n == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    rgb_u8 = np.clip(np.round(np.asarray(rgb, dtype=np.float64)), 0, 255).astype(np.uint8)
+    rgb_u8 = rgb_u8.reshape((n, 1, 3))
+    lab = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2LAB)
+    lab = lab.reshape((n, 3)).astype(np.float64)
+    return _opencv_lab_batch_to_cielab(lab)
+
+
+def _lab_to_rgb_batch(lab_cielab: np.ndarray) -> np.ndarray:
+    """(N, 3) CIELAB -> (N, 3) RGB 0..255. Input in CIELAB (L 0..100, a/b -128..127)."""
+    n = lab_cielab.shape[0]
+    if n == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    lab = np.asarray(lab_cielab, dtype=np.float32)
+    lab[:, 0] = lab[:, 0] * 255.0 / 100.0
+    lab[:, 1] = lab[:, 1] + 128.0
+    lab[:, 2] = lab[:, 2] + 128.0
+    lab = np.clip(lab, 0, 255).astype(np.uint8)
+    lab = lab.reshape((n, 1, 3))
+    rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+    return rgb.reshape((n, 3)).astype(np.float64)
 
 
 def _predict_mix_lab_from_components(
@@ -771,6 +848,71 @@ def _predict_mix_lab_from_components(
         mixed_linear /= used
     mixed_rgb = _linear_to_rgb(mixed_linear)
     return rgb_to_lab(mixed_rgb)
+
+
+def _predict_mix_lab_batch(
+    paint_calibrations: List[Optional[Dict]],
+    paint_hex_colors: List[Optional[List[int]]],
+    paint_max_ratios: List[float],
+    ratios_batch: np.ndarray,
+    min_white_ratio: float,
+    max_total_pigment: float,
+) -> np.ndarray:
+    """Batch mix prediction. ratios_batch (N, n_pigments). Returns (N, 3) CIELAB; invalid rows are NaN."""
+    ratios_batch = np.asarray(ratios_batch, dtype=np.float64)
+    n, n_pigments = ratios_batch.shape
+    if n == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    total_pigment = ratios_batch.sum(axis=1)
+    white_ratio = 1.0 - total_pigment
+    valid = (
+        (white_ratio >= min_white_ratio)
+        & (total_pigment <= max_total_pigment)
+        & (total_pigment > 1e-12)
+    )
+    max_ratios_arr = np.array(paint_max_ratios, dtype=np.float64)
+    valid &= (ratios_batch <= max_ratios_arr + 1e-9).all(axis=1)
+
+    mixed_linear = np.zeros((n, 3), dtype=np.float64)
+    used = np.zeros((n,), dtype=np.float64)
+
+    for i in range(n_pigments):
+        p = ratios_batch[:, i]
+        share = p / (total_pigment + 1e-12)
+        eff_ratio = np.clip(p / (p + white_ratio + 1e-12), 0.0, 1.0)
+        calibration = paint_calibrations[i] if i < len(paint_calibrations) else None
+        hex_rgb = paint_hex_colors[i] if i < len(paint_hex_colors) else None
+        rgb_i = None
+        if calibration is not None:
+            lab_i = _interpolate_lab_from_calibration_batch(calibration, eff_ratio)
+            if lab_i is not None:
+                rgb_i = _lab_to_rgb_batch(lab_i)
+        elif hex_rgb is not None:
+            paint_lin = _rgb_to_linear([float(c) for c in hex_rgb])
+            white_lin = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+            tint_lin = paint_lin * eff_ratio[:, None] + white_lin * (1.0 - eff_ratio[:, None])
+            rgb_i = _linear_to_rgb_batch(tint_lin)
+        if rgb_i is None:
+            continue
+        linear_i = _rgb_to_linear_batch(rgb_i)
+        mixed_linear += linear_i * share[:, None]
+        used += share
+
+    used = np.maximum(used, 1e-12)
+    mixed_linear /= used[:, None]
+    mixed_rgb = _linear_to_rgb_batch(mixed_linear)
+    mixed_lab = _rgb_to_lab_batch(mixed_rgb)
+    mixed_lab[~valid] = np.nan
+    return mixed_lab
+
+
+def _delta_e_batch(lab_batch: np.ndarray, target_lab: List[float]) -> np.ndarray:
+    """(N, 3) CIELAB batch vs target -> (N,) ΔE. NaN in lab_batch -> inf."""
+    target = np.array(_coerce_lab_to_cielab(target_lab), dtype=np.float64)
+    diff = lab_batch - target
+    out = np.sqrt(np.nansum(diff * diff, axis=1))
+    out[np.any(np.isnan(lab_batch), axis=1)] = np.inf
+    return out
 
 
 def find_best_one_pigment_recipe(
@@ -897,7 +1039,7 @@ def find_best_two_pigment_recipe(
     min_ratio = 0.02
     max_ratio_per_pigment = max_total_pigment - min_ratio
     
-    # Try calibrated first if both exist
+    # Try calibrated first if both exist (batched evaluation)
     cal1 = _load_calibration_cached(paint_id1, library_group)
     cal2 = _load_calibration_cached(paint_id2, library_group)
     if cal1 is not None and cal2 is not None:
@@ -905,94 +1047,90 @@ def find_best_two_pigment_recipe(
         cal2_max = max(0.0, min(1.0, get_calibration_max_ratio(cal2)))
         if cal1_max <= 0.0 or cal2_max <= 0.0:
             return None
-        
-        # Fine grid search for better accuracy
-        best_error = float('inf')
-        best_recipe = None
-        
-        for p1_ratio in np.arange(min_ratio, min(max_ratio_per_pigment, cal1_max) + 0.001, 0.02):
-            for p2_ratio in np.arange(min_ratio, min(max_ratio_per_pigment, cal2_max) + 0.001, 0.02):
-                if p1_ratio + p2_ratio > max_total_pigment:
-                    continue
-                white_ratio = 1.0 - p1_ratio - p2_ratio
-                if white_ratio < min_white_ratio:
-                    continue
 
-                blended_lab = _predict_mix_lab_from_components(
-                    [(cal1, None, p1_ratio), (cal2, None, p2_ratio)],
-                    white_ratio,
-                )
-                if blended_lab is None:
-                    continue
-
-                error = delta_e_lab(target_lab, blended_lab)
-                if error < best_error:
-                    best_error = error
-                    best_recipe = {
-                        'pigment1_id': paint_id1,
-                        'pigment1_ratio': p1_ratio,
-                        'pigment2_id': paint_id2,
-                        'pigment2_ratio': p2_ratio,
-                        'white_ratio': white_ratio,
-                        'error': best_error,
-                        'type': 'two_pigment'
-                    }
-        
-        if best_recipe:
-            return best_recipe
+        p1_axis = np.arange(min_ratio, min(max_ratio_per_pigment, cal1_max) + 0.001, 0.02)
+        p2_axis = np.arange(min_ratio, min(max_ratio_per_pigment, cal2_max) + 0.001, 0.02)
+        p1_grid, p2_grid = np.meshgrid(p1_axis, p2_axis, indexing='ij')
+        p1_flat = p1_grid.ravel()
+        p2_flat = p2_grid.ravel()
+        valid = (p1_flat + p2_flat <= max_total_pigment) & (1.0 - p1_flat - p2_flat >= min_white_ratio)
+        p1_flat = p1_flat[valid]
+        p2_flat = p2_flat[valid]
+        if p1_flat.size == 0:
+            return None
+        ratios_batch = np.column_stack([p1_flat, p2_flat])
+        lab_batch = _predict_mix_lab_batch(
+            [cal1, cal2],
+            [None, None],
+            [cal1_max, cal2_max],
+            ratios_batch,
+            min_white_ratio,
+            max_total_pigment,
+        )
+        errors = _delta_e_batch(lab_batch, target_lab)
+        idx = np.argmin(errors)
+        best_error = float(errors[idx])
+        if not np.isfinite(best_error):
+            return None
+        p1_best = float(p1_flat[idx])
+        p2_best = float(p2_flat[idx])
+        return {
+            'pigment1_id': paint_id1,
+            'pigment1_ratio': p1_best,
+            'pigment2_id': paint_id2,
+            'pigment2_ratio': p2_best,
+            'white_ratio': 1.0 - p1_best - p2_best,
+            'error': best_error,
+            'type': 'two_pigment'
+        }
     
-    # Fallback: Use approximate colors if available (less accurate)
+    # Fallback: Use approximate colors if available (batched)
     if paint1_hex and paint2_hex:
         try:
-            # Convert hex to Lab
             hex1_clean = paint1_hex.lstrip('#')
             rgb1 = [int(hex1_clean[i:i+2], 16) for i in (0, 2, 4)]
-            lab1 = rgb_to_lab(rgb1)
-            
             hex2_clean = paint2_hex.lstrip('#')
             rgb2 = [int(hex2_clean[i:i+2], 16) for i in (0, 2, 4)]
-            lab2 = rgb_to_lab(rgb2)
-            
-            # Fine grid search with approximate colors
-            best_error = float('inf')
-            best_recipe = None
-            
-            for p1_ratio in np.arange(min_ratio, max_ratio_per_pigment + 0.001, 0.02):
-                for p2_ratio in np.arange(min_ratio, max_ratio_per_pigment + 0.001, 0.02):
-                    if p1_ratio + p2_ratio > max_total_pigment:
-                        continue
-                    white_ratio = 1.0 - p1_ratio - p2_ratio
-                    if white_ratio < min_white_ratio:
-                        continue
 
-                    blended_lab = _predict_mix_lab_from_components(
-                        [(None, rgb1, p1_ratio), (None, rgb2, p2_ratio)],
-                        white_ratio,
-                    )
-                    if blended_lab is None:
-                        continue
-
-                    error = delta_e_lab(target_lab, blended_lab)
-                    # Add penalty for uncalibrated
-                    error += 5.0
-                    
-                    if error < best_error:
-                        best_error = error
-                        best_recipe = {
-                            'pigment1_id': paint_id1,
-                            'pigment1_ratio': p1_ratio,
-                            'pigment2_id': paint_id2,
-                            'pigment2_ratio': p2_ratio,
-                            'white_ratio': white_ratio,
-                            'error': best_error,
-                            'type': 'two_pigment',
-                            'uncalibrated': True
-                        }
-            
-            return best_recipe
+            p1_axis = np.arange(min_ratio, max_ratio_per_pigment + 0.001, 0.02)
+            p2_axis = np.arange(min_ratio, max_ratio_per_pigment + 0.001, 0.02)
+            p1_grid, p2_grid = np.meshgrid(p1_axis, p2_axis, indexing='ij')
+            p1_flat = p1_grid.ravel()
+            p2_flat = p2_grid.ravel()
+            valid = (p1_flat + p2_flat <= max_total_pigment) & (1.0 - p1_flat - p2_flat >= min_white_ratio)
+            p1_flat = p1_flat[valid]
+            p2_flat = p2_flat[valid]
+            if p1_flat.size == 0:
+                return None
+            ratios_batch = np.column_stack([p1_flat, p2_flat])
+            lab_batch = _predict_mix_lab_batch(
+                [None, None],
+                [rgb1, rgb2],
+                [1.0, 1.0],
+                ratios_batch,
+                min_white_ratio,
+                max_total_pigment,
+            )
+            errors = _delta_e_batch(lab_batch, target_lab) + 5.0
+            idx = np.argmin(errors)
+            best_error = float(errors[idx])
+            if not np.isfinite(best_error):
+                return None
+            p1_best = float(p1_flat[idx])
+            p2_best = float(p2_flat[idx])
+            return {
+                'pigment1_id': paint_id1,
+                'pigment1_ratio': p1_best,
+                'pigment2_id': paint_id2,
+                'pigment2_ratio': p2_best,
+                'white_ratio': 1.0 - p1_best - p2_best,
+                'error': best_error,
+                'type': 'two_pigment',
+                'uncalibrated': True
+            }
         except Exception:
             return None
-    
+
     return None
 
 
@@ -1061,29 +1199,25 @@ def find_best_multi_pigment_recipe(
         4: 'four_pigment',
     }.get(n_pigments, f'{n_pigments}_pigment')
 
-    def evaluate(ratios: List[float]) -> Optional[float]:
-        white_ratio = 1.0 - sum(ratios)
-        if white_ratio < min_white_ratio:
-            return None
-        if sum(ratios) > max_total_pigment:
-            return None
+    uncalibrated_penalty = (n_pigments - calibrated_count) * (3.0 if n_pigments == 3 else 4.0)
+    _RECIPE_BATCH_SIZE = 2048
 
-        components: List[Tuple[Optional[Dict], Optional[List[int]], float]] = []
-        for calibration, hex_rgb, ratio, max_ratio in zip(paint_calibrations, paint_hex_colors, ratios, paint_max_ratios):
-            if ratio - max_ratio > 1e-9:
-                return None
-            if calibration is None and hex_rgb is None:
-                return None
-            components.append((calibration, hex_rgb, ratio))
-
-        blended_lab = _predict_mix_lab_from_components(components, white_ratio)
-        if blended_lab is None:
-            return None
-
-        error = delta_e_lab(target_lab, blended_lab)
-        if calibrated_count < n_pigments:
-            error += (n_pigments - calibrated_count) * (3.0 if n_pigments == 3 else 4.0)
-        return error
+    def evaluate_batch(ratios_list: List[List[float]]) -> np.ndarray:
+        """List of N ratio vectors -> (N,) errors; inf for invalid."""
+        if not ratios_list:
+            return np.array([], dtype=np.float64)
+        ratios_arr = np.array(ratios_list, dtype=np.float64)
+        lab_batch = _predict_mix_lab_batch(
+            paint_calibrations,
+            paint_hex_colors,
+            paint_max_ratios,
+            ratios_arr,
+            min_white_ratio,
+            max_total_pigment,
+        )
+        errors = _delta_e_batch(lab_batch, target_lab)
+        errors += uncalibrated_penalty
+        return errors
 
     def search(step: float, center: Optional[List[float]] = None, radius: float = 0.0) -> Tuple[Optional[List[float]], float]:
         ratio_axes = []
@@ -1100,15 +1234,26 @@ def find_best_multi_pigment_recipe(
 
         best_ratios = None
         best_error = float('inf')
+        batch_list: List[List[float]] = []
 
-        def walk(depth: int, chosen: List[float], total: float):
+        def flush_batch() -> None:
+            nonlocal best_ratios, best_error
+            if not batch_list:
+                return
+            errors = evaluate_batch(batch_list)
+            for k, err in enumerate(errors):
+                if err < best_error:
+                    best_error = float(err)
+                    best_ratios = batch_list[k].copy()
+            batch_list.clear()
+
+        def walk(depth: int, chosen: List[float], total: float) -> None:
             nonlocal best_ratios, best_error
             remaining = n_pigments - depth
             if depth == n_pigments:
-                error = evaluate(chosen)
-                if error is not None and error < best_error:
-                    best_error = error
-                    best_ratios = chosen.copy()
+                batch_list.append(chosen.copy())
+                if len(batch_list) >= _RECIPE_BATCH_SIZE:
+                    flush_batch()
                 return
 
             min_needed_for_rest = (remaining - 1) * min_ratio
@@ -1126,6 +1271,7 @@ def find_best_multi_pigment_recipe(
                 walk(depth + 1, chosen + [r], total + r)
 
         walk(0, [], 0.0)
+        flush_batch()
         return best_ratios, best_error
 
     mode = (quality_mode or "balanced").lower()
