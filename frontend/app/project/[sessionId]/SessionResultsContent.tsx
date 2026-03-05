@@ -73,6 +73,8 @@ export interface SessionResultsContentProps {
 export function SessionResultsContent({ sessionId, sessionData }: SessionResultsContentProps) {
   const [recipes, setRecipes] = useState<any[]>([])
   const [loadingRecipes, setLoadingRecipes] = useState(false)
+  const [activeRecipeJobId, setActiveRecipeJobId] = useState<string | null>(null)
+  const [cancellingRecipes, setCancellingRecipes] = useState(false)
   const [recipeActionLabel, setRecipeActionLabel] = useState('Generate Recipes')
   const [recipeProgressIndex, setRecipeProgressIndex] = useState<number | null>(null)
   const [recipeProgressTotal, setRecipeProgressTotal] = useState<number>(0)
@@ -208,7 +210,7 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
   const handleGenerateRecipes = async (
     forceRegenerate: boolean = false,
     useAiSecondPass: boolean = false,
-    qualityMode: 'balanced' | 'high' | 'fast' = 'balanced',
+    qualityMode: 'balanced' | 'high' | 'fast' | 'server_fast' = 'balanced',
     paletteOverride: Array<{ index: number; hex: string; target_grams: number | null }> | null = null,
     mergeIntoExisting: boolean = false,
     actionLabel: string = 'Generate Recipes',
@@ -230,10 +232,8 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
     }
 
     setLoadingRecipes(true)
+    setCancellingRecipes(false)
     setRecipeActionLabel(actionLabel)
-    if (!mergeIntoExisting) {
-      setRecipes([])
-    }
     setRecipeProgressIndex(0)
     setRecipeProgressTotal(palettePayload.length)
     setRecipeProgressStatus('starting')
@@ -255,6 +255,7 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
       }
       const { job_id } = await startRes.json()
       if (!job_id) throw new Error('No job_id returned')
+      setActiveRecipeJobId(job_id)
 
       setRecipeProgressStatus('running')
       const pollIntervalMs = 2000
@@ -269,11 +270,7 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
           setRecipeProgressTotal(Number(job.total))
         }
         if (Array.isArray(job.partial_recipes) && job.partial_recipes.length > 0) {
-          if (mergeIntoExisting) {
-            setRecipes((prev) => mergeRecipesByPaletteIndex(prev, job.partial_recipes))
-          } else {
-            setRecipes(job.partial_recipes)
-          }
+          setRecipes((prev) => mergeRecipesByPaletteIndex(prev, job.partial_recipes))
         }
         if (typeof job.completed === 'number') {
           const completed = Math.max(0, Math.min(sessionData.palette.length, Number(job.completed)))
@@ -285,12 +282,15 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
           setRecipeProgressStatus(job.status)
         }
         if (job.status === 'completed' && Array.isArray(job.recipes)) {
-          if (mergeIntoExisting) {
-            setRecipes((prev) => mergeRecipesByPaletteIndex(prev, job.recipes))
-          } else {
-            setRecipes(job.recipes)
-          }
+          setRecipes((prev) => mergeRecipesByPaletteIndex(prev, job.recipes))
           setRecipeProgressStatus('completed')
+          break
+        }
+        if (job.status === 'cancelled') {
+          if (Array.isArray(job.recipes) && job.recipes.length > 0) {
+            setRecipes((prev) => mergeRecipesByPaletteIndex(prev, job.recipes))
+          }
+          setRecipeProgressStatus('idle')
           break
         }
         if (job.status === 'failed') {
@@ -302,6 +302,8 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
       alert(e instanceof Error ? e.message : 'Failed to generate recipes')
     } finally {
       setLoadingRecipes(false)
+      setCancellingRecipes(false)
+      setActiveRecipeJobId(null)
       setRecipeActionLabel('Generate Recipes')
       setRecipeProgressIndex(null)
       setRecipeProgressTotal(0)
@@ -341,6 +343,20 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
       true,
       `Refining weak colours (${palettePayload.length})`,
     )
+  }
+
+  const handleCancelRecipeGeneration = async () => {
+    if (!activeRecipeJobId) return
+    setCancellingRecipes(true)
+    try {
+      await fetch(`${API_BASE_URL}/api/paint/recipes/jobs/${encodeURIComponent(activeRecipeJobId)}/cancel`, {
+        method: 'POST',
+      })
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setCancellingRecipes(false)
+    }
   }
 
   useEffect(() => {
@@ -416,21 +432,21 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
         <div className="flex flex-col gap-2 mb-4">
           <div className="flex gap-2">
             <button
-              onClick={() => handleGenerateRecipes(false)}
+              onClick={() => handleGenerateRecipes(false, false, 'balanced')}
               disabled={loadingRecipes}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50"
             >
               {loadingRecipes ? 'Generating…' : 'Generate Recipes'}
             </button>
             <button
-              onClick={() => handleGenerateRecipes(true)}
+              onClick={() => handleGenerateRecipes(true, false, 'balanced')}
               disabled={loadingRecipes}
               className="px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded disabled:opacity-50"
             >
               Force Regenerate
             </button>
             <button
-              onClick={() => handleGenerateRecipes(true, true)}
+              onClick={() => handleGenerateRecipes(true, true, 'balanced')}
               disabled={loadingRecipes}
               className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-50"
             >
@@ -443,6 +459,15 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
             >
               Refine Weak Colours
             </button>
+            {loadingRecipes && activeRecipeJobId && (
+              <button
+                onClick={handleCancelRecipeGeneration}
+                disabled={cancellingRecipes}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded disabled:opacity-50"
+              >
+                {cancellingRecipes ? 'Cancelling…' : 'Cancel'}
+              </button>
+            )}
           </div>
           {loadingRecipes && (
             <div className="flex items-center gap-2 text-sm text-gray-300">
@@ -453,6 +478,8 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
               <span>
                 {recipeProgressStatus === 'starting'
                   ? `${recipeActionLabel}: starting…`
+                  : recipeProgressStatus === 'cancelled'
+                    ? 'Cancelled.'
                   : recipeProgressStatus === 'running'
                     ? `${recipeActionLabel}… (${Math.max(0, Math.min(recipeProgressTotal || sessionData.palette.length, recipeProgressIndex ?? 0))}/${recipeProgressTotal || sessionData.palette.length})`
                     : recipeProgressStatus === 'completed'

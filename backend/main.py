@@ -23,7 +23,7 @@ from paint_manager import (
     load_library, save_library, slugify, atomic_write,
     sample_color_from_image, sample_color_from_region, normalize_calibration_samples,
     get_hex_from_calibration, calibration_file_for, migrate_global_calibrations_to_group_scope,
-    rgb_to_lab, lab_to_rgb, delta_e_lab, CALIBRATION_DIR, PAINT_DIR,
+    rgb_to_lab, lab_to_rgb, delta_e_lab, interpolate_lab_from_calibration, CALIBRATION_DIR, PAINT_DIR,
     list_library_groups, get_library_info,
     generate_recipes_for_palette, load_recipe_cache, save_recipe_cache
 )
@@ -1419,6 +1419,15 @@ async def _compute_recipes_async(
                 job["current_index"] = int(current_index)
                 job["message"] = message
 
+    def _is_cancel_requested() -> bool:
+        if not progress_key:
+            return False
+        with RECIPE_JOBS_LOCK:
+            job = RECIPE_JOBS.get(progress_key)
+            if job is None:
+                return False
+            return bool(job.get("cancel_requested"))
+
     _set_progress(0, len(palette_list), "starting", 0, "Preparing recipe generation")
 
     if not paints:
@@ -1554,7 +1563,7 @@ async def _compute_recipes_async(
         return out
 
     def _predict_mix_hex(components: list[tuple[str, float]]) -> Optional[str]:
-        """Approximate expected mixed color from weighted paint hex values."""
+        """Predict expected mixed color using calibration tint curves + white-aware dilution."""
         merged: dict[str, float] = {}
         for pid, ratio in components:
             if ratio is None:
@@ -1575,31 +1584,70 @@ async def _compute_recipes_async(
         if total <= 0:
             return None
 
-        lr = lg = lb = 0.0
-        used = 0.0
+        def _to_linear(rgb: list[float]) -> np.ndarray:
+            arr = np.array([max(0.0, min(255.0, float(c))) / 255.0 for c in rgb], dtype=np.float64)
+            return np.power(arr, 2.2)
+
+        def _to_srgb(linear_rgb: np.ndarray) -> list[int]:
+            clamped = np.clip(np.asarray(linear_rgb, dtype=np.float64), 0.0, 1.0)
+            srgb = np.power(clamped, 1.0 / 2.2) * 255.0
+            return [int(max(0, min(255, round(v)))) for v in srgb.tolist()]
+
+        white_ratio = 0.0
+        pigment_ratios: dict[str, float] = {}
         for paint_id, ratio in merged.items():
             paint = paints_by_id.get(paint_id, {})
-            rgb = _hex_to_rgb(str(paint.get("hex_approx", "")))
-            if rgb is None:
+            if _is_white_paint(paint):
+                white_ratio += ratio
+            else:
+                pigment_ratios[paint_id] = pigment_ratios.get(paint_id, 0.0) + ratio
+
+        total_pigment = sum(pigment_ratios.values())
+        if total_pigment <= 1e-9:
+            # Essentially white-only mix.
+            return "#FFFFFF"
+
+        mixed_linear = np.zeros(3, dtype=np.float64)
+        used_share = 0.0
+        for paint_id, pigment_ratio in pigment_ratios.items():
+            paint = paints_by_id.get(paint_id, {})
+            if pigment_ratio <= 0:
                 continue
-            w = ratio / total
-            # Mix in linear RGB space for a more realistic expected color.
-            lr += ((rgb[0] / 255.0) ** 2.2) * w
-            lg += ((rgb[1] / 255.0) ** 2.2) * w
-            lb += ((rgb[2] / 255.0) ** 2.2) * w
-            used += w
+            share = pigment_ratio / total_pigment
+            eff_ratio = pigment_ratio / (pigment_ratio + white_ratio) if (pigment_ratio + white_ratio) > 0 else 0.0
+            eff_ratio = max(0.0, min(1.0, eff_ratio))
 
-        if used <= 0:
+            predicted_rgb: Optional[list[float]] = None
+            cal_file = calibration_file_for(library_group, paint_id)
+            if cal_file.exists():
+                try:
+                    with open(cal_file, "r") as f:
+                        calibration = json.load(f)
+                    if isinstance(calibration, dict):
+                        predicted_lab = interpolate_lab_from_calibration(calibration, eff_ratio)
+                        if predicted_lab is not None:
+                            predicted_rgb = [float(c) for c in lab_to_rgb(predicted_lab)]
+                except Exception:
+                    predicted_rgb = None
+
+            if predicted_rgb is None:
+                base_rgb = _hex_to_rgb(str(paint.get("hex_approx", "")))
+                if base_rgb is None:
+                    continue
+                # Fallback for uncalibrated paint: tint toward white at effective ratio.
+                base_lin = _to_linear([float(c) for c in base_rgb])
+                white_lin = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+                tinted = (base_lin * eff_ratio) + (white_lin * (1.0 - eff_ratio))
+                predicted_rgb = [float(c) for c in _to_srgb(tinted)]
+
+            mixed_linear += _to_linear(predicted_rgb) * share
+            used_share += share
+
+        if used_share <= 0:
             return None
-
-        if used < 0.999:
-            lr /= used
-            lg /= used
-            lb /= used
-
-        r8 = max(0, min(255, int(round((max(0.0, min(1.0, lr)) ** (1.0 / 2.2)) * 255.0))))
-        g8 = max(0, min(255, int(round((max(0.0, min(1.0, lg)) ** (1.0 / 2.2)) * 255.0))))
-        b8 = max(0, min(255, int(round((max(0.0, min(1.0, lb)) ** (1.0 / 2.2)) * 255.0))))
+        if used_share < 0.999:
+            mixed_linear /= used_share
+        r8, g8, b8 = _to_srgb(mixed_linear)
         return "#{:02X}{:02X}{:02X}".format(r8, g8, b8)
 
     def _recipe_to_structured(
@@ -1782,8 +1830,6 @@ async def _compute_recipes_async(
     def _ensure_predicted_hex(recipe_obj: object) -> object:
         if not isinstance(recipe_obj, dict):
             return recipe_obj
-        if recipe_obj.get("predicted_hex"):
-            return recipe_obj
         ingredients = recipe_obj.get("ingredients")
         if not isinstance(ingredients, list):
             return recipe_obj
@@ -1870,9 +1916,14 @@ async def _compute_recipes_async(
                 recipe_cache = {}
             phase_cache_load_ms = (time.perf_counter() - cache_load_started_at) * 1000.0
     
+        cancelled = False
+
         # Normalize and load from cache where valid.
         cache_lookup_started_at = time.perf_counter()
         for color in palette_list:
+            if _is_cancel_requested():
+                cancelled = True
+                break
             idx = color.get("index")
             target_hex = _normalize_target_hex(color)
             if idx is None or not target_hex:
@@ -1913,10 +1964,13 @@ async def _compute_recipes_async(
             missing_for_solver.append(color)
         phase_cache_lookup_ms = (time.perf_counter() - cache_lookup_started_at) * 1000.0
     
-        if missing_for_solver:
+        if missing_for_solver and not cancelled:
             solver_palette = []
             missing_meta: dict[int, tuple[str, Optional[float]]] = {}
             for color in missing_for_solver:
+                if _is_cancel_requested():
+                    cancelled = True
+                    break
                 if color.get("__target_rgb") is None:
                     safe_idx = _safe_index(color.get("index"))
                     recipes_by_index[safe_idx] = {
@@ -1935,60 +1989,67 @@ async def _compute_recipes_async(
                     "rgb": color["__target_rgb"],
                 })
     
-            solver_started_at = time.perf_counter()
-            try:
-                def _solver_progress(done_missing: int, total_missing: int, status: str):
-                    overall_done = completed_prefix + max(0, int(done_missing))
-                    current_idx = min(max(0, overall_done), max(0, len(palette_list) - 1))
-                    _set_progress(overall_done, len(palette_list), "running" if status != "completed" else "finalizing", current_idx)
+            if not cancelled:
+                solver_started_at = time.perf_counter()
+                try:
+                    def _solver_progress(done_missing: int, total_missing: int, status: str):
+                        overall_done = completed_prefix + max(0, int(done_missing))
+                        current_idx = min(max(0, overall_done), max(0, len(palette_list) - 1))
+                        _set_progress(overall_done, len(palette_list), "running" if status != "completed" else "finalizing", current_idx)
 
-                def _solver_recipe_cb(generated_item: dict):
-                    idx = _safe_index(generated_item.get("palette_index"))
-                    meta = missing_meta.get(idx)
-                    if idx < 0 or meta is None:
-                        return
-                    target_hex, target_grams = meta
-                    if not target_hex:
-                        return
-                    if not generated_item.get("recipe"):
-                        partial_item = {
+                    def _solver_recipe_cb(generated_item: dict):
+                        idx = _safe_index(generated_item.get("palette_index"))
+                        meta = missing_meta.get(idx)
+                        if idx < 0 or meta is None:
+                            return
+                        target_hex, target_grams = meta
+                        if not target_hex:
+                            return
+                        if not generated_item.get("recipe"):
+                            partial_item = {
+                                "palette_index": idx,
+                                "recipe": None,
+                                "error": generated_item.get("error", "Recipe generation failed")
+                            }
+                        else:
+                            partial_item = {
+                                "palette_index": idx,
+                                "recipe": _recipe_to_structured(target_hex, generated_item, target_grams),
+                                "type": "deterministic",
+                            }
+                        _publish_partial_item(partial_item)
+
+                    generated_list = await asyncio.to_thread(
+                        generate_recipes_for_palette,
+                        "runtime",
+                        solver_palette,
+                        library_group,
+                        _solver_progress,
+                        _solver_recipe_cb,
+                        _is_cancel_requested,
+                        quality_mode,
+                    )
+                except Exception as e:
+                    logger.exception("Recipe solver failed for library_group=%s: %s", library_group, e)
+                    generated_list = []
+                    for color in missing_for_solver:
+                        idx = _safe_index(color.get("index", -1))
+                        recipes_by_index[idx] = {
                             "palette_index": idx,
                             "recipe": None,
-                            "error": generated_item.get("error", "Recipe generation failed")
+                            "error": f"Recipe solver crashed for this color: {e}"
                         }
-                    else:
-                        partial_item = {
-                            "palette_index": idx,
-                            "recipe": _recipe_to_structured(target_hex, generated_item, target_grams),
-                            "type": "deterministic",
-                        }
-                    _publish_partial_item(partial_item)
-
-                generated_list = await asyncio.to_thread(
-                    generate_recipes_for_palette,
-                    "runtime",
-                    solver_palette,
-                    library_group,
-                    _solver_progress,
-                    _solver_recipe_cb,
-                    quality_mode,
-                )
-            except Exception as e:
-                logger.exception("Recipe solver failed for library_group=%s: %s", library_group, e)
+                        _publish_partial_item(recipes_by_index[idx])
+                phase_solver_ms = (time.perf_counter() - solver_started_at) * 1000.0
+            else:
                 generated_list = []
-                for color in missing_for_solver:
-                    idx = _safe_index(color.get("index", -1))
-                    recipes_by_index[idx] = {
-                        "palette_index": idx,
-                        "recipe": None,
-                        "error": f"Recipe solver crashed for this color: {e}"
-                    }
-                    _publish_partial_item(recipes_by_index[idx])
-            phase_solver_ms = (time.perf_counter() - solver_started_at) * 1000.0
             generated_by_index = {int(r.get("palette_index")): r for r in generated_list if r.get("palette_index") is not None}
     
             postprocess_started_at = time.perf_counter()
             for color in missing_for_solver:
+                if _is_cancel_requested():
+                    cancelled = True
+                    break
                 idx = _safe_index(color.get("index"))
                 target_hex = color["__target_hex"]
                 target_grams = color["__target_grams"]
@@ -2035,17 +2096,26 @@ async def _compute_recipes_async(
             phase_cache_persist_ms = (time.perf_counter() - cache_persist_started_at) * 1000.0
     
         ordered = []
-        for color in palette_list:
-            idx = _safe_index(color.get("index", -1))
-            item = recipes_by_index.get(idx, {
-                "palette_index": idx,
-                "recipe": None,
-                "error": "Recipe generation failed: missing result"
-            })
-            if isinstance(item, dict) and isinstance(item.get("recipe"), dict):
-                item = dict(item)
-                item["recipe"] = _apply_total_grams(item.get("recipe"), color.get("__target_grams"))
-            ordered.append(item)
+        if cancelled:
+            for idx in sorted(recipes_by_index.keys()):
+                color = next((c for c in palette_list if _safe_index(c.get("index", -1)) == idx), None)
+                item = recipes_by_index[idx]
+                if color is not None and isinstance(item, dict) and isinstance(item.get("recipe"), dict):
+                    item = dict(item)
+                    item["recipe"] = _apply_total_grams(item.get("recipe"), color.get("__target_grams"))
+                ordered.append(item)
+        else:
+            for color in palette_list:
+                idx = _safe_index(color.get("index", -1))
+                item = recipes_by_index.get(idx, {
+                    "palette_index": idx,
+                    "recipe": None,
+                    "error": "Recipe generation failed: missing result"
+                })
+                if isinstance(item, dict) and isinstance(item.get("recipe"), dict):
+                    item = dict(item)
+                    item["recipe"] = _apply_total_grams(item.get("recipe"), color.get("__target_grams"))
+                ordered.append(item)
     
         if use_ai:
             ai_started_at = time.perf_counter()
@@ -2108,7 +2178,7 @@ async def _compute_recipes_async(
             phase_ai_refine_ms,
             total_ms,
         )
-        return {"recipes": ordered}
+        return {"recipes": ordered, "cancelled": cancelled}
     except Exception as e:
         logger.exception("Recipe generation failed: %s", e)
         return {
@@ -2176,6 +2246,7 @@ async def start_recipe_job(
             "completed": 0,
             "current_index": 0,
             "message": "Queued",
+            "cancel_requested": False,
             "partial_recipes": [],
         }
     asyncio.create_task(_run_recipe_job(job_id, palette_list, library_group, force, use_ai, quality_mode))
@@ -2192,6 +2263,10 @@ async def _run_recipe_job(
 ):
     """Background task: run recipe computation and store result in RECIPE_JOBS[job_id]."""
     try:
+        with RECIPE_JOBS_LOCK:
+            if job_id in RECIPE_JOBS:
+                RECIPE_JOBS[job_id]["status"] = "running"
+                RECIPE_JOBS[job_id]["message"] = "Running"
         result = await _compute_recipes_async(
             palette_list,
             library_group,
@@ -2202,7 +2277,8 @@ async def _run_recipe_job(
         )
         with RECIPE_JOBS_LOCK:
             if job_id in RECIPE_JOBS:
-                RECIPE_JOBS[job_id]["status"] = "completed"
+                cancelled = bool(result.get("cancelled")) or bool(RECIPE_JOBS[job_id].get("cancel_requested"))
+                RECIPE_JOBS[job_id]["status"] = "cancelled" if cancelled else "completed"
                 RECIPE_JOBS[job_id]["result"] = result
                 RECIPE_JOBS[job_id]["completed_at"] = datetime.now().isoformat()
     except Exception as e:
@@ -2237,13 +2313,27 @@ async def get_recipe_job(job_id: str):
         out["current_index"] = int(progress.get("current_index", out["current_index"]) or out["current_index"])
         out["message"] = progress.get("message", out["message"])
         out["progress_status"] = progress.get("status")
-    if job.get("status") == "completed" and "result" in job:
+    if job.get("status") in ("completed", "cancelled") and "result" in job:
         out["recipes"] = job["result"].get("recipes", [])
     if isinstance(job.get("partial_recipes"), list):
         out["partial_recipes"] = job["partial_recipes"]
     if job.get("status") == "failed" and "error" in job:
         out["error"] = job["error"]
     return out
+
+
+@app.post("/api/paint/recipes/jobs/{job_id}/cancel")
+async def cancel_recipe_job(job_id: str):
+    """Request cancellation of a running recipe job."""
+    with RECIPE_JOBS_LOCK:
+        job = RECIPE_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found or expired")
+        if job.get("status") in ("completed", "failed", "cancelled"):
+            return {"job_id": job_id, "status": job.get("status"), "cancel_requested": False}
+        job["cancel_requested"] = True
+        job["message"] = "Cancellation requested"
+    return {"job_id": job_id, "status": "cancelling", "cancel_requested": True}
 
 
 @app.get("/api/paint/recipes/progress/{progress_id}")

@@ -1133,6 +1133,10 @@ def find_best_multi_pigment_recipe(
         coarse_step = 0.02
         fine_step = 0.008
         fine_radius = 0.035
+    elif mode == "server_fast":
+        coarse_step = 0.035 if n_pigments >= 3 else 0.025
+        fine_step = 0.018
+        fine_radius = 0.02
     elif mode == "fast":
         coarse_step = 0.03 if n_pigments >= 3 else 0.02
         fine_step = 0.015
@@ -1169,6 +1173,7 @@ def generate_recipes_for_palette(
     library_group: str = "default",
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
     recipe_cb: Optional[Callable[[Dict], None]] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
     quality_mode: str = "balanced",
 ) -> List[Dict]:
     """Generate paint mixing recipes for each palette color.
@@ -1276,6 +1281,10 @@ def generate_recipes_for_palette(
         candidate_paint_limit = 8
         max_pigments_cfg = 4
         early_exit_delta = 0.1
+    elif mode == "server_fast":
+        candidate_paint_limit = 5
+        max_pigments_cfg = 3
+        early_exit_delta = 0.45
     elif mode == "fast":
         candidate_paint_limit = 5
         max_pigments_cfg = 3
@@ -1297,6 +1306,13 @@ def generate_recipes_for_palette(
 
     total_colors = len(palette)
     for i, color in enumerate(palette):
+        if cancel_cb and cancel_cb():
+            if progress_cb:
+                try:
+                    progress_cb(i, total_colors, "cancelled")
+                except Exception:
+                    pass
+            return recipes
         if progress_cb:
             try:
                 progress_cb(i, total_colors, "running")
@@ -1369,9 +1385,23 @@ def generate_recipes_for_palette(
 
             max_pigments = min(local_max_pigments, len(multi_search_paints))
             for pigment_count in range(2, max_pigments + 1):
+                if cancel_cb and cancel_cb():
+                    if progress_cb:
+                        try:
+                            progress_cb(i, total_colors, "cancelled")
+                        except Exception:
+                            pass
+                    return recipes
                 if best_multi_error <= local_early_exit:
                     break
                 for combo in combinations(multi_search_paints, pigment_count):
+                    if cancel_cb and cancel_cb():
+                        if progress_cb:
+                            try:
+                                progress_cb(i, total_colors, "cancelled")
+                            except Exception:
+                                pass
+                        return recipes
                     paint_ids = [p['id'] for p in combo]
                     paint_hexes = [p.get('hex_approx', '') for p in combo]
 
