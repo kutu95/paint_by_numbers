@@ -76,7 +76,9 @@ export interface SessionResultsContentProps {
 export function SessionResultsContent({ sessionId, sessionData }: SessionResultsContentProps) {
   const [recipes, setRecipes] = useState<any[]>([])
   const [loadingRecipes, setLoadingRecipes] = useState(false)
+  const [recipeActionLabel, setRecipeActionLabel] = useState('Generate Recipes')
   const [recipeProgressIndex, setRecipeProgressIndex] = useState<number | null>(null)
+  const [recipeProgressTotal, setRecipeProgressTotal] = useState<number>(0)
   const [recipeProgressStatus, setRecipeProgressStatus] = useState<string>('idle')
   const [selectedColor, setSelectedColor] = useState<{ index: number; hex: string; coverage: number } | null>(null)
   const [selectedLayerColor, setSelectedLayerColor] = useState<{
@@ -105,6 +107,41 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
     const areaCm2 = project.canvasWidthCm * project.canvasHeightCm
     if (areaCm2 <= 0) return null
     return (paletteColor.coverage / 100) * areaCm2 * libraryCoverageGPerCm2 * recipeMargin
+  }
+
+  function mergeRecipesByPaletteIndex(base: any[], updates: any[]): any[] {
+    const byIndex = new Map<number, any>()
+    for (const item of base || []) {
+      const idx = Number(item?.palette_index)
+      if (Number.isFinite(idx)) byIndex.set(idx, item)
+    }
+    for (const item of updates || []) {
+      const idx = Number(item?.palette_index)
+      if (Number.isFinite(idx)) byIndex.set(idx, item)
+    }
+    return Array.from(byIndex.values()).sort((a, b) => Number(a.palette_index) - Number(b.palette_index))
+  }
+
+  function getMissingWeightInputs(): string[] {
+    const missing: string[] = []
+
+    const width = project?.canvasWidthCm ?? 0
+    const height = project?.canvasHeightCm ?? 0
+    if (!(width > 0 && height > 0)) {
+      missing.push('Canvas size')
+    }
+
+    const marginRaw = typeof window !== 'undefined' ? localStorage.getItem('layerpainter_recipe_margin') : null
+    const margin = marginRaw != null ? Number(marginRaw) : NaN
+    if (!(margin > 0)) {
+      missing.push('Paint mix margin')
+    }
+
+    if (!(libraryCoverageGPerCm2 != null && libraryCoverageGPerCm2 > 0)) {
+      missing.push('Library coverage (g/cm²)')
+    }
+
+    return missing
   }
 
   useEffect(() => {
@@ -154,20 +191,44 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
     void load()
   }, [sessionId, project?.libraryGroup])
 
-  const handleGenerateRecipes = async (forceRegenerate: boolean = false, useAiSecondPass: boolean = false) => {
+  const handleGenerateRecipes = async (
+    forceRegenerate: boolean = false,
+    useAiSecondPass: boolean = false,
+    qualityMode: 'balanced' | 'high' | 'fast' = 'balanced',
+    paletteOverride: Array<{ index: number; hex: string; target_grams: number | null }> | null = null,
+    mergeIntoExisting: boolean = false,
+    actionLabel: string = 'Generate Recipes',
+  ) => {
+    const palettePayload = paletteOverride ?? sessionData.palette.map((c) => ({
+      index: c.index,
+      hex: c.hex,
+      target_grams: getTotalWeightGrams(c.index),
+    }))
+
+    const missing = getMissingWeightInputs()
+    if (missing.length > 0) {
+      const message =
+        `Missing info for absolute weight calculation:\n\n` +
+        `${missing.map((item) => `- ${item}`).join('\n')}\n\n` +
+        `Continue anyway?`
+      const shouldContinue = window.confirm(message)
+      if (!shouldContinue) return
+    }
+
     setLoadingRecipes(true)
+    setRecipeActionLabel(actionLabel)
+    if (!mergeIntoExisting) {
+      setRecipes([])
+    }
     setRecipeProgressIndex(0)
+    setRecipeProgressTotal(palettePayload.length)
     setRecipeProgressStatus('starting')
     try {
-      const palettePayload = sessionData.palette.map((c) => ({
-        index: c.index,
-        hex: c.hex,
-        target_grams: getTotalWeightGrams(c.index),
-      }))
       const formData = new FormData()
       formData.append('palette', JSON.stringify(palettePayload))
       formData.append('library_group', selectedLibraryGroup)
       formData.append('use_ai_second_pass', useAiSecondPass ? 'true' : 'false')
+      formData.append('quality_mode', qualityMode)
       if (forceRegenerate) formData.append('force_regenerate', 'true')
 
       const startRes = await fetch(`${API_BASE_URL}/api/paint/recipes/jobs`, {
@@ -190,8 +251,31 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
         })
         if (!pollRes.ok) throw new Error(`Job poll failed: HTTP ${pollRes.status}`)
         const job = await pollRes.json()
+        if (typeof job.total === 'number' && Number(job.total) > 0) {
+          setRecipeProgressTotal(Number(job.total))
+        }
+        if (Array.isArray(job.partial_recipes) && job.partial_recipes.length > 0) {
+          if (mergeIntoExisting) {
+            setRecipes((prev) => mergeRecipesByPaletteIndex(prev, job.partial_recipes))
+          } else {
+            setRecipes(job.partial_recipes)
+          }
+        }
+        if (typeof job.completed === 'number') {
+          const completed = Math.max(0, Math.min(sessionData.palette.length, Number(job.completed)))
+          setRecipeProgressIndex(completed)
+        }
+        if (typeof job.progress_status === 'string') {
+          setRecipeProgressStatus(job.progress_status)
+        } else if (typeof job.status === 'string') {
+          setRecipeProgressStatus(job.status)
+        }
         if (job.status === 'completed' && Array.isArray(job.recipes)) {
-          setRecipes(job.recipes)
+          if (mergeIntoExisting) {
+            setRecipes((prev) => mergeRecipesByPaletteIndex(prev, job.recipes))
+          } else {
+            setRecipes(job.recipes)
+          }
           setRecipeProgressStatus('completed')
           break
         }
@@ -204,9 +288,45 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
       alert(e instanceof Error ? e.message : 'Failed to generate recipes')
     } finally {
       setLoadingRecipes(false)
+      setRecipeActionLabel('Generate Recipes')
       setRecipeProgressIndex(null)
+      setRecipeProgressTotal(0)
       setRecipeProgressStatus('idle')
     }
+  }
+
+  const handleRefineWeakColours = async () => {
+    if (recipes.length === 0) {
+      alert('Generate recipes first, then refine weak colours.')
+      return
+    }
+    const threshold = 2.5
+    const weakIndices = recipes
+      .filter((r: any) => r?.recipe && typeof r.recipe.error === 'number' && Number(r.recipe.error) > threshold)
+      .map((r: any) => Number(r.palette_index))
+      .filter((idx: number) => Number.isFinite(idx))
+
+    if (weakIndices.length === 0) {
+      alert(`No weak colours found (all recipes are ≤ ${threshold.toFixed(1)} ΔE).`)
+      return
+    }
+
+    const palettePayload = sessionData.palette
+      .filter((c) => weakIndices.includes(c.index))
+      .map((c) => ({
+        index: c.index,
+        hex: c.hex,
+        target_grams: getTotalWeightGrams(c.index),
+      }))
+
+    await handleGenerateRecipes(
+      true,
+      false,
+      'high',
+      palettePayload,
+      true,
+      `Refining weak colours (${palettePayload.length})`,
+    )
   }
 
   useEffect(() => {
@@ -302,6 +422,13 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
             >
               Refine with AI
             </button>
+            <button
+              onClick={handleRefineWeakColours}
+              disabled={loadingRecipes || recipes.length === 0}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded disabled:opacity-50"
+            >
+              Refine Weak Colours
+            </button>
           </div>
           {loadingRecipes && (
             <div className="flex items-center gap-2 text-sm text-gray-300">
@@ -311,9 +438,9 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
               />
               <span>
                 {recipeProgressStatus === 'starting'
-                  ? `Starting recipe job for ${sessionData.palette.length} colour${sessionData.palette.length === 1 ? '' : 's'}…`
+                  ? `${recipeActionLabel}: starting…`
                   : recipeProgressStatus === 'running'
-                    ? 'Generating recipes… (this may take a few minutes)'
+                    ? `${recipeActionLabel}… (${Math.max(0, Math.min(recipeProgressTotal || sessionData.palette.length, recipeProgressIndex ?? 0))}/${recipeProgressTotal || sessionData.palette.length})`
                     : recipeProgressStatus === 'completed'
                       ? 'Done.'
                       : `Preparing…`}

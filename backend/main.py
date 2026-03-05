@@ -1187,6 +1187,7 @@ async def _compute_recipes_async(
     force: bool,
     use_ai: bool,
     progress_key: Optional[str] = None,
+    quality_mode: str = "balanced",
 ) -> dict:
     """Run recipe computation; returns {"recipes": [...]}. Used by sync endpoint and job worker."""
     library = load_library(library_group)
@@ -1204,6 +1205,13 @@ async def _compute_recipes_async(
                 "message": message,
                 "updated_at": datetime.now().isoformat(),
             }
+        with RECIPE_JOBS_LOCK:
+            job = RECIPE_JOBS.get(progress_key)
+            if job is not None:
+                job["completed"] = max(0, int(completed))
+                job["total"] = max(0, int(total))
+                job["current_index"] = int(current_index)
+                job["message"] = message
 
     _set_progress(0, len(palette_list), "starting", 0, "Preparing recipe generation")
 
@@ -1249,6 +1257,21 @@ async def _compute_recipes_async(
             return int(value)
         except Exception:
             return -1
+
+    partial_by_index: dict[int, dict] = {}
+
+    def _publish_partial_item(item: dict) -> None:
+        if not progress_key:
+            return
+        idx = _safe_index(item.get("palette_index"))
+        if idx < 0:
+            return
+        partial_by_index[idx] = item
+        with RECIPE_JOBS_LOCK:
+            job = RECIPE_JOBS.get(progress_key)
+            if job is None:
+                return
+            job["partial_recipes"] = [partial_by_index[k] for k in sorted(partial_by_index.keys())]
 
     def _is_white_paint(paint: dict) -> bool:
         pid = str(paint.get("id", "")).lower()
@@ -1618,6 +1641,7 @@ async def _compute_recipes_async(
                         "recipe": cached_recipe,
                         "type": "deterministic"
                     }
+                    _publish_partial_item(recipes_by_index[safe_idx])
                     completed_prefix += 1
                     _set_progress(completed_prefix, len(palette_list), "running", min(completed_prefix, len(palette_list) - 1))
                     continue
@@ -1625,6 +1649,7 @@ async def _compute_recipes_async(
     
         if missing_for_solver:
             solver_palette = []
+            missing_meta: dict[int, tuple[str, Optional[float]]] = {}
             for color in missing_for_solver:
                 if color.get("__target_rgb") is None:
                     safe_idx = _safe_index(color.get("index"))
@@ -1633,11 +1658,14 @@ async def _compute_recipes_async(
                         "recipe": None,
                         "error": "Color format error: invalid RGB"
                     }
+                    _publish_partial_item(recipes_by_index[safe_idx])
                     completed_prefix += 1
                     _set_progress(completed_prefix, len(palette_list), "running", min(completed_prefix, len(palette_list) - 1))
                     continue
+                safe_idx = _safe_index(color.get("index"))
+                missing_meta[safe_idx] = (color.get("__target_hex"), color.get("__target_grams"))
                 solver_palette.append({
-                    "index": _safe_index(color.get("index")),
+                    "index": safe_idx,
                     "rgb": color["__target_rgb"],
                 })
     
@@ -1646,13 +1674,37 @@ async def _compute_recipes_async(
                     overall_done = completed_prefix + max(0, int(done_missing))
                     current_idx = min(max(0, overall_done), max(0, len(palette_list) - 1))
                     _set_progress(overall_done, len(palette_list), "running" if status != "completed" else "finalizing", current_idx)
-    
+
+                def _solver_recipe_cb(generated_item: dict):
+                    idx = _safe_index(generated_item.get("palette_index"))
+                    meta = missing_meta.get(idx)
+                    if idx < 0 or meta is None:
+                        return
+                    target_hex, target_grams = meta
+                    if not target_hex:
+                        return
+                    if not generated_item.get("recipe"):
+                        partial_item = {
+                            "palette_index": idx,
+                            "recipe": None,
+                            "error": generated_item.get("error", "Recipe generation failed")
+                        }
+                    else:
+                        partial_item = {
+                            "palette_index": idx,
+                            "recipe": _recipe_to_structured(target_hex, generated_item, target_grams),
+                            "type": "deterministic",
+                        }
+                    _publish_partial_item(partial_item)
+
                 generated_list = await asyncio.to_thread(
                     generate_recipes_for_palette,
                     "runtime",
                     solver_palette,
                     library_group,
                     _solver_progress,
+                    _solver_recipe_cb,
+                    quality_mode,
                 )
             except Exception as e:
                 logger.exception("Recipe solver failed for library_group=%s: %s", library_group, e)
@@ -1664,6 +1716,7 @@ async def _compute_recipes_async(
                         "recipe": None,
                         "error": f"Recipe solver crashed for this color: {e}"
                     }
+                    _publish_partial_item(recipes_by_index[idx])
             generated_by_index = {int(r.get("palette_index")): r for r in generated_list if r.get("palette_index") is not None}
     
             for color in missing_for_solver:
@@ -1677,6 +1730,7 @@ async def _compute_recipes_async(
                         "recipe": None,
                         "error": "Recipe generation failed: no solver output"
                     }
+                    _publish_partial_item(recipes_by_index[idx])
                     continue
                 if not generated.get("recipe"):
                     recipes_by_index[idx] = {
@@ -1684,6 +1738,7 @@ async def _compute_recipes_async(
                         "recipe": None,
                         "error": generated.get("error", "Recipe generation failed")
                     }
+                    _publish_partial_item(recipes_by_index[idx])
                     continue
     
                 recipe_storage = _recipe_to_structured(target_hex, generated, target_grams)
@@ -1706,6 +1761,7 @@ async def _compute_recipes_async(
                     "recipe": recipe_storage,
                     "type": "deterministic"
                 }
+                _publish_partial_item(recipes_by_index[idx])
     
         ordered = []
         for color in palette_list:
@@ -1772,6 +1828,7 @@ async def generate_recipes_from_palette(
     force_regenerate: str = Form("false"),
     use_ai_second_pass: str = Form("false"),
     progress_id: str = Form(""),
+    quality_mode: str = Form("balanced"),
 ):
     """Generate deterministic recipes (sync). For long palettes use POST /api/paint/recipes/jobs to avoid proxy timeouts."""
     try:
@@ -1784,7 +1841,7 @@ async def generate_recipes_from_palette(
     use_ai = use_ai_second_pass.lower() == "true"
     progress_key = (progress_id or "").strip() or None
     try:
-        return await _compute_recipes_async(palette_list, library_group, force, use_ai, progress_key)
+        return await _compute_recipes_async(palette_list, library_group, force, use_ai, progress_key, quality_mode)
     except Exception as e:
         logger.exception("Recipe generation failed: %s", e)
         return {
@@ -1801,6 +1858,7 @@ async def start_recipe_job(
     library_group: str = Form("default"),
     force_regenerate: str = Form("false"),
     use_ai_second_pass: str = Form("false"),
+    quality_mode: str = Form("balanced"),
 ):
     """Start recipe generation as a background job. Returns job_id; poll GET /api/paint/recipes/jobs/{job_id} for result."""
     try:
@@ -1817,8 +1875,12 @@ async def start_recipe_job(
             "status": "pending",
             "created_at": datetime.now().isoformat(),
             "total": len(palette_list),
+            "completed": 0,
+            "current_index": 0,
+            "message": "Queued",
+            "partial_recipes": [],
         }
-    asyncio.create_task(_run_recipe_job(job_id, palette_list, library_group, force, use_ai))
+    asyncio.create_task(_run_recipe_job(job_id, palette_list, library_group, force, use_ai, quality_mode))
     return Response(status_code=202, content=json.dumps({"job_id": job_id}), media_type="application/json")
 
 
@@ -1828,10 +1890,18 @@ async def _run_recipe_job(
     library_group: str,
     force: bool,
     use_ai: bool,
+    quality_mode: str,
 ):
     """Background task: run recipe computation and store result in RECIPE_JOBS[job_id]."""
     try:
-        result = await _compute_recipes_async(palette_list, library_group, force, use_ai, progress_key=None)
+        result = await _compute_recipes_async(
+            palette_list,
+            library_group,
+            force,
+            use_ai,
+            progress_key=job_id,
+            quality_mode=quality_mode,
+        )
         with RECIPE_JOBS_LOCK:
             if job_id in RECIPE_JOBS:
                 RECIPE_JOBS[job_id]["status"] = "completed"
@@ -1853,9 +1923,26 @@ async def get_recipe_job(job_id: str):
         job = RECIPE_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found or expired")
-    out = {"job_id": job_id, "status": job["status"], "total": job.get("total", 0)}
+    out = {
+        "job_id": job_id,
+        "status": job["status"],
+        "total": job.get("total", 0),
+        "completed": int(job.get("completed", 0) or 0),
+        "current_index": int(job.get("current_index", 0) or 0),
+        "message": job.get("message", ""),
+    }
+    with RECIPE_PROGRESS_LOCK:
+        progress = RECIPE_PROGRESS.get(job_id)
+    if progress:
+        out["total"] = int(progress.get("total", out["total"]) or out["total"])
+        out["completed"] = int(progress.get("completed", out["completed"]) or out["completed"])
+        out["current_index"] = int(progress.get("current_index", out["current_index"]) or out["current_index"])
+        out["message"] = progress.get("message", out["message"])
+        out["progress_status"] = progress.get("status")
     if job.get("status") == "completed" and "result" in job:
         out["recipes"] = job["result"].get("recipes", [])
+    if isinstance(job.get("partial_recipes"), list):
+        out["partial_recipes"] = job["partial_recipes"]
     if job.get("status") == "failed" and "error" in job:
         out["error"] = job["error"]
     return out

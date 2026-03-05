@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 from itertools import combinations
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple, Callable
+from typing import List, Dict, Optional, Tuple, Callable, Any
 from datetime import datetime
 import os
 import re
@@ -22,6 +22,29 @@ LIBRARIES_DIR = PAINT_DIR / "libraries"
 LIBRARIES_DIR.mkdir(parents=True, exist_ok=True)
 RECIPES_CACHE_DIR = PAINT_DIR / "recipes_cache"
 RECIPES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+_CALIBRATION_CACHE: Dict[str, Tuple[int, Dict[str, Any]]] = {}
+
+
+def _load_calibration_cached(paint_id: str) -> Optional[Dict[str, Any]]:
+    """Load calibration JSON with mtime-based in-process cache."""
+    cal_file = CALIBRATION_DIR / f"{paint_id}.json"
+    if not cal_file.exists():
+        _CALIBRATION_CACHE.pop(paint_id, None)
+        return None
+    try:
+        mtime_ns = cal_file.stat().st_mtime_ns
+        cached = _CALIBRATION_CACHE.get(paint_id)
+        if cached and cached[0] == mtime_ns:
+            return cached[1]
+        with open(cal_file, 'r') as f:
+            calibration = json.load(f)
+        if isinstance(calibration, dict):
+            _CALIBRATION_CACHE[paint_id] = (mtime_ns, calibration)
+            return calibration
+    except Exception:
+        return None
+    return None
 
 
 def _empty_library(group: str) -> Dict:
@@ -578,15 +601,11 @@ def find_best_one_pigment_recipe(target_lab: List[float], paint_id: str, paint_h
     Returns:
         Recipe dict with pigment_id, pigment_ratio, white_ratio, and error
     """
-    calibration_file = CALIBRATION_DIR / f"{paint_id}.json"
-    
     min_white_ratio, max_total_pigment = get_white_mix_limits(target_lab)
 
     # If calibration exists, use it (more accurate)
-    if calibration_file.exists():
-        with open(calibration_file, 'r') as f:
-            calibration = json.load(f)
-        
+    calibration = _load_calibration_cached(paint_id)
+    if calibration is not None:
         samples = calibration.get('samples', [])
         if samples:
             cal_max_ratio = max(0.0, min(1.0, get_calibration_max_ratio(calibration)))
@@ -679,18 +698,14 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
     Returns:
         Recipe dict with pigment IDs, ratios, white_ratio, and error
     """
-    cal1_file = CALIBRATION_DIR / f"{paint_id1}.json"
-    cal2_file = CALIBRATION_DIR / f"{paint_id2}.json"
     min_white_ratio, max_total_pigment = get_white_mix_limits(target_lab)
     min_ratio = 0.02
     max_ratio_per_pigment = max_total_pigment - min_ratio
     
     # Try calibrated first if both exist
-    if cal1_file.exists() and cal2_file.exists():
-        with open(cal1_file, 'r') as f:
-            cal1 = json.load(f)
-        with open(cal2_file, 'r') as f:
-            cal2 = json.load(f)
+    cal1 = _load_calibration_cached(paint_id1)
+    cal2 = _load_calibration_cached(paint_id2)
+    if cal1 is not None and cal2 is not None:
         cal1_max = max(0.0, min(1.0, get_calibration_max_ratio(cal1)))
         cal2_max = max(0.0, min(1.0, get_calibration_max_ratio(cal2)))
         if cal1_max <= 0.0 or cal2_max <= 0.0:
@@ -786,7 +801,12 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
     return None
 
 
-def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str], paint_hexes: List[str]) -> Optional[Dict]:
+def find_best_multi_pigment_recipe(
+    target_lab: List[float],
+    paint_ids: List[str],
+    paint_hexes: List[str],
+    quality_mode: str = "balanced",
+) -> Optional[Dict]:
     """Find best mixing ratio for multiple pigments + white.
     
     Args:
@@ -809,11 +829,8 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
     calibrated_count = 0
     
     for paint_id, paint_hex in zip(paint_ids, paint_hexes):
-        cal_file = CALIBRATION_DIR / f"{paint_id}.json"
-        calibration = None
-        if cal_file.exists():
-            with open(cal_file, 'r') as f:
-                calibration = json.load(f)
+        calibration = _load_calibration_cached(paint_id)
+        if calibration is not None:
             calibrated_count += 1
         
         paint_calibrations.append(calibration)
@@ -915,14 +932,25 @@ def find_best_multi_pigment_recipe(target_lab: List[float], paint_ids: List[str]
         walk(0, [], 0.0)
         return best_ratios, best_error
 
-    coarse_step = 0.02 if n_pigments == 3 else 0.015
+    mode = (quality_mode or "balanced").lower()
+    if mode == "high":
+        coarse_step = 0.02
+        fine_step = 0.008
+        fine_radius = 0.035
+    elif mode == "fast":
+        coarse_step = 0.03 if n_pigments >= 3 else 0.02
+        fine_step = 0.015
+        fine_radius = 0.022
+    else:
+        # balanced
+        coarse_step = 0.025 if n_pigments >= 3 else 0.02
+        fine_step = 0.01
+        fine_radius = 0.03
+
     coarse_ratios, coarse_error = search(coarse_step)
     if coarse_ratios is None:
         return None
 
-    # Keep refinement slightly coarser for runtime stability in API context.
-    fine_step = 0.01
-    fine_radius = 0.03
     fine_ratios, fine_error = search(fine_step, center=coarse_ratios, radius=fine_radius)
 
     best_ratios = fine_ratios if fine_ratios is not None and fine_error <= coarse_error else coarse_ratios
@@ -944,6 +972,8 @@ def generate_recipes_for_palette(
     palette: List[Dict],
     library_group: str = "default",
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    recipe_cb: Optional[Callable[[Dict], None]] = None,
+    quality_mode: str = "balanced",
 ) -> List[Dict]:
     """Generate paint mixing recipes for each palette color.
     
@@ -1038,6 +1068,37 @@ def generate_recipes_for_palette(
     
     recipes = []
 
+    def _push_recipe(item: Dict) -> None:
+        recipes.append(item)
+        if recipe_cb:
+            try:
+                recipe_cb(item)
+            except Exception:
+                pass
+    mode = (quality_mode or "balanced").lower()
+    if mode == "high":
+        candidate_paint_limit = 8
+        max_pigments_cfg = 4
+        early_exit_delta = 0.1
+    elif mode == "fast":
+        candidate_paint_limit = 5
+        max_pigments_cfg = 3
+        early_exit_delta = 0.35
+    else:
+        # balanced defaults
+        try:
+            candidate_paint_limit = max(3, int(os.getenv("RECIPE_CANDIDATE_PAINT_LIMIT", "6")))
+        except Exception:
+            candidate_paint_limit = 6
+        try:
+            max_pigments_cfg = max(2, int(os.getenv("RECIPE_MAX_PIGMENTS", "4")))
+        except Exception:
+            max_pigments_cfg = 4
+        try:
+            early_exit_delta = max(0.05, float(os.getenv("RECIPE_EARLY_EXIT_DELTA", "0.2")))
+        except Exception:
+            early_exit_delta = 0.2
+
     total_colors = len(palette)
     for i, color in enumerate(palette):
         if progress_cb:
@@ -1049,7 +1110,7 @@ def generate_recipes_for_palette(
         try:
             target_rgb = color.get('rgb')
             if not isinstance(target_rgb, (list, tuple)) or len(target_rgb) < 3:
-                recipes.append({
+                _push_recipe({
                     'palette_index': palette_index,
                     'recipe': None,
                     'error': 'Color format error: missing or invalid rgb'
@@ -1058,17 +1119,7 @@ def generate_recipes_for_palette(
 
             target_lab = rgb_to_lab([float(c) for c in target_rgb[:3]])
         
-            # Check if target is essentially achromatic (gray/white/black)
-            target_is_achromatic = False
-            r, g, b = target_rgb
-            if abs(r - g) < 30 and abs(g - b) < 30 and abs(r - b) < 30:
-                max_channel = max(r, g, b)
-                min_channel = min(r, g, b)
-                if max_channel - min_channel < 40:  # Low saturation = gray
-                    target_is_achromatic = True
-        
             # Exclude white from pigment candidates because white is modeled by white_ratio.
-            non_white_colored_paints = [p for p in colored_paints if not is_white_paint(p)]
             non_white_base_paints = [p for p in base_paints if not is_white_paint(p)]
 
             # Try one-pigment recipes first across all non-white paints.
@@ -1097,16 +1148,32 @@ def generate_recipes_for_palette(
             best_multi_error = float('inf')
             best_multi_score = float('inf')
 
+            # Adaptive search depth:
+            # - easy colors keep a narrow/fast search
+            # - hard colors widen candidate paints and allow more pigments
+            if best_one_error <= 1.5:
+                local_paint_limit = max(3, candidate_paint_limit - 2)
+                local_max_pigments = min(3, max_pigments_cfg)
+                local_early_exit = early_exit_delta
+            elif best_one_error <= 3.5:
+                local_paint_limit = candidate_paint_limit
+                local_max_pigments = min(4, max_pigments_cfg)
+                local_early_exit = max(0.1, early_exit_delta * 0.75)
+            else:
+                local_paint_limit = candidate_paint_limit + 2
+                local_max_pigments = min(4, max_pigments_cfg)
+                local_early_exit = 0.08
+
             # Limit combinatorial explosion by using closest single-pigment candidates first.
             ranked_paints = [p['paint'] for p in sorted(one_pigment_candidates, key=lambda x: x['error'])]
             if ranked_paints:
-                multi_search_paints = ranked_paints[: min(7, len(ranked_paints))]
+                multi_search_paints = ranked_paints[: min(local_paint_limit, len(ranked_paints))]
             else:
-                multi_search_paints = search_paints[: min(7, len(search_paints))]
+                multi_search_paints = search_paints[: min(local_paint_limit, len(search_paints))]
 
-            max_pigments = min(4, len(multi_search_paints))
+            max_pigments = min(local_max_pigments, len(multi_search_paints))
             for pigment_count in range(2, max_pigments + 1):
-                if best_multi_error <= 1.5:
+                if best_multi_error <= local_early_exit:
                     break
                 for combo in combinations(multi_search_paints, pigment_count):
                     paint_ids = [p['id'] for p in combo]
@@ -1121,7 +1188,7 @@ def generate_recipes_for_palette(
                             paint_hexes[1]
                         )
                     else:
-                        recipe = find_best_multi_pigment_recipe(target_lab, paint_ids, paint_hexes)
+                        recipe = find_best_multi_pigment_recipe(target_lab, paint_ids, paint_hexes, quality_mode=mode)
 
                     if not recipe:
                         continue
@@ -1134,29 +1201,31 @@ def generate_recipes_for_palette(
                         best_multi_score = score
                         best_multi_error = adjusted_error
                         best_multi_pigment = recipe
+                if best_multi_error <= local_early_exit:
+                    break
 
             # Choose best available recipe by error.
             if best_multi_pigment and (not best_one_pigment or best_multi_error <= best_one_error):
-                recipes.append({
+                _push_recipe({
                     'palette_index': palette_index,
                     'recipe': best_multi_pigment,
                     'type': best_multi_pigment.get('type', 'multi_pigment')
                 })
             elif best_one_pigment:
-                recipes.append({
+                _push_recipe({
                     'palette_index': palette_index,
                     'recipe': best_one_pigment,
                     'type': 'one_pigment'
                 })
             else:
-                recipes.append({
+                _push_recipe({
                     'palette_index': palette_index,
                     'recipe': None,
                     'error': 'Could not generate recipe (no valid candidate)'
                 })
         except Exception as e:
             logger.exception("Recipe generation failed for palette_index=%s: %s", palette_index, e)
-            recipes.append({
+            _push_recipe({
                 'palette_index': palette_index,
                 'recipe': None,
                 'error': f'Recipe generation failed for this color: {e}'
