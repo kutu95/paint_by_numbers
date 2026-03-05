@@ -14,6 +14,7 @@ import hashlib
 import urllib.request
 import urllib.error
 import threading
+import time
 import cv2
 import numpy as np
 from sklearn.cluster import KMeans
@@ -24,7 +25,7 @@ from paint_manager import (
     get_hex_from_calibration, calibration_file_for, migrate_global_calibrations_to_group_scope,
     rgb_to_lab, lab_to_rgb, delta_e_lab, CALIBRATION_DIR, PAINT_DIR,
     list_library_groups, get_library_info,
-    get_cached_recipe, cache_recipe, generate_recipes_for_palette, load_recipe_cache
+    generate_recipes_for_palette, load_recipe_cache, save_recipe_cache
 )
 import json
 
@@ -912,7 +913,6 @@ async def list_library_recipes(
                 })
         rows.append({
             "hex": str(hex_key).upper(),
-            "confidence": entry.get("confidence") or "unknown",
             "last_modified": entry.get("updated_at") or recipe.get("updated_at") or recipe.get("created_at"),
             "type": entry.get("type") or recipe.get("type"),
             "delta_e": recipe.get("error"),
@@ -1395,6 +1395,7 @@ async def _compute_recipes_async(
     quality_mode: str = "balanced",
 ) -> dict:
     """Run recipe computation; returns {"recipes": [...]}. Used by sync endpoint and job worker."""
+    run_started_at = time.perf_counter()
     library = load_library(library_group)
     paints = library.get("paints", [])
 
@@ -1846,12 +1847,31 @@ async def _compute_recipes_async(
         return updated
 
     try:
+        phase_cache_load_ms = 0.0
+        phase_cache_lookup_ms = 0.0
+        phase_solver_ms = 0.0
+        phase_postprocess_ms = 0.0
+        phase_cache_persist_ms = 0.0
+        phase_ai_refine_ms = 0.0
+
         fingerprint = _library_fingerprint()
         recipes_by_index: dict[int, dict] = {}
         missing_for_solver: list[dict] = []
         completed_prefix = 0
+        recipe_cache: dict[str, dict] = {}
+        pending_recipe_cache_updates: dict[str, dict] = {}
+        if not force:
+            cache_load_started_at = time.perf_counter()
+            try:
+                loaded_cache = load_recipe_cache(library_group)
+                if isinstance(loaded_cache, dict):
+                    recipe_cache = loaded_cache
+            except Exception:
+                recipe_cache = {}
+            phase_cache_load_ms = (time.perf_counter() - cache_load_started_at) * 1000.0
     
         # Normalize and load from cache where valid.
+        cache_lookup_started_at = time.perf_counter()
         for color in palette_list:
             idx = color.get("index")
             target_hex = _normalize_target_hex(color)
@@ -1876,7 +1896,7 @@ async def _compute_recipes_async(
             color["__target_grams"] = target_grams if target_grams is not None and target_grams > 0 else None
     
             if not force:
-                cached = get_cached_recipe(library_group, target_hex)
+                cached = recipe_cache.get(target_hex)
                 if cached and cached.get("type") == "deterministic" and cached.get("library_fingerprint") == fingerprint:
                     cached_recipe = _ensure_predicted_hex(cached.get("recipe"))
                     cached_recipe = _apply_total_grams(cached_recipe, color.get("__target_grams"))
@@ -1891,6 +1911,7 @@ async def _compute_recipes_async(
                     _set_progress(completed_prefix, len(palette_list), "running", min(completed_prefix, len(palette_list) - 1))
                     continue
             missing_for_solver.append(color)
+        phase_cache_lookup_ms = (time.perf_counter() - cache_lookup_started_at) * 1000.0
     
         if missing_for_solver:
             solver_palette = []
@@ -1914,6 +1935,7 @@ async def _compute_recipes_async(
                     "rgb": color["__target_rgb"],
                 })
     
+            solver_started_at = time.perf_counter()
             try:
                 def _solver_progress(done_missing: int, total_missing: int, status: str):
                     overall_done = completed_prefix + max(0, int(done_missing))
@@ -1962,8 +1984,10 @@ async def _compute_recipes_async(
                         "error": f"Recipe solver crashed for this color: {e}"
                     }
                     _publish_partial_item(recipes_by_index[idx])
+            phase_solver_ms = (time.perf_counter() - solver_started_at) * 1000.0
             generated_by_index = {int(r.get("palette_index")): r for r in generated_list if r.get("palette_index") is not None}
     
+            postprocess_started_at = time.perf_counter()
             for color in missing_for_solver:
                 idx = _safe_index(color.get("index"))
                 target_hex = color["__target_hex"]
@@ -1987,26 +2011,28 @@ async def _compute_recipes_async(
                     continue
     
                 recipe_storage = _recipe_to_structured(target_hex, generated, target_grams)
-                try:
-                    cache_recipe(library_group, target_hex, {
-                        "type": "deterministic",
-                        "library_fingerprint": fingerprint,
-                        "recipe": recipe_storage,
-                    })
-                except Exception as e:
-                    logger.exception(
-                        "Failed to cache recipe for group=%s hex=%s index=%s: %s",
-                        library_group,
-                        target_hex,
-                        idx,
-                        e,
-                    )
+                pending_recipe_cache_updates[target_hex] = {
+                    "type": "deterministic",
+                    "library_fingerprint": fingerprint,
+                    "recipe": recipe_storage,
+                    "updated_at": datetime.now().isoformat(),
+                }
                 recipes_by_index[idx] = {
                     "palette_index": idx,
                     "recipe": recipe_storage,
                     "type": "deterministic"
                 }
                 _publish_partial_item(recipes_by_index[idx])
+            phase_postprocess_ms = (time.perf_counter() - postprocess_started_at) * 1000.0
+
+        if pending_recipe_cache_updates:
+            cache_persist_started_at = time.perf_counter()
+            try:
+                recipe_cache.update(pending_recipe_cache_updates)
+                save_recipe_cache(library_group, recipe_cache)
+            except Exception as e:
+                logger.exception("Failed to persist recipe cache for group=%s: %s", library_group, e)
+            phase_cache_persist_ms = (time.perf_counter() - cache_persist_started_at) * 1000.0
     
         ordered = []
         for color in palette_list:
@@ -2022,6 +2048,7 @@ async def _compute_recipes_async(
             ordered.append(item)
     
         if use_ai:
+            ai_started_at = time.perf_counter()
             # AI second pass only for poor deterministic recipes to control latency/cost.
             _set_progress(len(palette_list), len(palette_list), "finalizing", max(0, len(palette_list) - 1), "Refining poor recipes with AI")
             calibration_ctx = _load_calibration_context()
@@ -2059,6 +2086,28 @@ async def _compute_recipes_async(
                     item["recipe"] = refined
                     item["type"] = "ai_refined"
                     refined_count += 1
+            phase_ai_refine_ms = (time.perf_counter() - ai_started_at) * 1000.0
+
+        total_ms = (time.perf_counter() - run_started_at) * 1000.0
+        logger.info(
+            (
+                "Recipe timing group=%s colors=%d missing=%d force=%s use_ai=%s "
+                "cache_load_ms=%.1f cache_lookup_ms=%.1f solver_ms=%.1f "
+                "postprocess_ms=%.1f cache_persist_ms=%.1f ai_refine_ms=%.1f total_ms=%.1f"
+            ),
+            library_group,
+            len(palette_list),
+            len(missing_for_solver),
+            force,
+            use_ai,
+            phase_cache_load_ms,
+            phase_cache_lookup_ms,
+            phase_solver_ms,
+            phase_postprocess_ms,
+            phase_cache_persist_ms,
+            phase_ai_refine_ms,
+            total_ms,
+        )
         return {"recipes": ordered}
     except Exception as e:
         logger.exception("Recipe generation failed: %s", e)

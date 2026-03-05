@@ -228,7 +228,6 @@ interface CalibrationData {
 
 interface LibraryRecipeRow {
   hex: string
-  confidence: string
   last_modified?: string | null
   type?: string | null
   delta_e?: number | null
@@ -1073,7 +1072,6 @@ export default function PaintsPage() {
                   <tr className="text-left text-gray-400 border-b border-gray-600">
                     <th className="py-2 pr-3">Hex</th>
                     <th className="py-2 pr-3">Recipe</th>
-                    <th className="py-2 pr-3">Confidence</th>
                     <th className="py-2 pr-3">ΔE</th>
                     <th className="py-2">Last Modified</th>
                   </tr>
@@ -1081,7 +1079,7 @@ export default function PaintsPage() {
                 <tbody>
                   {!recipeRowsLoading && recipeRows.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="py-4 text-gray-500">
+                      <td colSpan={4} className="py-4 text-gray-500">
                         No recipes cached for this library yet.
                       </td>
                     </tr>
@@ -1104,7 +1102,6 @@ export default function PaintsPage() {
                               .join(' + ')
                           : 'No ingredients'}
                       </td>
-                      <td className="py-2 pr-3 capitalize">{row.confidence || 'unknown'}</td>
                       <td className="py-2 pr-3">{row.delta_e != null ? Number(row.delta_e).toFixed(2) : '—'}</td>
                       <td className="py-2 text-gray-300">
                         {row.last_modified ? new Date(row.last_modified).toLocaleString() : '—'}
