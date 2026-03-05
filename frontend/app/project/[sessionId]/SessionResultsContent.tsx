@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import type { SessionData } from './types'
 import { API_BASE_URL } from '@/lib/config'
-import { getProjectBySessionId } from '@/lib/projects'
+import { getProjectBySessionId, syncProjectsFromServer } from '@/lib/projects'
 
 type LayerWithSource = SessionData['layers'][0] & { source_palette_indices?: number[] }
 
@@ -33,10 +33,7 @@ function formatRecipe(recipeData: any, totalWeightGrams: number | null = null): 
       .map((ing: any) => {
         if (ing?.paint_name == null) return null
         const pct = ing.percentage != null ? Number(ing.percentage) : 0
-        const gramsText =
-          ing.grams != null
-            ? ` (${Number(ing.grams).toFixed(2)} g)`
-            : g(pct)
+        const gramsText = g(pct)
         return `${ing.paint_name} ${pct.toFixed(2)}%${gramsText}`
       })
       .filter(Boolean)
@@ -93,18 +90,27 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
   const [libraryGroupsLoaded, setLibraryGroupsLoaded] = useState(false)
   const [selectedLibraryGroup, setSelectedLibraryGroup] = useState('default')
   const [mounted, setMounted] = useState(false)
+  const [, setProjectSyncTick] = useState(0)
 
   const project = typeof window !== 'undefined' ? getProjectBySessionId(sessionId) : null
   const recipeMargin = typeof window !== 'undefined' ? (parseFloat(localStorage.getItem('layerpainter_recipe_margin') || '1.33') || 1.33) : 1.33
   const selectedGroupInfo = libraryGroups.find((g) => g.group === selectedLibraryGroup)
   // Library coverage is stored as g/cm² (e.g. 0.008). Weight in grams = (coverage%/100) × area_cm² × coverage_g_per_cm² × margin.
   const libraryCoverageGPerCm2 = selectedGroupInfo?.coverage_mg_per_cm2 != null && selectedGroupInfo.coverage_mg_per_cm2 > 0 ? selectedGroupInfo.coverage_mg_per_cm2 : null
+  const effectiveCanvasWidthCm =
+    (project?.canvasWidthCm != null && project.canvasWidthCm > 0)
+      ? project.canvasWidthCm
+      : ((sessionData.canvas_width_cm != null && sessionData.canvas_width_cm > 0) ? sessionData.canvas_width_cm : 0)
+  const effectiveCanvasHeightCm =
+    (project?.canvasHeightCm != null && project.canvasHeightCm > 0)
+      ? project.canvasHeightCm
+      : ((sessionData.canvas_height_cm != null && sessionData.canvas_height_cm > 0) ? sessionData.canvas_height_cm : 0)
 
   function getTotalWeightGrams(paletteIndex: number): number | null {
-    if (!project || libraryCoverageGPerCm2 == null || libraryCoverageGPerCm2 <= 0) return null
+    if (libraryCoverageGPerCm2 == null || libraryCoverageGPerCm2 <= 0) return null
     const paletteColor = sessionData.palette.find((p) => p.index === paletteIndex)
     if (!paletteColor) return null
-    const areaCm2 = project.canvasWidthCm * project.canvasHeightCm
+    const areaCm2 = effectiveCanvasWidthCm * effectiveCanvasHeightCm
     if (areaCm2 <= 0) return null
     return (paletteColor.coverage / 100) * areaCm2 * libraryCoverageGPerCm2 * recipeMargin
   }
@@ -125,8 +131,8 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
   function getMissingWeightInputs(): string[] {
     const missing: string[] = []
 
-    const width = project?.canvasWidthCm ?? 0
-    const height = project?.canvasHeightCm ?? 0
+    const width = effectiveCanvasWidthCm
+    const height = effectiveCanvasHeightCm
     if (!(width > 0 && height > 0)) {
       missing.push('Canvas size')
     }
@@ -147,6 +153,14 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
   useEffect(() => {
     setMounted(true)
   }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    void (async () => {
+      await syncProjectsFromServer()
+      setProjectSyncTick((v) => v + 1)
+    })()
+  }, [sessionId])
 
   useEffect(() => {
     if (typeof window === 'undefined') return

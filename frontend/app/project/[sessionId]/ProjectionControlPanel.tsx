@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import type { SessionData } from './types'
-import { getProjectBySessionId, removeProject } from '@/lib/projects'
+import { getProjectBySessionId, removeProject, saveProject, syncProjectsFromServer } from '@/lib/projects'
 import { SessionResultsContent } from './SessionResultsContent'
 import { ProjectionHUDControls } from './ProjectionHUDControls'
 import { ProjectionToolsPanel } from './ProjectionToolsPanel'
@@ -40,9 +40,34 @@ export function ProjectionControlPanel({
 
   useEffect(() => {
     if (typeof window === 'undefined' || !sessionId) return
-    const p = getProjectBySessionId(sessionId)
-    setProjectName(p?.name ?? null)
+    void (async () => {
+      await syncProjectsFromServer()
+      const p = getProjectBySessionId(sessionId)
+      setProjectName(p?.name ?? null)
+    })()
   }, [sessionId])
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !sessionId || !sessionData) return
+    const proj = getProjectBySessionId(sessionId)
+    if (!proj) return
+
+    const nextWidth =
+      typeof sessionData.canvas_width_cm === 'number' && sessionData.canvas_width_cm > 0
+        ? sessionData.canvas_width_cm
+        : proj.canvasWidthCm
+    const nextHeight =
+      typeof sessionData.canvas_height_cm === 'number' && sessionData.canvas_height_cm > 0
+        ? sessionData.canvas_height_cm
+        : proj.canvasHeightCm
+
+    if (nextWidth === proj.canvasWidthCm && nextHeight === proj.canvasHeightCm) return
+    saveProject({
+      ...proj,
+      canvasWidthCm: nextWidth,
+      canvasHeightCm: nextHeight,
+    })
+  }, [sessionId, sessionData])
 
   useEffect(() => {
     const stored = localStorage.getItem(`session_${sessionId}`)
@@ -123,6 +148,17 @@ export function ProjectionControlPanel({
         const data = await response.json() as SessionData & { session_id: string }
         localStorage.setItem(`session_${sessionId}`, JSON.stringify(data))
         setSessionData(data)
+        saveProject({
+          ...proj,
+          canvasWidthCm:
+            typeof data.canvas_width_cm === 'number' && data.canvas_width_cm > 0
+              ? data.canvas_width_cm
+              : proj.canvasWidthCm,
+          canvasHeightCm:
+            typeof data.canvas_height_cm === 'number' && data.canvas_height_cm > 0
+              ? data.canvas_height_cm
+              : proj.canvasHeightCm,
+        })
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'Regenerate failed'
         alert(msg)

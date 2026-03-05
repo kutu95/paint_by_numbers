@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { useParams, useRouter } from 'next/navigation'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { API_BASE_URL } from '@/lib/config'
 
 interface CalibrationSample {
@@ -13,7 +13,9 @@ interface CalibrationSample {
 export default function CalibratePage() {
   const params = useParams()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const paintId = params.paintId as string
+  const group = (searchParams.get('group') || (typeof window !== 'undefined' ? localStorage.getItem('lastSelectedPaintLibrary') : null) || 'default')
   const [ratios, setRatios] = useState<number[]>([1, 0.5, 0.25, 0.125, 0.0625, 0.03125])
   const [imageUrl, setImageUrl] = useState<string | null>(null)
   const [imageId, setImageId] = useState<string | null>(null)
@@ -38,6 +40,7 @@ export default function CalibratePage() {
     const formData = new FormData()
     formData.append('image', file)
     formData.append('paint_id', paintId)
+    formData.append('group', group)
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/paint/calibration/upload`, {
@@ -134,6 +137,7 @@ export default function CalibratePage() {
     formData.append('regions', JSON.stringify(paintRegions))
     formData.append('ratios', JSON.stringify(ratios))
     formData.append('reference_regions', JSON.stringify(referenceRegions))
+    formData.append('group', group)
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/paint/calibration/sample`, {
@@ -143,7 +147,7 @@ export default function CalibratePage() {
       const data = await response.json()
       setSamples(data.samples)
       alert('Calibration saved successfully!')
-      router.push('/paints')
+      router.push(`/paints?group=${encodeURIComponent(group)}`)
     } catch (error) {
       console.error('Error:', error)
       alert('Failed to sample colors')
@@ -158,7 +162,7 @@ export default function CalibratePage() {
         <div className="flex items-center justify-between mb-8">
           <h1 className="text-4xl font-bold">Calibrate Paint: {paintId}</h1>
           <button
-            onClick={() => router.push('/paints')}
+            onClick={() => router.push(`/paints?group=${encodeURIComponent(group)}`)}
             className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
           >
             ← Back
@@ -367,4 +371,3 @@ export default function CalibratePage() {
     </div>
   )
 }
-

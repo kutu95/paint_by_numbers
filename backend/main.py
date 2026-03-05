@@ -21,10 +21,10 @@ from image_processor import process_image, regenerate_pure_mask_from_labels
 from paint_manager import (
     load_library, save_library, slugify, atomic_write,
     sample_color_from_image, sample_color_from_region, normalize_calibration_samples,
-    get_hex_from_calibration,
+    get_hex_from_calibration, calibration_file_for, migrate_global_calibrations_to_group_scope,
     rgb_to_lab, lab_to_rgb, delta_e_lab, CALIBRATION_DIR, PAINT_DIR,
     list_library_groups, get_library_info,
-    get_cached_recipe, cache_recipe, generate_recipes_for_palette
+    get_cached_recipe, cache_recipe, generate_recipes_for_palette, load_recipe_cache
 )
 import json
 
@@ -67,8 +67,68 @@ app.add_middleware(
 # Data directory relative to backend folder, go up one level to project root
 DATA_DIR = Path(__file__).parent.parent / "data" / "sessions"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+PROJECTS_DIR = Path(__file__).parent.parent / "data" / "projects"
+PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+CALIBRATION_MIGRATION_MARKER = PAINT_DIR / ".calibration_scope_migration_v1.done"
 
 SESSION_CLEANUP_HOURS = 24 * 30  # 30 days so project images persist when reopened
+
+
+def _project_file_for_payload(project: dict) -> Path:
+    name = str(project.get("name") or project.get("sessionId") or "project")
+    session_id = str(project.get("sessionId") or "").strip()
+    if not session_id:
+        raise ValueError("Missing sessionId")
+    base = slugify(name) or "project"
+    return PROJECTS_DIR / f"{base}--{session_id}.json"
+
+
+def _list_project_files() -> list[Path]:
+    if not PROJECTS_DIR.exists():
+        return []
+    return sorted([p for p in PROJECTS_DIR.iterdir() if p.is_file() and p.suffix == ".json"])
+
+
+def _load_all_projects() -> list[dict]:
+    projects: list[dict] = []
+    for p in _list_project_files():
+        try:
+            with open(p, "r") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data.get("sessionId"):
+                projects.append(data)
+        except Exception:
+            continue
+    projects.sort(key=lambda x: int(x.get("createdAt", 0) or 0), reverse=True)
+    return projects
+
+
+def _find_project_file_by_session(session_id: str) -> Optional[Path]:
+    if not session_id:
+        return None
+    for p in _list_project_files():
+        try:
+            with open(p, "r") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and str(data.get("sessionId")) == session_id:
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def _upsert_group_calibration(group: str, paint_id: str, calibration: dict) -> None:
+    lib = load_library(group)
+    paints = lib.get("paints", [])
+    has_paint = any(isinstance(p, dict) and p.get("id") == paint_id for p in paints)
+    if not has_paint:
+        return
+    cal_map = lib.get("calibration_data")
+    if not isinstance(cal_map, dict):
+        cal_map = {}
+    cal_map[paint_id] = calibration
+    lib["calibration_data"] = cal_map
+    save_library(lib, group)
 
 
 def cleanup_old_sessions():
@@ -87,8 +147,26 @@ def cleanup_old_sessions():
                 pass
 
 
+def run_calibration_scope_migration_once() -> None:
+    """Run one-time calibration migration on server startup."""
+    if CALIBRATION_MIGRATION_MARKER.exists():
+        return
+    try:
+        result = migrate_global_calibrations_to_group_scope(delete_legacy=True)
+        marker_payload = {
+            "migration": "calibration_scope_v1",
+            "applied_at": datetime.now().isoformat(),
+            "result": result,
+        }
+        atomic_write(CALIBRATION_MIGRATION_MARKER, marker_payload)
+        logger.info("Calibration scope migration completed on startup: %s", result)
+    except Exception as e:
+        logger.exception("Calibration scope migration failed on startup: %s", e)
+
+
 @app.on_event("startup")
 async def startup_event():
+    run_calibration_scope_migration_once()
     cleanup_old_sessions()
 
 
@@ -369,6 +447,54 @@ async def get_paint_library(group: str = "default"):
     return load_library(group)
 
 
+@app.get("/api/projects")
+async def list_projects():
+    """List persisted projects from server-side JSON files."""
+    return {"projects": _load_all_projects()}
+
+
+@app.put("/api/projects/{session_id}")
+async def upsert_project(session_id: str, request: Request):
+    """Create/update one project JSON file named from project name + session id."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object")
+
+    payload = dict(body)
+    payload["sessionId"] = session_id
+    if not payload.get("name"):
+        payload["name"] = session_id
+    if not payload.get("createdAt"):
+        payload["createdAt"] = int(datetime.now().timestamp() * 1000)
+
+    existing = _find_project_file_by_session(session_id)
+    target_file = _project_file_for_payload(payload)
+    try:
+        atomic_write(target_file, payload)
+        if existing and existing != target_file and existing.exists():
+            existing.unlink(missing_ok=True)
+    except Exception as e:
+        logger.exception("Failed to save project %s: %s", session_id, e)
+        raise HTTPException(status_code=500, detail="Failed to save project")
+    return payload
+
+
+@app.delete("/api/projects/{session_id}")
+async def delete_project(session_id: str):
+    """Delete one persisted project by session id."""
+    existing = _find_project_file_by_session(session_id)
+    if not existing:
+        return {"success": True, "deleted": False}
+    try:
+        existing.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return {"success": True, "deleted": True}
+
+
 @app.get("/api/paint/library/groups")
 async def list_paint_library_groups():
     """List all available paint library groups."""
@@ -398,6 +524,8 @@ async def create_library_group(
         "group": group_id,
         "name": name,
         "coverage_mg_per_cm2": None,
+        "calibration_data": {},
+        "recipes": {},
     }
     save_library(new_library, group_id)
     
@@ -497,7 +625,7 @@ async def update_paint(
     paint['notes'] = notes
 
     # Recalculate hex from calibration 100% swatch when calibration exists; otherwise use form value
-    hex_from_cal = get_hex_from_calibration(paint_id)
+    hex_from_cal = get_hex_from_calibration(paint_id, group)
     if hex_from_cal:
         paint['hex_approx'] = hex_from_cal
         logger.info("Update paint: using hex from calibration for %s: %s", paint_id, hex_from_cal)
@@ -507,20 +635,6 @@ async def update_paint(
     # Save current group
     save_library(library, group)
 
-    # Sync to other groups that contain this paint
-    if hex_from_cal:
-        for g in list_library_groups():
-            if g == group:
-                continue
-            lib = load_library(g)
-            for p in lib.get('paints', []):
-                if p.get('id') == paint_id:
-                    p['name'] = paint['name']
-                    p['hex_approx'] = paint['hex_approx']
-                    p['notes'] = paint['notes']
-                    save_library(lib, g)
-                    break
-
     return paint
 
 
@@ -529,10 +643,14 @@ async def delete_paint(paint_id: str, group: str = "default"):
     """Delete a paint from the library."""
     library = load_library(group)
     library['paints'] = [p for p in library['paints'] if p['id'] != paint_id]
+    cal_map = library.get("calibration_data")
+    if isinstance(cal_map, dict):
+        cal_map.pop(paint_id, None)
+        library["calibration_data"] = cal_map
     save_library(library, group)
     
-    # Also delete calibration if it exists
-    cal_file = CALIBRATION_DIR / f"{paint_id}.json"
+    # Also delete this library's calibration file if it exists
+    cal_file = calibration_file_for(group, paint_id)
     if cal_file.exists():
         cal_file.unlink()
     
@@ -543,7 +661,8 @@ async def delete_paint(paint_id: str, group: str = "default"):
 @app.post("/api/paint/calibration/upload")
 async def upload_calibration_photo(
     image: UploadFile = File(...),
-    paint_id: str = Form(...)
+    paint_id: str = Form(...),
+    group: str = Form("default"),
 ):
     """Upload a calibration photo."""
     # Save to temporary location
@@ -596,6 +715,7 @@ async def sample_calibration_colors(
     regions: str = Form(None),  # JSON [{x1,y1,x2,y2}, ...] - user-drawn rectangles (preferred)
     reference_points: str = Form(None),  # legacy: JSON [white, mid_grey, black] each {x,y}
     reference_regions: str = Form(None),  # JSON [white, mid_grey, black] each {x1,y1,x2,y2}
+    group: str = Form("default"),
 ):
     """Sample colors from calibration photo and save calibration.
     Use regions (and reference_regions) to average over user-selected rectangles; falls back to points if provided.
@@ -652,8 +772,9 @@ async def sample_calibration_colors(
     if reference:
         calibration["reference_strip"] = reference
     
-    cal_file = CALIBRATION_DIR / f"{paint_id}.json"
+    cal_file = calibration_file_for(group, paint_id)
     atomic_write(cal_file, calibration)
+    _upsert_group_calibration(group, paint_id, calibration)
     
     # Update the paint's approximate color (hex_approx) from the 100% (1.0) swatch in every library group that has this paint
     sample_100 = next((s for s in samples if s.get("ratio", 0) >= 0.99), None)
@@ -662,13 +783,17 @@ async def sample_calibration_colors(
         hex_from_calibration = "#{:02x}{:02x}{:02x}".format(
             max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))
         )
-        for group in list_library_groups():
-            lib = load_library(group)
-            for p in lib.get("paints", []):
-                if p.get("id") == paint_id:
-                    p["hex_approx"] = hex_from_calibration
-                    save_library(lib, group)
-                    break
+        lib = load_library(group)
+        for p in lib.get("paints", []):
+            if p.get("id") == paint_id:
+                p["hex_approx"] = hex_from_calibration
+                cal_map = lib.get("calibration_data")
+                if not isinstance(cal_map, dict):
+                    cal_map = {}
+                cal_map[paint_id] = calibration
+                lib["calibration_data"] = cal_map
+                save_library(lib, group)
+                break
     
     return {
         "samples": samples,
@@ -678,9 +803,16 @@ async def sample_calibration_colors(
 
 
 @app.get("/api/paint/calibration/{paint_id}")
-async def get_calibration(paint_id: str):
+async def get_calibration(paint_id: str, group: str = "default"):
     """Get calibration data for a paint."""
-    cal_file = CALIBRATION_DIR / f"{paint_id}.json"
+    library = load_library(group)
+    cal_map = library.get("calibration_data")
+    if isinstance(cal_map, dict):
+        embedded = cal_map.get(paint_id)
+        if isinstance(embedded, dict):
+            return embedded
+
+    cal_file = calibration_file_for(group, paint_id)
     if not cal_file.exists():
         raise HTTPException(status_code=404, detail="Calibration not found")
     
@@ -693,19 +825,23 @@ async def export_library_calibrations(group: str = "default"):
     """Download all calibration data for paints in the selected library group."""
     library = load_library(group)
     paints = library.get("paints", [])
+    cal_map = library.get("calibration_data")
+    if not isinstance(cal_map, dict):
+        cal_map = {}
 
     export_paints = []
     for paint in paints:
         paint_id = paint.get("id")
-        calibration = None
+        calibration = cal_map.get(paint_id) if paint_id else None
         if paint_id:
-            cal_file = CALIBRATION_DIR / f"{paint_id}.json"
-            if cal_file.exists():
-                try:
-                    with open(cal_file, "r") as f:
-                        calibration = json.load(f)
-                except Exception:
-                    calibration = None
+            if calibration is None:
+                cal_file = calibration_file_for(group, paint_id)
+                if cal_file.exists():
+                    try:
+                        with open(cal_file, "r") as f:
+                            calibration = json.load(f)
+                    except Exception:
+                        calibration = None
         export_paints.append({
             "paint_id": paint_id,
             "paint_name": paint.get("name"),
@@ -729,12 +865,81 @@ async def export_library_calibrations(group: str = "default"):
     )
 
 
+@app.post("/api/paint/calibration/migrate-scoped")
+async def migrate_calibrations_to_scoped(delete_legacy: bool = True):
+    """One-time migration from legacy global calibration files to library-scoped calibration files."""
+    try:
+        result = migrate_global_calibrations_to_group_scope(delete_legacy=bool(delete_legacy))
+        return {
+            "success": True,
+            **result,
+            "message": "Calibration migration completed",
+        }
+    except Exception as e:
+        logger.exception("Calibration migration failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Calibration migration failed: {e}")
+
+
+@app.get("/api/paint/library/recipes")
+async def list_library_recipes(
+    group: str = "default",
+    page: int = 1,
+    page_size: int = 50,
+):
+    """List cached recipes for a library, sorted by hex ascending, with pagination."""
+    page = max(1, int(page))
+    page_size = max(1, min(200, int(page_size)))
+
+    cache = load_recipe_cache(group)
+    rows: list[dict] = []
+    for hex_key in sorted(cache.keys()):
+        entry = cache.get(hex_key)
+        if not isinstance(entry, dict):
+            continue
+        recipe = entry.get("recipe")
+        if not isinstance(recipe, dict):
+            continue
+        ingredients_in = recipe.get("ingredients")
+        ingredients_out = []
+        if isinstance(ingredients_in, list):
+            for ing in ingredients_in:
+                if not isinstance(ing, dict):
+                    continue
+                ingredients_out.append({
+                    "paint_id": ing.get("paint_id"),
+                    "paint_name": ing.get("paint_name"),
+                    "percentage": ing.get("percentage"),
+                })
+        rows.append({
+            "hex": str(hex_key).upper(),
+            "confidence": entry.get("confidence") or "unknown",
+            "last_modified": entry.get("updated_at") or recipe.get("updated_at") or recipe.get("created_at"),
+            "type": entry.get("type") or recipe.get("type"),
+            "delta_e": recipe.get("error"),
+            "ingredients": ingredients_out,
+        })
+
+    total = len(rows)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    safe_page = min(page, total_pages)
+    start = (safe_page - 1) * page_size
+    end = start + page_size
+    return {
+        "group": group,
+        "page": safe_page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "recipes": rows[start:end],
+    }
+
+
 def _gamut_library_signature(group: str, library: dict) -> str:
     paints = library.get("paints", [])
     records = []
     for p in sorted(paints, key=lambda x: str(x.get("id", ""))):
         pid = p.get("id", "")
-        cal = CALIBRATION_DIR / f"{pid}.json"
+        cal = calibration_file_for(group, pid)
         cal_sig = ""
         if cal.exists():
             stat = cal.stat()
@@ -1290,7 +1495,7 @@ async def _compute_recipes_async(
         records = []
         for p in sorted(paints, key=lambda x: str(x.get("id", ""))):
             pid = p.get("id", "")
-            cal = CALIBRATION_DIR / f"{pid}.json"
+            cal = calibration_file_for(library_group, pid)
             cal_sig = ""
             if cal.exists():
                 stat = cal.stat()
@@ -1479,7 +1684,7 @@ async def _compute_recipes_async(
             pid = p.get("id")
             if not pid:
                 continue
-            cal_file = CALIBRATION_DIR / f"{pid}.json"
+            cal_file = calibration_file_for(library_group, pid)
             if not cal_file.exists():
                 continue
             try:
@@ -1601,6 +1806,45 @@ async def _compute_recipes_async(
         updated["predicted_hex"] = predicted_hex
         return updated
 
+    def _apply_total_grams(recipe_obj: object, total_grams: Optional[float]) -> object:
+        """Recalculate ingredient grams from percentages for current target total."""
+        if not isinstance(recipe_obj, dict):
+            return recipe_obj
+        ingredients = recipe_obj.get("ingredients")
+        if not isinstance(ingredients, list):
+            return recipe_obj
+
+        if total_grams is None or total_grams <= 0:
+            # Drop stale grams when no current total is available.
+            updated = dict(recipe_obj)
+            new_ingredients = []
+            for ing in ingredients:
+                if not isinstance(ing, dict):
+                    continue
+                ing_new = dict(ing)
+                ing_new.pop("grams", None)
+                new_ingredients.append(ing_new)
+            updated["ingredients"] = new_ingredients
+            return updated
+
+        updated = dict(recipe_obj)
+        new_ingredients = []
+        for ing in ingredients:
+            if not isinstance(ing, dict):
+                continue
+            ing_new = dict(ing)
+            try:
+                pct = float(ing_new.get("percentage", 0.0))
+            except Exception:
+                pct = 0.0
+            ing_new["grams"] = round((pct / 100.0) * float(total_grams), 2)
+            new_ingredients.append(ing_new)
+        if new_ingredients:
+            prev_sum = round(sum(float(i.get("grams", 0.0)) for i in new_ingredients[:-1]), 2)
+            new_ingredients[-1]["grams"] = round(float(total_grams) - prev_sum, 2)
+        updated["ingredients"] = new_ingredients
+        return updated
+
     try:
         fingerprint = _library_fingerprint()
         recipes_by_index: dict[int, dict] = {}
@@ -1635,6 +1879,7 @@ async def _compute_recipes_async(
                 cached = get_cached_recipe(library_group, target_hex)
                 if cached and cached.get("type") == "deterministic" and cached.get("library_fingerprint") == fingerprint:
                     cached_recipe = _ensure_predicted_hex(cached.get("recipe"))
+                    cached_recipe = _apply_total_grams(cached_recipe, color.get("__target_grams"))
                     safe_idx = _safe_index(idx)
                     recipes_by_index[safe_idx] = {
                         "palette_index": safe_idx,
@@ -1766,11 +2011,15 @@ async def _compute_recipes_async(
         ordered = []
         for color in palette_list:
             idx = _safe_index(color.get("index", -1))
-            ordered.append(recipes_by_index.get(idx, {
+            item = recipes_by_index.get(idx, {
                 "palette_index": idx,
                 "recipe": None,
                 "error": "Recipe generation failed: missing result"
-            }))
+            })
+            if isinstance(item, dict) and isinstance(item.get("recipe"), dict):
+                item = dict(item)
+                item["recipe"] = _apply_total_grams(item.get("recipe"), color.get("__target_grams"))
+            ordered.append(item)
     
         if use_ai:
             # AI second pass only for poor deterministic recipes to control latency/cost.

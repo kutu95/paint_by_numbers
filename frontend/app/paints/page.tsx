@@ -226,6 +226,19 @@ interface CalibrationData {
   notes?: string
 }
 
+interface LibraryRecipeRow {
+  hex: string
+  confidence: string
+  last_modified?: string | null
+  type?: string | null
+  delta_e?: number | null
+  ingredients: Array<{
+    paint_id?: string
+    paint_name?: string
+    percentage?: number
+  }>
+}
+
 export default function PaintsPage() {
   const router = useRouter()
   const [paints, setPaints] = useState<Paint[]>([])
@@ -252,6 +265,11 @@ export default function PaintsPage() {
   const [gamutData, setGamutData] = useState<any | null>(null)
   const [selectedGamutCell, setSelectedGamutCell] = useState<any | null>(null)
   const gamutCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const [recipeRows, setRecipeRows] = useState<LibraryRecipeRow[]>([])
+  const [recipeRowsLoading, setRecipeRowsLoading] = useState(false)
+  const [recipeRowsPage, setRecipeRowsPage] = useState(1)
+  const [recipeRowsTotalPages, setRecipeRowsTotalPages] = useState(1)
+  const [recipeRowsTotal, setRecipeRowsTotal] = useState(0)
   const [calibrationPanelOpen, setCalibrationPanelOpen] = useState(false)
   const [calibrationData, setCalibrationData] = useState<CalibrationData | null>(null)
   const [calibrationLoading, setCalibrationLoading] = useState(false)
@@ -268,8 +286,14 @@ export default function PaintsPage() {
         localStorage.setItem('lastSelectedPaintLibrary', selectedGroup)
       }
       loadPaints()
+      setRecipeRowsPage(1)
     }
   }, [selectedGroup])
+
+  useEffect(() => {
+    if (!selectedGroup) return
+    loadLibraryRecipes(recipeRowsPage)
+  }, [selectedGroup, recipeRowsPage])
 
   useEffect(() => {
     if (!editingPaint) {
@@ -281,7 +305,7 @@ export default function PaintsPage() {
     if (!calibrationPanelOpen) return
     setCalibrationLoading(true)
     setCalibrationError(null)
-    fetch(`${API_BASE_URL}/api/paint/calibration/${editingPaint.id}`)
+    fetch(`${API_BASE_URL}/api/paint/calibration/${editingPaint.id}?group=${encodeURIComponent(selectedGroup)}`)
       .then((res) => {
         if (!res.ok) {
           if (res.status === 404) throw new Error('No calibration data')
@@ -559,6 +583,31 @@ export default function PaintsPage() {
     }
   }
 
+  const loadLibraryRecipes = async (page: number) => {
+    if (!selectedGroup) return
+    setRecipeRowsLoading(true)
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/paint/library/recipes?group=${encodeURIComponent(selectedGroup)}&page=${page}&page_size=25`,
+        { cache: 'no-store' }
+      )
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const data = await response.json()
+      setRecipeRows(Array.isArray(data.recipes) ? data.recipes : [])
+      setRecipeRowsTotalPages(Math.max(1, Number(data.total_pages || 1)))
+      setRecipeRowsTotal(Number(data.total || 0))
+    } catch (error) {
+      console.error('Failed to load library recipes:', error)
+      setRecipeRows([])
+      setRecipeRowsTotalPages(1)
+      setRecipeRowsTotal(0)
+    } finally {
+      setRecipeRowsLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (!gamutData || !gamutCanvasRef.current) return
     const canvas = gamutCanvasRef.current
@@ -709,9 +758,9 @@ export default function PaintsPage() {
             </button>
           </div>
           <div className="mt-4 pt-4 border-t border-gray-600">
-            <label className="block font-semibold mb-2">Library coverage (mg/cm²)</label>
+            <label className="block font-semibold mb-2">Library coverage (g/cm²)</label>
             <p className="text-sm text-gray-400 mb-2">
-              One value for this whole library: how many mg of paint cover 1 cm². Used for recipe weight calculations.
+              One value for this whole library: how many grams of paint cover 1 cm². Used for recipe weight calculations.
             </p>
             <div className="flex items-center gap-2 flex-wrap">
               <input
@@ -914,7 +963,7 @@ export default function PaintsPage() {
               )}
               <div className="flex gap-2">
                 <button
-                  onClick={() => router.push(`/paints/calibrate/${paint.id}`)}
+                  onClick={() => router.push(`/paints/calibrate/${paint.id}?group=${encodeURIComponent(selectedGroup)}`)}
                   className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm"
                 >
                   Calibrate
@@ -1012,6 +1061,81 @@ export default function PaintsPage() {
               </div>
             </div>
           )}
+
+          <div className="mt-6 pt-4 border-t border-gray-700">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-lg font-bold">Library Recipe Cache</h3>
+              <div className="text-sm text-gray-400">Total recipes: {recipeRowsTotal}</div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-400 border-b border-gray-600">
+                    <th className="py-2 pr-3">Hex</th>
+                    <th className="py-2 pr-3">Recipe</th>
+                    <th className="py-2 pr-3">Confidence</th>
+                    <th className="py-2 pr-3">ΔE</th>
+                    <th className="py-2">Last Modified</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {!recipeRowsLoading && recipeRows.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="py-4 text-gray-500">
+                        No recipes cached for this library yet.
+                      </td>
+                    </tr>
+                  )}
+                  {recipeRows.map((row) => (
+                    <tr key={row.hex} className="border-b border-gray-700 align-top">
+                      <td className="py-2 pr-3">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="inline-block w-5 h-5 rounded border border-gray-600"
+                            style={{ backgroundColor: row.hex }}
+                          />
+                          <span className="font-mono">{row.hex}</span>
+                        </div>
+                      </td>
+                      <td className="py-2 pr-3 text-gray-200">
+                        {Array.isArray(row.ingredients) && row.ingredients.length > 0
+                          ? row.ingredients
+                              .map((ing) => `${ing.paint_name || ing.paint_id} ${Number(ing.percentage || 0).toFixed(2)}%`)
+                              .join(' + ')
+                          : 'No ingredients'}
+                      </td>
+                      <td className="py-2 pr-3 capitalize">{row.confidence || 'unknown'}</td>
+                      <td className="py-2 pr-3">{row.delta_e != null ? Number(row.delta_e).toFixed(2) : '—'}</td>
+                      <td className="py-2 text-gray-300">
+                        {row.last_modified ? new Date(row.last_modified).toLocaleString() : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                onClick={() => setRecipeRowsPage((p) => Math.max(1, p - 1))}
+                disabled={recipeRowsLoading || recipeRowsPage <= 1}
+                className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50"
+              >
+                Prev
+              </button>
+              <div className="text-sm text-gray-300">
+                Page {recipeRowsPage} / {recipeRowsTotalPages}
+              </div>
+              <button
+                onClick={() => setRecipeRowsPage((p) => Math.min(recipeRowsTotalPages, p + 1))}
+                disabled={recipeRowsLoading || recipeRowsPage >= recipeRowsTotalPages}
+                className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50"
+              >
+                Next
+              </button>
+              {recipeRowsLoading && <span className="text-sm text-gray-400">Loading…</span>}
+            </div>
+          </div>
         </div>
 
         {paints.length === 0 && !showAddForm && (

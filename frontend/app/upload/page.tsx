@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { API_BASE_URL } from '@/lib/config'
-import { saveProject, getProjectBySessionId, removeProject } from '@/lib/projects'
+import { saveProject, getProjectBySessionId, removeProject, syncProjectsFromServer } from '@/lib/projects'
 
 interface PaletteColor {
   index: number
@@ -344,15 +344,18 @@ export default function Home() {
   // Also restore sessionData from localStorage so that after generating and switching tabs, returning shows results + original image.
   useEffect(() => {
     if (!editSessionId || typeof window === 'undefined') return
-    const p = getProjectBySessionId(editSessionId)
-    if (p) {
-      setProjectName(p.name)
-      setCanvasWidthCm(p.canvasWidthCm)
-      setCanvasHeightCm(p.canvasHeightCm)
-      setSaturationBoost(p.saturationBoost)
-      setDetailLevel(p.detailLevel)
-      setSelectedLibraryGroup(p.libraryGroup)
-    }
+    void (async () => {
+      await syncProjectsFromServer()
+      const p = getProjectBySessionId(editSessionId)
+      if (p) {
+        setProjectName(p.name)
+        setCanvasWidthCm(p.canvasWidthCm)
+        setCanvasHeightCm(p.canvasHeightCm)
+        setSaturationBoost(p.saturationBoost)
+        setDetailLevel(p.detailLevel)
+        setSelectedLibraryGroup(p.libraryGroup)
+      }
+    })()
     const savedSession = localStorage.getItem(`session_${editSessionId}`)
     if (savedSession) {
       try {

@@ -26,21 +26,28 @@ RECIPES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _CALIBRATION_CACHE: Dict[str, Tuple[int, Dict[str, Any]]] = {}
 
 
-def _load_calibration_cached(paint_id: str) -> Optional[Dict[str, Any]]:
+def calibration_file_for(group: str, paint_id: str) -> Path:
+    safe_group = (group or "default").strip() or "default"
+    safe_paint = (paint_id or "").strip()
+    return CALIBRATION_DIR / f"{safe_group}__{safe_paint}.json"
+
+
+def _load_calibration_cached(paint_id: str, group: str = "default") -> Optional[Dict[str, Any]]:
     """Load calibration JSON with mtime-based in-process cache."""
-    cal_file = CALIBRATION_DIR / f"{paint_id}.json"
+    cache_key = f"{group}:{paint_id}"
+    cal_file = calibration_file_for(group, paint_id)
     if not cal_file.exists():
-        _CALIBRATION_CACHE.pop(paint_id, None)
+        _CALIBRATION_CACHE.pop(cache_key, None)
         return None
     try:
         mtime_ns = cal_file.stat().st_mtime_ns
-        cached = _CALIBRATION_CACHE.get(paint_id)
+        cached = _CALIBRATION_CACHE.get(cache_key)
         if cached and cached[0] == mtime_ns:
             return cached[1]
         with open(cal_file, 'r') as f:
             calibration = json.load(f)
         if isinstance(calibration, dict):
-            _CALIBRATION_CACHE[paint_id] = (mtime_ns, calibration)
+            _CALIBRATION_CACHE[cache_key] = (mtime_ns, calibration)
             return calibration
     except Exception:
         return None
@@ -48,7 +55,13 @@ def _load_calibration_cached(paint_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _empty_library(group: str) -> Dict:
-    return {"version": 1, "paints": [], "group": group}
+    return {
+        "version": 1,
+        "paints": [],
+        "group": group,
+        "calibration_data": {},
+        "recipes": {},
+    }
 
 
 def _coerce_library_shape(data: object, group: str) -> Dict:
@@ -65,6 +78,10 @@ def _coerce_library_shape(data: object, group: str) -> Dict:
     normalized["version"] = int(normalized.get("version", 1) or 1)
     normalized["group"] = str(normalized.get("group") or group)
     normalized["paints"] = paints
+    calibration_data = normalized.get("calibration_data", {})
+    normalized["calibration_data"] = calibration_data if isinstance(calibration_data, dict) else {}
+    recipes = normalized.get("recipes", {})
+    normalized["recipes"] = recipes if isinstance(recipes, dict) else {}
     return normalized
 
 
@@ -118,7 +135,30 @@ def load_library(group: str = "default") -> Dict:
                 data = json.load(f)
                 # Migrate to new structure if needed
                 if isinstance(data, dict) and "groups" not in data:
-                    return _coerce_library_shape(data, group)
+                    coerced = _coerce_library_shape(data, group)
+                    needs_save = "calibration_data" not in data or "recipes" not in data
+                    if not coerced.get("calibration_data"):
+                        cal_map: Dict[str, Dict[str, Any]] = {}
+                        for paint in coerced.get("paints", []):
+                            pid = str(paint.get("id", "")).strip()
+                            if not pid:
+                                continue
+                            cal_file = calibration_file_for(group, pid)
+                            if not cal_file.exists():
+                                continue
+                            try:
+                                with open(cal_file, "r") as cf:
+                                    loaded = json.load(cf)
+                                if isinstance(loaded, dict):
+                                    cal_map[pid] = loaded
+                            except Exception:
+                                continue
+                        if cal_map:
+                            coerced["calibration_data"] = cal_map
+                            needs_save = True
+                    if needs_save:
+                        save_library(coerced, group)
+                    return coerced
         except (json.JSONDecodeError, OSError, ValueError) as e:
             logger.warning("Failed to load legacy library file %s: %s", LIBRARY_FILE, e)
     
@@ -128,7 +168,31 @@ def load_library(group: str = "default") -> Dict:
         return _empty_library(group)
     try:
         with open(library_file, 'r') as f:
-            return _coerce_library_shape(json.load(f), group)
+            data = json.load(f)
+            coerced = _coerce_library_shape(data, group)
+            needs_save = "calibration_data" not in data or "recipes" not in data
+            if not coerced.get("calibration_data"):
+                cal_map: Dict[str, Dict[str, Any]] = {}
+                for paint in coerced.get("paints", []):
+                    pid = str(paint.get("id", "")).strip()
+                    if not pid:
+                        continue
+                    cal_file = calibration_file_for(group, pid)
+                    if not cal_file.exists():
+                        continue
+                    try:
+                        with open(cal_file, "r") as cf:
+                            loaded = json.load(cf)
+                        if isinstance(loaded, dict):
+                            cal_map[pid] = loaded
+                    except Exception:
+                        continue
+                if cal_map:
+                    coerced["calibration_data"] = cal_map
+                    needs_save = True
+            if needs_save:
+                save_library(coerced, group)
+            return coerced
     except (json.JSONDecodeError, OSError, ValueError) as e:
         logger.warning("Failed to load library group file %s: %s", library_file, e)
         return _empty_library(group)
@@ -178,6 +242,25 @@ def get_recipe_cache_file(group: str) -> Path:
     return RECIPES_CACHE_DIR / f"{group}_recipes.json"
 
 
+def _derive_confidence(recipe: Dict) -> str:
+    if not isinstance(recipe, dict):
+        return "unknown"
+    try:
+        err = recipe.get("error")
+        err_val = float(err) if err is not None else None
+    except Exception:
+        err_val = None
+    if err_val is None:
+        return "unknown"
+    if err_val < 2.0:
+        return "excellent"
+    if err_val < 5.0:
+        return "good"
+    if err_val <= 10.0:
+        return "acceptable"
+    return "poor"
+
+
 def load_recipe_cache(group: str) -> Dict[str, Dict]:
     """Load recipe cache for a library group.
     
@@ -189,17 +272,23 @@ def load_recipe_cache(group: str) -> Dict[str, Dict]:
     Returns:
         Dictionary mapping hex color to cached recipe data
     """
+    library = load_library(group)
+    recipes = library.get("recipes", {})
+    if isinstance(recipes, dict) and recipes:
+        return recipes
+
+    # Backward compatibility: migrate old cache file into library JSON.
     cache_file = get_recipe_cache_file(group)
     if not cache_file.exists():
         return {}
-    
     try:
         with open(cache_file, 'r') as f:
             data = json.load(f)
-            # Ensure it's a dict with hex keys
-            if isinstance(data, dict):
-                return data
+        if not isinstance(data, dict):
             return {}
+        library["recipes"] = data
+        save_library(library, group)
+        return data
     except (json.JSONDecodeError, IOError):
         return {}
 
@@ -211,8 +300,9 @@ def save_recipe_cache(group: str, cache: Dict[str, Dict]):
         group: Library group name
         cache: Dictionary mapping hex color to recipe data
     """
-    cache_file = get_recipe_cache_file(group)
-    atomic_write(cache_file, cache)
+    library = load_library(group)
+    library["recipes"] = cache if isinstance(cache, dict) else {}
+    save_library(library, group)
 
 
 def get_cached_recipe(group: str, hex_color: str) -> Optional[Dict]:
@@ -258,7 +348,11 @@ def cache_recipe(group: str, hex_color: str, recipe: Dict):
         hex_normalized = '#' + hex_normalized
     
     cache = load_recipe_cache(group)
-    cache[hex_normalized] = recipe
+    entry = dict(recipe) if isinstance(recipe, dict) else {"recipe": recipe}
+    entry["updated_at"] = datetime.now().isoformat()
+    if "confidence" not in entry:
+        entry["confidence"] = _derive_confidence(entry.get("recipe") if isinstance(entry.get("recipe"), dict) else entry)
+    cache[hex_normalized] = entry
     save_recipe_cache(group, cache)
 
 
@@ -266,11 +360,21 @@ def get_library_info(group: str) -> Dict:
     """Get information about a library group."""
     library = load_library(group)
     paints = [p for p in library.get('paints', []) if isinstance(p, dict)]
+    cal_map = library.get("calibration_data")
+    if not isinstance(cal_map, dict):
+        cal_map = {}
     paint_count = len(paints)
-    calibrated_count = sum(
-        1 for p in paints
-        if (CALIBRATION_DIR / f"{p.get('id', '')}.json").exists()
-    )
+    calibrated_count = 0
+    for p in paints:
+        pid = p.get("id", "")
+        if not pid:
+            continue
+        if isinstance(cal_map.get(pid), dict):
+            calibrated_count += 1
+            continue
+        group_file = calibration_file_for(group, pid)
+        if group_file.exists():
+            calibrated_count += 1
     
     # Use stored name if available, otherwise generate from group ID
     name = library.get('name', group.replace("-", " ").title())
@@ -363,16 +467,14 @@ def sample_color_from_image(image_path: str, x: int, y: int, radius: int = 5) ->
     return rgb_mean, lab
 
 
-def get_hex_from_calibration(paint_id: str) -> Optional[str]:
+def get_hex_from_calibration(paint_id: str, group: str = "default") -> Optional[str]:
     """Get the approximate hex color from a paint's calibration 100% swatch.
     Returns None if no calibration or no valid sample.
     """
-    cal_file = CALIBRATION_DIR / f"{paint_id}.json"
-    if not cal_file.exists():
-        return None
     try:
-        with open(cal_file, 'r') as f:
-            cal = json.load(f)
+        cal = _load_calibration_cached(paint_id, group)
+        if cal is None:
+            return None
         samples = cal.get('samples', [])
         if not samples:
             return None
@@ -385,6 +487,87 @@ def get_hex_from_calibration(paint_id: str) -> Optional[str]:
         return "#{:02x}{:02x}{:02x}".format(r, g, b)
     except Exception:
         return None
+
+
+def migrate_global_calibrations_to_group_scope(delete_legacy: bool = True) -> Dict[str, int]:
+    """One-time migration: copy legacy calibration files into group-scoped files and optionally delete legacy files."""
+    migrated_files = 0
+    updated_library_entries = 0
+    groups_seen = 0
+
+    for group in list_library_groups():
+        groups_seen += 1
+        lib = load_library(group)
+        paints = [p for p in lib.get("paints", []) if isinstance(p, dict)]
+        cal_map = lib.get("calibration_data")
+        if not isinstance(cal_map, dict):
+            cal_map = {}
+        changed = False
+
+        for paint in paints:
+            pid = str(paint.get("id", "")).strip()
+            if not pid:
+                continue
+            scoped_file = calibration_file_for(group, pid)
+            calibration = None
+
+            if scoped_file.exists():
+                try:
+                    with open(scoped_file, "r") as f:
+                        loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        calibration = loaded
+                except Exception:
+                    calibration = None
+            elif isinstance(cal_map.get(pid), dict):
+                calibration = cal_map.get(pid)
+                try:
+                    atomic_write(scoped_file, calibration)
+                    migrated_files += 1
+                except Exception:
+                    pass
+            else:
+                legacy_file = CALIBRATION_DIR / f"{pid}.json"
+                if legacy_file.exists():
+                    try:
+                        with open(legacy_file, "r") as f:
+                            loaded = json.load(f)
+                        if isinstance(loaded, dict):
+                            calibration = loaded
+                            atomic_write(scoped_file, loaded)
+                            migrated_files += 1
+                    except Exception:
+                        calibration = None
+
+            if isinstance(calibration, dict):
+                if cal_map.get(pid) != calibration:
+                    cal_map[pid] = calibration
+                    updated_library_entries += 1
+                    changed = True
+
+        if changed:
+            lib["calibration_data"] = cal_map
+            save_library(lib, group)
+
+    deleted_legacy_files = 0
+    if delete_legacy:
+        for file in CALIBRATION_DIR.glob("*.json"):
+            stem = file.stem
+            # scoped files look like "<group>__<paint_id>"
+            if "__" in stem:
+                continue
+            try:
+                file.unlink()
+                deleted_legacy_files += 1
+            except Exception:
+                continue
+
+    return {
+        "groups_seen": groups_seen,
+        "migrated_files": migrated_files,
+        "updated_library_entries": updated_library_entries,
+        "deleted_legacy_files": deleted_legacy_files,
+    }
 
 
 def sample_color_from_region(
@@ -590,7 +773,12 @@ def _predict_mix_lab_from_components(
     return rgb_to_lab(mixed_rgb)
 
 
-def find_best_one_pigment_recipe(target_lab: List[float], paint_id: str, paint_hex: str = None) -> Optional[Dict]:
+def find_best_one_pigment_recipe(
+    target_lab: List[float],
+    paint_id: str,
+    paint_hex: str = None,
+    library_group: str = "default",
+) -> Optional[Dict]:
     """Find best mixing ratio for one pigment + white to match target Lab.
     
     Args:
@@ -604,7 +792,7 @@ def find_best_one_pigment_recipe(target_lab: List[float], paint_id: str, paint_h
     min_white_ratio, max_total_pigment = get_white_mix_limits(target_lab)
 
     # If calibration exists, use it (more accurate)
-    calibration = _load_calibration_cached(paint_id)
+    calibration = _load_calibration_cached(paint_id, library_group)
     if calibration is not None:
         samples = calibration.get('samples', [])
         if samples:
@@ -685,7 +873,14 @@ def find_best_one_pigment_recipe(target_lab: List[float], paint_id: str, paint_h
     return None
 
 
-def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_id2: str, paint1_hex: str = None, paint2_hex: str = None) -> Optional[Dict]:
+def find_best_two_pigment_recipe(
+    target_lab: List[float],
+    paint_id1: str,
+    paint_id2: str,
+    paint1_hex: str = None,
+    paint2_hex: str = None,
+    library_group: str = "default",
+) -> Optional[Dict]:
     """Find best mixing ratio for two pigments + white (approximation).
     
     Args:
@@ -703,8 +898,8 @@ def find_best_two_pigment_recipe(target_lab: List[float], paint_id1: str, paint_
     max_ratio_per_pigment = max_total_pigment - min_ratio
     
     # Try calibrated first if both exist
-    cal1 = _load_calibration_cached(paint_id1)
-    cal2 = _load_calibration_cached(paint_id2)
+    cal1 = _load_calibration_cached(paint_id1, library_group)
+    cal2 = _load_calibration_cached(paint_id2, library_group)
     if cal1 is not None and cal2 is not None:
         cal1_max = max(0.0, min(1.0, get_calibration_max_ratio(cal1)))
         cal2_max = max(0.0, min(1.0, get_calibration_max_ratio(cal2)))
@@ -805,6 +1000,7 @@ def find_best_multi_pigment_recipe(
     target_lab: List[float],
     paint_ids: List[str],
     paint_hexes: List[str],
+    library_group: str = "default",
     quality_mode: str = "balanced",
 ) -> Optional[Dict]:
     """Find best mixing ratio for multiple pigments + white.
@@ -829,7 +1025,7 @@ def find_best_multi_pigment_recipe(
     calibrated_count = 0
     
     for paint_id, paint_hex in zip(paint_ids, paint_hexes):
-        calibration = _load_calibration_cached(paint_id)
+        calibration = _load_calibration_cached(paint_id, library_group)
         if calibration is not None:
             calibrated_count += 1
         
@@ -1133,7 +1329,7 @@ def generate_recipes_for_palette(
         
             for paint in search_paints:
                 paint_hex = paint.get('hex_approx', '')
-                recipe = find_best_one_pigment_recipe(target_lab, paint['id'], paint_hex)
+                recipe = find_best_one_pigment_recipe(target_lab, paint['id'], paint_hex, library_group=library_group)
                 if recipe:
                     if recipe['error'] < best_one_error:
                         best_one_error = recipe['error']
@@ -1185,10 +1381,17 @@ def generate_recipes_for_palette(
                             paint_ids[0],
                             paint_ids[1],
                             paint_hexes[0],
-                            paint_hexes[1]
+                            paint_hexes[1],
+                            library_group=library_group,
                         )
                     else:
-                        recipe = find_best_multi_pigment_recipe(target_lab, paint_ids, paint_hexes, quality_mode=mode)
+                        recipe = find_best_multi_pigment_recipe(
+                            target_lab,
+                            paint_ids,
+                            paint_hexes,
+                            library_group=library_group,
+                            quality_mode=mode,
+                        )
 
                     if not recipe:
                         continue

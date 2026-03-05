@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { getProjects, getProjectBySessionId, saveProject, removeProject, type Project } from '@/lib/projects'
+import { getProjects, getProjectBySessionId, saveProject, removeProject, syncProjectsFromServer, type Project } from '@/lib/projects'
 import { ProjectionControlPanel } from '@/app/project/[sessionId]/ProjectionControlPanel'
 
 const TABS = ['file', 'settings', 'image', 'paint', 'layers', 'projection'] as const
@@ -35,7 +35,10 @@ export default function Home() {
 
   useEffect(() => {
     if (!mounted || typeof window === 'undefined') return
-    setProjects(getProjects())
+    void (async () => {
+      await syncProjectsFromServer()
+      setProjects(getProjects())
+    })()
   }, [mounted, activeTab])
 
   useEffect(() => {
@@ -69,9 +72,22 @@ export default function Home() {
     settings.canvasWidthCm = canvasWidthCm
     settings.canvasHeightCm = canvasHeightCm
     localStorage.setItem('layerpainter_settings', JSON.stringify(settings))
+
+    // Keep current project's canvas dimensions in sync with saved settings when a project is active.
+    if (currentSessionId) {
+      const currentProject = getProjectBySessionId(currentSessionId)
+      if (currentProject) {
+        saveProject({
+          ...currentProject,
+          canvasWidthCm,
+          canvasHeightCm,
+        })
+      }
+    }
+
     setSettingsSaved(true)
     setTimeout(() => setSettingsSaved(false), 2000)
-  }, [paintMarginPercent, canvasWidthCm, canvasHeightCm])
+  }, [paintMarginPercent, canvasWidthCm, canvasHeightCm, currentSessionId])
 
   useEffect(() => {
     if (tabParam && TABS.includes(tabParam as TabId)) setActiveTab(tabParam as TabId)
@@ -123,7 +139,10 @@ export default function Home() {
     } else {
       saveProject(proj)
     }
-    setProjects(getProjects())
+    void (async () => {
+      await syncProjectsFromServer(true)
+      setProjects(getProjects())
+    })()
   }, [currentSessionId])
 
   const handleDownloadJson = useCallback(() => {
@@ -154,7 +173,10 @@ export default function Home() {
       setCurrentSessionId(null)
     }
     setShowDeleteConfirm(false)
-    setProjects(getProjects())
+    void (async () => {
+      await syncProjectsFromServer(true)
+      setProjects(getProjects())
+    })()
   }, [currentSessionId])
 
   const imageIframeSrc = currentSessionId
