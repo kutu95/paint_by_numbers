@@ -10,6 +10,7 @@ interface Paint {
   name: string
   type?: string
   hex_approx?: string
+  hex?: string
 }
 
 interface VirtualPaintMixerProps {
@@ -73,7 +74,7 @@ export function VirtualPaintMixer({ sessionData, selectedLibraryGroup }: Virtual
       .then((data) => {
         if (cancelled) return
         const list = (data.paints || []).filter((p: Paint) => p && (p.hex_approx || p.hex))
-        const withHex = list.map((p: Paint) => ({ ...p, hex_approx: p.hex_approx || (p as any).hex }))
+        const withHex = list.map((p: Paint) => ({ ...p, hex_approx: p.hex_approx || p.hex }))
         setPaints(withHex)
         setSliderValues((prev) => {
           const next = { ...prev }
