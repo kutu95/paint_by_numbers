@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { API_BASE_URL } from '@/lib/config'
+import { SpotTestSection } from './SpotTestSection'
 
 function formatRecipe(recipeData: any): string {
   if (!recipeData?.recipe) return recipeData?.error || 'No recipe available'
@@ -1113,6 +1114,8 @@ export default function PaintsPage() {
             </div>
           ))}
         </div>
+
+        <SpotTestSection selectedGroup={selectedGroup} paints={paints} />
 
         <div className="mt-8 p-4 bg-gray-800 rounded">
           <h2 className="text-2xl font-bold mb-3">Palette Gamut Analysis</h2>

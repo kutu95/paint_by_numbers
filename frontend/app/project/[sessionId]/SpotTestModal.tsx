@@ -69,16 +69,18 @@ export function SpotTestModal({
   recipe,
   libraryGroup,
 }: SpotTestModalProps) {
-  const [step, setStep] = useState<'upload' | 'click' | 'confirm' | 'done'>('upload')
+  const [step, setStep] = useState<'upload' | 'click' | 'confirm_commit' | 'done'>('upload')
   const [uploading, setUploading] = useState(false)
   const [sampling, setSampling] = useState(false)
+  const [committing, setCommitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [imageId, setImageId] = useState<string | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [result, setResult] = useState<{
     delta_e: number | null
-    feedback_updated: boolean
-    paints_updated: string[]
+    measured_rgb?: number[]
+    feedback_updated?: boolean
+    paints_updated?: string[]
   } | null>(null)
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null)
   const [dragCurrent, setDragCurrent] = useState<{ x: number; y: number } | null>(null)
@@ -174,32 +176,60 @@ export function SpotTestModal({
     setDragCurrent(null)
   }
 
+  const buildSampleForm = (applyFeedback: boolean) => {
+    const form = new FormData()
+    form.append('session_id', sessionId)
+    form.append('palette_index', String(paletteIndex))
+    form.append('image_id', imageId!)
+    form.append('x1', String(selectedRegion!.x1))
+    form.append('y1', String(selectedRegion!.y1))
+    form.append('x2', String(selectedRegion!.x2))
+    form.append('y2', String(selectedRegion!.y2))
+    form.append('library_group', libraryGroup)
+    form.append('target_hex', targetHex)
+    form.append('recipe', JSON.stringify(recipeToComponents(recipe)))
+    form.append('apply_feedback', applyFeedback ? 'true' : 'false')
+    if (focusPaintId.trim()) form.append('focus_paint_id', focusPaintId.trim())
+    return form
+  }
+
   const handleSampleRegion = async () => {
     if (!imageId || !selectedRegion) return
     setError(null)
     setSampling(true)
     try {
-      const form = new FormData()
-      form.append('session_id', sessionId)
-      form.append('palette_index', String(paletteIndex))
-      form.append('image_id', imageId)
-      form.append('x1', String(selectedRegion.x1))
-      form.append('y1', String(selectedRegion.y1))
-      form.append('x2', String(selectedRegion.x2))
-      form.append('y2', String(selectedRegion.y2))
-      form.append('library_group', libraryGroup)
-      form.append('target_hex', targetHex)
-      form.append('recipe', JSON.stringify(recipeToComponents(recipe)))
-      form.append('apply_feedback', 'true')
-      if (focusPaintId.trim()) form.append('focus_paint_id', focusPaintId.trim())
-      const res = await fetch(`${API_BASE_URL}/api/paint/verify/sample`, {
-        method: 'POST',
-        body: form,
-      })
+      const res = await fetch(`${API_BASE_URL}/api/paint/verify/sample`, { method: 'POST', body: buildSampleForm(false) })
       if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`))
       const data = await res.json()
       setResult({
         delta_e: data.delta_e ?? null,
+        measured_rgb: data.measured_rgb ?? undefined,
+      })
+      setStep('confirm_commit')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSampling(false)
+    }
+  }
+
+  const handleCommit = async (commit: boolean) => {
+    if (!commit) {
+      setStep('click')
+      setResult(null)
+      setFocusPaintId('')
+      return
+    }
+    if (!imageId || !selectedRegion) return
+    setError(null)
+    setCommitting(true)
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/paint/verify/sample`, { method: 'POST', body: buildSampleForm(true) })
+      if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`))
+      const data = await res.json()
+      setResult({
+        delta_e: data.delta_e ?? null,
+        measured_rgb: data.measured_rgb ?? result?.measured_rgb,
         feedback_updated: data.feedback_updated === true,
         paints_updated: Array.isArray(data.paints_updated) ? data.paints_updated : [],
       })
@@ -207,7 +237,7 @@ export function SpotTestModal({
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setSampling(false)
+      setCommitting(false)
     }
   }
 
@@ -339,26 +369,45 @@ export function SpotTestModal({
               {selectedRegion && (
                 <button
                   type="button"
-                  onClick={() => setStep('confirm')}
-                  className="mt-2 px-4 py-2 bg-green-600 hover:bg-green-700 rounded text-white"
+                  onClick={handleSampleRegion}
+                  disabled={sampling}
+                  className="mt-2 px-4 py-2 bg-green-600 hover:bg-green-700 rounded text-white disabled:opacity-50"
                 >
-                  Sample area & compare
+                  {sampling ? 'Sampling…' : 'Sample area & compare'}
                 </button>
               )}
             </>
           )}
-          {step === 'confirm' && selectedRegion && (
+          {step === 'confirm_commit' && result && (
             <>
-              <p className="text-sm text-gray-300">
-                The recipe model will be updated; future recipes will use this correction.
-              </p>
+              <p className="text-sm text-gray-300 font-semibold">Compare expected vs actual, then choose whether to commit the correction.</p>
+              <div className="flex items-end gap-6 flex-wrap">
+                <div className="text-center">
+                  <div className="w-24 h-24 rounded border-2 border-gray-500" style={{ backgroundColor: targetHex }} title={targetHex} />
+                  <div className="text-xs text-gray-400 mt-1">Expected</div>
+                </div>
+                <div className="text-center">
+                  <div
+                    className="w-24 h-24 rounded border-2 border-gray-500"
+                    style={{
+                      backgroundColor: result.measured_rgb
+                        ? '#' + result.measured_rgb.slice(0, 3).map((c) => Math.max(0, Math.min(255, Math.round(c))).toString(16).padStart(2, '0')).join('')
+                        : '#000000',
+                    }}
+                  />
+                  <div className="text-xs text-gray-400 mt-1">Actual (from photo)</div>
+                </div>
+                <div className="flex items-center">
+                  <span className="text-lg font-bold text-gray-200">ΔE = {result.delta_e != null ? result.delta_e.toFixed(2) : '—'}</span>
+                </div>
+              </div>
               {(() => {
                 const pigmentIds = recipePigmentIds(recipe)
                 if (pigmentIds.length > 1) {
                   return (
                     <div className="space-y-1">
                       <label className="text-sm text-gray-400 block">
-                        If the problem is one paint (e.g. too much of it), choose it so the correction applies only to that paint and all other recipes using it will learn:
+                        If the problem is one paint (e.g. too much of it), choose it so the correction applies only to that paint:
                       </label>
                       <select
                         value={focusPaintId}
@@ -377,25 +426,13 @@ export function SpotTestModal({
                 }
                 return null
               })()}
-              <p className="text-sm text-gray-400">
-                Continue?
-              </p>
+              <p className="text-sm text-gray-400">Commit this correction? Future recipes will use it for the selected paint(s).</p>
               <div className="flex gap-3">
-                <button
-                  type="button"
-                  onClick={handleSampleRegion}
-                  disabled={sampling}
-                  className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded disabled:opacity-50 text-white"
-                >
-                  {sampling ? 'Sampling…' : 'Yes'}
+                <button type="button" onClick={() => handleCommit(true)} disabled={committing} className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded text-white disabled:opacity-50">
+                  {committing ? 'Committing…' : 'Yes'}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setStep('click')}
-                  disabled={sampling}
-                  className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded text-white disabled:opacity-50"
-                >
-                  Cancel
+                <button type="button" onClick={() => handleCommit(false)} disabled={committing} className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded disabled:opacity-50">
+                  No
                 </button>
               </div>
             </>
@@ -409,7 +446,7 @@ export function SpotTestModal({
                   'Sample completed.'
                 )}
               </p>
-              {result.feedback_updated && result.paints_updated.length > 0 && (
+              {result.feedback_updated && result.paints_updated && result.paints_updated.length > 0 && (
                 <p className="text-sm text-green-400">
                   Recipe model updated for: {result.paints_updated.join(', ')}. Future recipes will use this correction.
                 </p>

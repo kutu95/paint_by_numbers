@@ -25,7 +25,7 @@ from paint_manager import (
     get_hex_from_calibration, calibration_file_for, migrate_global_calibrations_to_group_scope,
     rgb_to_lab, lab_to_rgb, delta_e_lab, interpolate_lab_from_calibration, CALIBRATION_DIR, PAINT_DIR,
     list_library_groups, get_library_info,
-    generate_recipes_for_palette, load_recipe_cache, save_recipe_cache,
+    generate_recipes_for_palette, load_recipe_cache, save_recipe_cache, invalidate_recipe_cache,
     load_feedback_bias, save_feedback_bias, _bias_key,
 )
 import json
@@ -48,6 +48,8 @@ GAMUT_CACHE_DIR = PAINT_DIR / "gamut_cache"
 GAMUT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 PALETTE_OPTIMIZATION_CACHE_DIR = PAINT_DIR / "palette_optimization_cache"
 PALETTE_OPTIMIZATION_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+SPOT_TEST_DIR = PAINT_DIR / "spot_test"
+SPOT_TEST_DIR.mkdir(parents=True, exist_ok=True)
 
 # CORS middleware - allow origins from environment or default to localhost
 # Always include localhost so local dev works even when CORS_ORIGINS is set for production
@@ -2619,6 +2621,24 @@ async def get_feedback_bias(group: str = "default"):
     return {"group": group, "biases": biases}
 
 
+@app.post("/api/paint/feedback-bias/reset")
+async def reset_feedback_bias(body: dict = Body(...)):
+    """Remove a previous spot-test correction: one paint or all for the library. After reset, next Generate recipes will recompute without that bias."""
+    group = (body.get("group") or "default").strip() or "default"
+    paint_id = (body.get("paint_id") or "").strip() or None
+    biases = load_feedback_bias(group)
+    if paint_id:
+        key = _bias_key(paint_id)
+        if key in biases:
+            del biases[key]
+            save_feedback_bias(group, biases)
+    else:
+        save_feedback_bias(group, {})
+        biases = {}
+    invalidate_recipe_cache(group)
+    return {"group": group, "removed": paint_id or "all", "biases": biases}
+
+
 # Verification endpoints
 @app.post("/api/paint/verify/upload")
 async def upload_verification_photo(
@@ -2696,6 +2716,126 @@ def _parse_recipe_components(recipe_json: Optional[str]) -> list[tuple[str, floa
                 except Exception:
                     pass
     return out
+
+
+# Library spot-test (no session): use existing swatch photos to correct recipe model
+@app.post("/api/paint/spot-test/upload")
+async def spot_test_upload(
+    image: UploadFile = File(...),
+    library_group: str = Form("default"),
+):
+    """Upload a swatch photo for standalone spot test (Paint Library tab)."""
+    group = (library_group or "default").strip() or "default"
+    group_dir = SPOT_TEST_DIR / group
+    group_dir.mkdir(parents=True, exist_ok=True)
+    image_id = str(uuid.uuid4())
+    image_path = group_dir / f"{image_id}.jpg"
+    with open(image_path, "wb") as f:
+        content = await image.read()
+        f.write(content)
+    return {
+        "image_id": image_id,
+        "preview_url": f"/api/paint/spot-test/image/{group}/{image_id}",
+    }
+
+
+@app.get("/api/paint/spot-test/image/{group}/{image_id}")
+async def spot_test_image(group: str, image_id: str, request: Request):
+    """Serve spot-test upload with CORS (image stored as {image_id}.jpg)."""
+    path = SPOT_TEST_DIR / group / f"{image_id}.jpg"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+    try:
+        path.resolve().relative_to(SPOT_TEST_DIR.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+    response = FileResponse(path)
+    origin = request.headers.get("origin")
+    if origin and (origin in allowed_origins or "margies.app" in origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
+
+@app.post("/api/paint/spot-test/sample")
+async def spot_test_sample(
+    library_group: str = Form("default"),
+    image_id: str = Form(...),
+    x1: int = Form(...),
+    y1: int = Form(...),
+    x2: int = Form(...),
+    y2: int = Form(...),
+    target_hex: str = Form(""),
+    recipe: str = Form(""),
+    focus_paint_id: str = Form(""),
+    apply_feedback: str = Form("true"),
+):
+    """Sample region from spot-test image, compare to target_hex, optionally update feedback bias (no session)."""
+    group = (library_group or "default").strip() or "default"
+    image_path = SPOT_TEST_DIR / group / f"{image_id}.jpg"
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Spot-test image not found")
+    measured_rgb, measured_lab = sample_color_from_region(
+        str(image_path), x1, y1, x2, y2
+    )
+    measured_lab = list(measured_lab) if measured_lab else [50.0, 0.0, 0.0]
+    result = {
+        "measured_rgb": measured_rgb,
+        "measured_lab": measured_lab,
+        "delta_e": None,
+        "feedback_updated": False,
+        "paints_updated": [],
+    }
+    hex_str = (target_hex or "").strip().lstrip("#")
+    if len(hex_str) != 6:
+        return result
+    hex_str = "#" + hex_str
+    target_rgb = _hex_to_rgb_list(hex_str)
+    if target_rgb is None:
+        return result
+    target_lab = rgb_to_lab([float(c) for c in target_rgb])
+    delta_e = delta_e_lab(measured_lab, target_lab)
+    result["target_hex"] = hex_str
+    result["target_lab"] = target_lab
+    result["delta_e"] = round(float(delta_e), 3)
+    if apply_feedback.lower() != "true" or not recipe.strip():
+        return result
+    components = _parse_recipe_components(recipe)
+    white_ids = {"white", "titanium white", "zinc white"}
+    pigment_components = [(pid, r) for pid, r in components if str(pid).strip().lower() not in {w.lower() for w in white_ids}]
+    if not pigment_components:
+        return result
+    total_pigment = sum(r for _, r in pigment_components)
+    if total_pigment <= 0:
+        return result
+    error_lab = [
+        measured_lab[0] - target_lab[0],
+        measured_lab[1] - target_lab[1],
+        measured_lab[2] - target_lab[2],
+    ]
+    alpha = 1.0
+    focus_key = _bias_key(focus_paint_id) if (focus_paint_id and str(focus_paint_id).strip()) else None
+    biases = load_feedback_bias(group)
+    for pid, ratio in pigment_components:
+        key = _bias_key(pid)
+        if focus_key is not None:
+            if key != focus_key:
+                continue
+            share = 1.0
+        else:
+            share = ratio / total_pigment
+        update = [alpha * share * error_lab[0], alpha * share * error_lab[1], alpha * share * error_lab[2]]
+        existing = biases.get(key, [0.0, 0.0, 0.0])
+        biases[key] = [
+            existing[0] + update[0],
+            existing[1] + update[1],
+            existing[2] + update[2],
+        ]
+        result["paints_updated"].append(pid)
+    save_feedback_bias(group, biases)
+    invalidate_recipe_cache(group)
+    result["feedback_updated"] = True
+    return result
 
 
 @app.post("/api/paint/verify/sample")

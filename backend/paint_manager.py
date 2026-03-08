@@ -356,6 +356,11 @@ def save_recipe_cache(group: str, cache: Dict[str, Dict]):
     save_library(library, group)
 
 
+def invalidate_recipe_cache(group: str) -> None:
+    """Clear the recipe cache for a library group so next Generate recipes uses updated bias."""
+    save_recipe_cache(group, {})
+
+
 def get_cached_recipe(group: str, hex_color: str) -> Optional[Dict]:
     """Get a cached recipe for a color and library group.
     
