@@ -41,6 +41,15 @@ export function recipeToComponents(recipe: any): Array<{ paint_id: string; ratio
   return out
 }
 
+const WHITE_IDS = new Set(['white', 'titanium white', 'zinc white'])
+/** Pigment-only paint ids from recipe (exclude white) for "problem paint" selector */
+export function recipePigmentIds(recipe: any): string[] {
+  const comps = recipeToComponents(recipe)
+  return comps
+    .filter((c) => !WHITE_IDS.has(String(c.paint_id).trim().toLowerCase()))
+    .map((c) => c.paint_id)
+}
+
 export interface SpotTestModalProps {
   open: boolean
   onClose: () => void
@@ -75,6 +84,7 @@ export function SpotTestModal({
   const [dragCurrent, setDragCurrent] = useState<{ x: number; y: number } | null>(null)
   const [selectedRegion, setSelectedRegion] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null)
   const [imageDisplaySize, setImageDisplaySize] = useState<{ width: number; height: number } | null>(null)
+  const [focusPaintId, setFocusPaintId] = useState<string>('')
   const imageRef = useRef<HTMLImageElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
 
@@ -181,6 +191,7 @@ export function SpotTestModal({
       form.append('target_hex', targetHex)
       form.append('recipe', JSON.stringify(recipeToComponents(recipe)))
       form.append('apply_feedback', 'true')
+      if (focusPaintId.trim()) form.append('focus_paint_id', focusPaintId.trim())
       const res = await fetch(`${API_BASE_URL}/api/paint/verify/sample`, {
         method: 'POST',
         body: form,
@@ -207,6 +218,7 @@ export function SpotTestModal({
     setResult(null)
     setError(null)
     setSelectedRegion(null)
+    setFocusPaintId('')
     setDragStart(null)
     setDragCurrent(null)
     setImageDisplaySize(null)
@@ -338,8 +350,33 @@ export function SpotTestModal({
           {step === 'confirm' && selectedRegion && (
             <>
               <p className="text-sm text-gray-300">
-                The recipe model will be updated for this combination; future recipes will use this correction.
+                The recipe model will be updated; future recipes will use this correction.
               </p>
+              {(() => {
+                const pigmentIds = recipePigmentIds(recipe)
+                if (pigmentIds.length > 1) {
+                  return (
+                    <div className="space-y-1">
+                      <label className="text-sm text-gray-400 block">
+                        If the problem is one paint (e.g. too much of it), choose it so the correction applies only to that paint and all other recipes using it will learn:
+                      </label>
+                      <select
+                        value={focusPaintId}
+                        onChange={(e) => setFocusPaintId(e.target.value)}
+                        className="block w-full rounded bg-gray-700 text-gray-200 border border-gray-600 px-2 py-1.5 text-sm"
+                      >
+                        <option value="">All pigments (share by ratio)</option>
+                        {pigmentIds.map((id) => (
+                          <option key={id} value={id}>
+                            {id}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )
+                }
+                return null
+              })()}
               <p className="text-sm text-gray-400">
                 Continue?
               </p>

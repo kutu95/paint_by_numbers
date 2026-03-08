@@ -33,8 +33,13 @@ def _feedback_bias_file(group: str) -> Path:
     return FEEDBACK_BIAS_DIR / f"{safe}.json"
 
 
+def _bias_key(paint_id: str) -> str:
+    """Canonical key for feedback bias so recipe and library lookups match (case-insensitive)."""
+    return str(paint_id or "").strip().lower()
+
+
 def load_feedback_bias(group: str) -> Dict[str, List[float]]:
-    """Load per-paint Lab bias from feedback (L, a, b corrections)."""
+    """Load per-paint Lab bias from feedback (L, a, b corrections). Keys normalized to lower case."""
     path = _feedback_bias_file(group)
     if not path.exists():
         return {}
@@ -45,19 +50,20 @@ def load_feedback_bias(group: str) -> Dict[str, List[float]]:
             return {}
         out = {}
         for pid, v in raw.items():
+            key = _bias_key(pid)
             if isinstance(v, (list, tuple)) and len(v) >= 3:
-                out[str(pid)] = [float(v[0]), float(v[1]), float(v[2])]
+                out[key] = [float(v[0]), float(v[1]), float(v[2])]
             elif isinstance(v, dict) and "L" in v and "a" in v and "b" in v:
-                out[str(pid)] = [float(v["L"]), float(v["a"]), float(v["b"])]
+                out[key] = [float(v["L"]), float(v["a"]), float(v["b"])]
         return out
     except Exception:
         return {}
 
 
 def save_feedback_bias(group: str, biases: Dict[str, List[float]]) -> None:
-    """Save per-paint Lab bias (L, a, b)."""
+    """Save per-paint Lab bias (L, a, b). Keys normalized so lookup matches library paint ids."""
     path = _feedback_bias_file(group)
-    payload = {pid: {"L": b[0], "a": b[1], "b": b[2]} for pid, b in biases.items()}
+    payload = {_bias_key(pid): {"L": b[0], "a": b[1], "b": b[2]} for pid, b in biases.items()}
     try:
         with open(path, "w") as f:
             json.dump(payload, f, indent=2)
@@ -66,9 +72,9 @@ def save_feedback_bias(group: str, biases: Dict[str, List[float]]) -> None:
 
 
 def get_paint_bias(group: str, paint_id: str) -> Optional[List[float]]:
-    """Return [L, a, b] bias for a paint, or None if none."""
+    """Return [L, a, b] bias for a paint, or None if none. Lookup is case-insensitive."""
     biases = load_feedback_bias(group)
-    return biases.get(str(paint_id))
+    return biases.get(_bias_key(paint_id))
 
 
 def calibration_file_for(group: str, paint_id: str) -> Path:

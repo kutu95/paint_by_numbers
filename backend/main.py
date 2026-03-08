@@ -26,7 +26,7 @@ from paint_manager import (
     rgb_to_lab, lab_to_rgb, delta_e_lab, interpolate_lab_from_calibration, CALIBRATION_DIR, PAINT_DIR,
     list_library_groups, get_library_info,
     generate_recipes_for_palette, load_recipe_cache, save_recipe_cache,
-    load_feedback_bias, save_feedback_bias,
+    load_feedback_bias, save_feedback_bias, _bias_key,
 )
 import json
 
@@ -2713,8 +2713,9 @@ async def verify_swatch(
     target_hex: str = Form(""),
     recipe: str = Form(""),
     apply_feedback: str = Form("true"),
+    focus_paint_id: str = Form(""),
 ):
-    """Sample verification swatch and compare to target. Average over a region (x1,y1,x2,y2) if provided, else over a small area around (x,y). If target_hex and recipe are provided and apply_feedback is true, updates per-paint feedback bias."""
+    """Sample verification swatch and compare to target. Average over a region (x1,y1,x2,y2) if provided, else over a small area around (x,y). If target_hex and recipe are provided and apply_feedback is true, updates per-paint feedback bias. If focus_paint_id is set, apply 100%% of the correction to that paint only (so other recipes using that paint learn from this spot test)."""
     session_dir = DATA_DIR / session_id
     if not session_dir.exists():
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2782,14 +2783,21 @@ async def verify_swatch(
         measured_lab[1] - target_lab[1],
         measured_lab[2] - target_lab[2],
     ]
-    alpha = 0.35
+    alpha = 1.0  # Full correction so one spot test has a visible effect; bias accumulates over multiple tests
     group = (library_group or "default").strip() or "default"
+    focus_key = _bias_key(focus_paint_id) if (focus_paint_id and str(focus_paint_id).strip()) else None
     biases = load_feedback_bias(group)
     for pid, ratio in pigment_components:
-        share = ratio / total_pigment
+        key = _bias_key(pid)
+        if focus_key is not None:
+            if key != focus_key:
+                continue
+            share = 1.0
+        else:
+            share = ratio / total_pigment
         update = [alpha * share * error_lab[0], alpha * share * error_lab[1], alpha * share * error_lab[2]]
-        existing = biases.get(pid, [0.0, 0.0, 0.0])
-        biases[pid] = [
+        existing = biases.get(key, [0.0, 0.0, 0.0])
+        biases[key] = [
             existing[0] + update[0],
             existing[1] + update[1],
             existing[2] + update[2],
