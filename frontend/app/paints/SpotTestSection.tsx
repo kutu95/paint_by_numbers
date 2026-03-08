@@ -454,7 +454,7 @@ export function SpotTestSection({ selectedGroup, paints }: SpotTestSectionProps)
       {step === 'done' && result && (
         <div className="space-y-2">
           {result.delta_e != null && <p className="text-sm text-gray-300">Measured vs predicted: <strong>ΔE = {result.delta_e.toFixed(2)}</strong></p>}
-          {result.feedback_updated && result.paints_updated.length > 0 && (
+          {result.feedback_updated && result.paints_updated && result.paints_updated.length > 0 && (
             <p className="text-sm text-green-400">Correction applied to: {result.paints_updated.join(', ')}. Future recipes will use this correction.</p>
           )}
           <button type="button" onClick={resetToRecipe} className="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded">Do another spot test</button>
