@@ -75,6 +75,41 @@ function CalibrationResultsView({ data }: { data: CalibrationData }) {
   const pathYellow = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYChroma(yellowChroma[i])}`).join(' ')
   const pathBlue = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYChroma(blueChroma[i])}`).join(' ')
 
+  // RGB channels (0–255) vs dilution
+  const R = samples.map((s) => s.rgb[0])
+  const G = samples.map((s) => s.rgb[1])
+  const B = samples.map((s) => s.rgb[2])
+  const minRgb = Math.min(0, ...R, ...G, ...B)
+  const maxRgb = Math.max(255, ...R, ...G, ...B)
+  const rangeRgb = maxRgb - minRgb || 1
+  const toYRgb = (v: number) =>
+    PAD.top + (1 - (v - minRgb) / rangeRgb) * (CHART_HEIGHT - PAD.top - PAD.bottom)
+  const pathR = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYRgb(s.rgb[0])}`).join(' ')
+  const pathG = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYRgb(s.rgb[1])}`).join(' ')
+  const pathB_Rgb = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYRgb(s.rgb[2])}`).join(' ')
+
+  // C* (chroma) and h° (hue) from Lab: C* = sqrt(a*² + b*²), h° = atan2(b*, a*) in degrees [0, 360)
+  const C = samples.map((s) => Math.sqrt(s.lab[1] * s.lab[1] + s.lab[2] * s.lab[2]))
+  const hDeg = samples.map((s) => {
+    const deg = (Math.atan2(s.lab[2], s.lab[1]) * 180) / Math.PI
+    return deg < 0 ? deg + 360 : deg
+  })
+  const maxC = Math.max(1, ...C)
+  const toYC = (v: number) =>
+    PAD.top + (1 - v / maxC) * (CHART_HEIGHT - PAD.top - PAD.bottom)
+  const pathC = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYC(C[i])}`).join(' ')
+  const minH = Math.min(0, ...hDeg)
+  const maxH = Math.max(360, ...hDeg)
+  const rangeH = maxH - minH || 1
+  const toYH = (v: number) =>
+    PAD.top + (1 - (v - minH) / rangeH) * (CHART_HEIGHT - PAD.top - PAD.bottom)
+  const pathH = samples.map((s, i) => `${i === 0 ? 'M' : 'L'} ${toX(s.ratio)} ${toYH(hDeg[i])}`).join(' ')
+
+  // a*b* plane: map a*, b* to SVG coords (same abExtent as chroma chart)
+  const innerH = CHART_HEIGHT - PAD.top - PAD.bottom
+  const toXAb = (aVal: number) => PAD.left + ((aVal - minAb) / (maxAb - minAb)) * innerW
+  const toYAbPlane = (bVal: number) => CHART_HEIGHT - PAD.bottom - ((bVal - minAb) / (maxAb - minAb)) * innerH
+
   const rgbToHex = (r: number, g: number, blue: number) =>
     '#' + [r, g, blue].map((x) => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0')).join('')
 
@@ -189,6 +224,101 @@ function CalibrationResultsView({ data }: { data: CalibrationData }) {
           <text x={CHART_WIDTH - 95} y={PAD.top + 8} className="fill-[#22c55e] text-[10px]">green</text>
           <text x={CHART_WIDTH - 68} y={PAD.top + 8} className="fill-[#eab308] text-[10px]">yellow</text>
           <text x={CHART_WIDTH - 42} y={PAD.top + 8} className="fill-[#3b82f6] text-[10px]">blue</text>
+        </svg>
+      </div>
+
+      <div>
+        <h4 className="text-sm font-medium text-gray-300 mb-1">RGB channels vs dilution</h4>
+        <p className="text-xs text-gray-500 mb-1">R, G, B (0–255) by dilution</p>
+        <svg width={CHART_WIDTH} height={CHART_HEIGHT} className="overflow-visible">
+          <line x1={PAD.left} y1={PAD.top} x2={PAD.left} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <line x1={PAD.left} y1={CHART_HEIGHT - PAD.bottom} x2={CHART_WIDTH - PAD.right} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <text x={PAD.left - 8} y={PAD.top + 4} className="fill-gray-500 text-[10px]">{maxRgb}</text>
+          <text x={PAD.left - 8} y={CHART_HEIGHT - PAD.bottom + 4} className="fill-gray-500 text-[10px]">{minRgb}</text>
+          {samples.map((s, i) => (
+            <g key={i}>
+              <line x1={toX(s.ratio)} y1={CHART_HEIGHT - PAD.bottom} x2={toX(s.ratio)} y2={CHART_HEIGHT - PAD.bottom + 4} stroke="#4b5563" strokeWidth="1" />
+              <text x={toX(s.ratio)} y={CHART_HEIGHT - 4} textAnchor="middle" className="fill-gray-500 text-[10px]">{(s.ratio * 100).toFixed(s.ratio >= 0.1 ? 0 : 1)}%</text>
+            </g>
+          ))}
+          <path d={pathR} fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <path d={pathG} fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <path d={pathB_Rgb} fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <text x={CHART_WIDTH - 70} y={PAD.top + 8} className="fill-[#ef4444] text-[10px]">R</text>
+          <text x={CHART_WIDTH - 52} y={PAD.top + 8} className="fill-[#22c55e] text-[10px]">G</text>
+          <text x={CHART_WIDTH - 34} y={PAD.top + 8} className="fill-[#3b82f6] text-[10px]">B</text>
+        </svg>
+      </div>
+
+      <div>
+        <h4 className="text-sm font-medium text-gray-300 mb-1">Chroma (C*) vs dilution</h4>
+        <p className="text-xs text-gray-500 mb-1">C* = √(a*² + b*²); saturation</p>
+        <svg width={CHART_WIDTH} height={CHART_HEIGHT} className="overflow-visible">
+          <line x1={PAD.left} y1={PAD.top} x2={PAD.left} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <line x1={PAD.left} y1={CHART_HEIGHT - PAD.bottom} x2={CHART_WIDTH - PAD.right} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <text x={PAD.left - 8} y={PAD.top + 4} className="fill-gray-500 text-[10px]">{maxC.toFixed(0)}</text>
+          <text x={PAD.left - 8} y={CHART_HEIGHT - PAD.bottom + 4} className="fill-gray-500 text-[10px]">0</text>
+          {samples.map((s, i) => (
+            <g key={i}>
+              <line x1={toX(s.ratio)} y1={CHART_HEIGHT - PAD.bottom} x2={toX(s.ratio)} y2={CHART_HEIGHT - PAD.bottom + 4} stroke="#4b5563" strokeWidth="1" />
+              <text x={toX(s.ratio)} y={CHART_HEIGHT - 4} textAnchor="middle" className="fill-gray-500 text-[10px]">{(s.ratio * 100).toFixed(s.ratio >= 0.1 ? 0 : 1)}%</text>
+            </g>
+          ))}
+          <path d={pathC} fill="none" stroke="#a855f7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </div>
+
+      <div>
+        <h4 className="text-sm font-medium text-gray-300 mb-1">Hue (h°) vs dilution</h4>
+        <p className="text-xs text-gray-500 mb-1">h° = atan2(b*, a*) in degrees (0–360)</p>
+        <svg width={CHART_WIDTH} height={CHART_HEIGHT} className="overflow-visible">
+          <line x1={PAD.left} y1={PAD.top} x2={PAD.left} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <line x1={PAD.left} y1={CHART_HEIGHT - PAD.bottom} x2={CHART_WIDTH - PAD.right} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <text x={PAD.left - 12} y={PAD.top + 4} className="fill-gray-500 text-[10px]">360</text>
+          <text x={PAD.left - 12} y={CHART_HEIGHT - PAD.bottom + 4} className="fill-gray-500 text-[10px]">0</text>
+          {samples.map((s, i) => (
+            <g key={i}>
+              <line x1={toX(s.ratio)} y1={CHART_HEIGHT - PAD.bottom} x2={toX(s.ratio)} y2={CHART_HEIGHT - PAD.bottom + 4} stroke="#4b5563" strokeWidth="1" />
+              <text x={toX(s.ratio)} y={CHART_HEIGHT - 4} textAnchor="middle" className="fill-gray-500 text-[10px]">{(s.ratio * 100).toFixed(s.ratio >= 0.1 ? 0 : 1)}%</text>
+            </g>
+          ))}
+          <path d={pathH} fill="none" stroke="#f97316" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </div>
+
+      <div>
+        <h4 className="text-sm font-medium text-gray-300 mb-1">a*b* plane (colour path)</h4>
+        <p className="text-xs text-gray-500 mb-1">Path of tint in Lab a*b*; points coloured by sample, labelled by ratio</p>
+        <svg width={CHART_WIDTH} height={CHART_HEIGHT} className="overflow-visible">
+          <line x1={PAD.left} y1={PAD.top} x2={PAD.left} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <line x1={PAD.left} y1={CHART_HEIGHT - PAD.bottom} x2={CHART_WIDTH - PAD.right} y2={CHART_HEIGHT - PAD.bottom} stroke="#4b5563" strokeWidth="1" />
+          <text x={PAD.left + innerW / 2 - 10} y={CHART_HEIGHT - 6} textAnchor="middle" className="fill-gray-500 text-[10px]">a*</text>
+          <text x={PAD.left - 10} y={PAD.top + innerH / 2 + 4} textAnchor="middle" className="fill-gray-500 text-[10px]">b*</text>
+          <text x={PAD.left} y={CHART_HEIGHT - PAD.bottom + 14} textAnchor="middle" className="fill-gray-500 text-[9px]">{minAb}</text>
+          <text x={PAD.left + innerW} y={CHART_HEIGHT - PAD.bottom + 14} textAnchor="middle" className="fill-gray-500 text-[9px]">{maxAb}</text>
+          <text x={PAD.left - 6} y={CHART_HEIGHT - PAD.bottom} textAnchor="end" className="fill-gray-500 text-[9px]">{minAb}</text>
+          <text x={PAD.left - 6} y={PAD.top + 4} textAnchor="end" className="fill-gray-500 text-[9px]">{maxAb}</text>
+          {samples.map((s, i) => {
+            const hex = rgbToHex(s.rgb[0], s.rgb[1], s.rgb[2])
+            const cx = toXAb(s.lab[1])
+            const cy = toYAbPlane(s.lab[2])
+            const label = s.ratio >= 0.1 ? `${(s.ratio * 100).toFixed(0)}%` : `${(s.ratio * 100).toFixed(1)}%`
+            return (
+              <g key={i}>
+                <line
+                  x1={i === 0 ? cx : toXAb(samples[i - 1].lab[1])}
+                  y1={i === 0 ? cy : toYAbPlane(samples[i - 1].lab[2])}
+                  x2={cx}
+                  y2={cy}
+                  stroke="#6b7280"
+                  strokeWidth="1"
+                  strokeDasharray="2,2"
+                />
+                <circle cx={cx} cy={cy} r={6} fill={hex} stroke="#374151" strokeWidth="1" />
+                <text x={cx} y={cy - 10} textAnchor="middle" className="fill-gray-400 text-[9px]">{label}</text>
+              </g>
+            )
+          })}
         </svg>
       </div>
     </div>

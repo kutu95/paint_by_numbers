@@ -3,7 +3,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import type { SessionData } from './types'
 import { API_BASE_URL } from '@/lib/config'
-import { hexToLab, deltaE } from '@/lib/colorUtils'
 
 interface Paint {
   id: string
@@ -13,9 +12,30 @@ interface Paint {
   hex?: string
 }
 
+/** Recipe item as stored in SessionResultsContent (palette_index, recipe with ingredients). */
+interface RecipeItem {
+  palette_index: number
+  recipe?: {
+    ingredients?: Array<{ paint_id?: string; paint_name?: string; percentage?: number }>
+    white_ratio?: number
+    pigment_id?: string
+    pigment_ratio?: number
+    pigment1_id?: string
+    pigment2_id?: string
+    pigment1_ratio?: number
+    pigment2_ratio?: number
+    pigment_ids?: string[]
+    pigment_ratios?: number[]
+    error?: number
+    predicted_hex?: string
+  }
+}
+
 interface VirtualPaintMixerProps {
   sessionData: SessionData
   selectedLibraryGroup: string
+  /** Recipes from session (for applying palette recipe to sliders when a palette colour is selected). */
+  recipes?: RecipeItem[]
 }
 
 function hexFromRgb(r: number, g: number, b: number): string {
@@ -58,7 +78,51 @@ function parseHex(input: string): string | null {
   return '#' + s.toUpperCase()
 }
 
-export function VirtualPaintMixer({ sessionData, selectedLibraryGroup }: VirtualPaintMixerProps) {
+/** Build slider values (0–10) from recipe ingredients so proportions match. Paints not in recipe get 0. */
+function sliderValuesFromRecipe(
+  recipe: RecipeItem['recipe'],
+  paintIds: string[]
+): Record<string, number> | null {
+  if (!recipe) return null
+  const out: Record<string, number> = {}
+  for (const id of paintIds) {
+    out[id] = 0
+  }
+  const ingredients = recipe.ingredients
+  if (Array.isArray(ingredients) && ingredients.length > 0) {
+    for (const ing of ingredients) {
+      const id = ing.paint_id ?? ing.paint_name
+      const pct = ing.percentage
+      if (id != null && typeof pct === 'number' && pct >= 0) {
+        out[id] = (pct / 100) * 10
+      }
+    }
+    return out
+  }
+  const whiteRatio = recipe.white_ratio
+  const whiteId = 'white'
+  if (typeof whiteRatio === 'number' && whiteRatio > 0 && paintIds.includes(whiteId)) {
+    out[whiteId] = (whiteRatio * 10)
+  }
+  if (recipe.pigment_id != null && typeof recipe.pigment_ratio === 'number') {
+    out[recipe.pigment_id] = (recipe.pigment_ratio * 10)
+  }
+  if (recipe.pigment1_id != null && typeof recipe.pigment1_ratio === 'number') {
+    out[recipe.pigment1_id] = (recipe.pigment1_ratio * 10)
+  }
+  if (recipe.pigment2_id != null && typeof recipe.pigment2_ratio === 'number') {
+    out[recipe.pigment2_id] = (recipe.pigment2_ratio * 10)
+  }
+  if (Array.isArray(recipe.pigment_ids) && Array.isArray(recipe.pigment_ratios)) {
+    recipe.pigment_ids.forEach((id, i) => {
+      const r = recipe.pigment_ratios?.[i]
+      if (id && typeof r === 'number') out[id] = (r * 10)
+    })
+  }
+  return out
+}
+
+export function VirtualPaintMixer({ sessionData, selectedLibraryGroup, recipes = [] }: VirtualPaintMixerProps) {
   const [paints, setPaints] = useState<Paint[]>([])
   const [loading, setLoading] = useState(true)
   const [sliderValues, setSliderValues] = useState<Record<string, number>>({})
@@ -93,17 +157,65 @@ export function VirtualPaintMixer({ sessionData, selectedLibraryGroup }: Virtual
     return () => { cancelled = true }
   }, [selectedLibraryGroup])
 
-  const mixHex = useMemo(() => mixHexFromSliders(paints, sliderValues), [paints, sliderValues])
+  useEffect(() => {
+    if (selectedPaletteIndex == null || paints.length === 0) return
+    const recipeItem = recipes.find((r) => r.palette_index === selectedPaletteIndex)
+    const next = sliderValuesFromRecipe(recipeItem?.recipe, paints.map((p) => p.id))
+    if (next) {
+      setSliderValues(next)
+    }
+  }, [selectedPaletteIndex, recipes, paints])
+
+  const mixHexLinear = useMemo(() => mixHexFromSliders(paints, sliderValues), [paints, sliderValues])
   const selectedPaletteColor = selectedPaletteIndex != null ? sessionData.palette.find((p) => p.index === selectedPaletteIndex) : null
   const customHexValid = parseHex(customCompareHex)
   const compareTargetHex = customHexValid ?? selectedPaletteColor?.hex ?? null
-  const deltaEValue = useMemo(() => {
-    if (!compareTargetHex) return null
-    const lab1 = hexToLab(mixHex)
-    const lab2 = hexToLab(compareTargetHex)
-    if (!lab1 || !lab2) return null
-    return deltaE(lab1, lab2)
-  }, [mixHex, compareTargetHex])
+  const [predictResult, setPredictResult] = useState<{ predicted_hex: string; delta_e: number } | null>(null)
+  const recipeForSelected = selectedPaletteIndex != null ? recipes.find((r) => r.palette_index === selectedPaletteIndex) : null
+  const recipeError = recipeForSelected?.recipe && typeof recipeForSelected.recipe.error === 'number' ? recipeForSelected.recipe.error : null
+
+  // Use backend calibration-based prediction so blend color and ΔE match recipe generation (same method).
+  useEffect(() => {
+    if (!compareTargetHex || paints.length === 0) {
+      setPredictResult(null)
+      return
+    }
+    const components = paints
+      .filter((p) => (sliderValues[p.id] ?? 0) > 0)
+      .map((p) => ({ paint_id: p.id, ratio: sliderValues[p.id] ?? 0 }))
+    if (components.length === 0) {
+      setPredictResult(null)
+      return
+    }
+    let cancelled = false
+    const norm = (h: string) => h.startsWith('#') ? h : '#' + h
+    const url = `${API_BASE_URL}/api/paint/recipes/predict-mix`
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        library_group: selectedLibraryGroup,
+        target_hex: norm(compareTargetHex),
+        components,
+      }),
+      cache: 'no-store',
+    })
+      .then((res) => res.ok ? res.json() : Promise.reject(new Error('Failed to predict mix')))
+      .then((data: { predicted_hex?: string; delta_e?: number }) => {
+        if (!cancelled && typeof data?.predicted_hex === 'string' && typeof data?.delta_e === 'number') {
+          setPredictResult({ predicted_hex: data.predicted_hex, delta_e: data.delta_e })
+        } else {
+          setPredictResult(null)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setPredictResult(null)
+      })
+    return () => { cancelled = true }
+  }, [compareTargetHex, selectedLibraryGroup, paints, sliderValues])
+
+  const blendDisplayHex = predictResult?.predicted_hex ?? mixHexLinear
+  const mixDeltaE = predictResult?.delta_e ?? null
 
   const setSlider = (paintId: string, value: number) => {
     setSliderValues((prev) => ({ ...prev, [paintId]: Math.max(0, Math.min(10, value)) }))
@@ -126,10 +238,10 @@ export function VirtualPaintMixer({ sessionData, selectedLibraryGroup }: Virtual
             <div className="flex flex-col items-center gap-1">
               <div
                 className="w-24 h-24 rounded border-2 border-gray-600 flex-shrink-0"
-                style={{ backgroundColor: mixHex }}
-                title={mixHex}
+                style={{ backgroundColor: blendDisplayHex }}
+                title={blendDisplayHex}
               />
-              <span className="text-xs font-mono text-gray-400">{mixHex.toUpperCase()}</span>
+              <span className="text-xs font-mono text-gray-400">{blendDisplayHex.toUpperCase()}</span>
             </div>
             <div className="flex flex-col gap-2 min-w-[200px]">
               <label className="text-sm font-medium text-gray-300">Compare to palette colour</label>
@@ -153,16 +265,25 @@ export function VirtualPaintMixer({ sessionData, selectedLibraryGroup }: Virtual
                 placeholder="#68A616 or 68A616"
                 className="px-3 py-2 bg-gray-700 rounded border border-gray-600 text-sm font-mono placeholder:text-gray-500"
               />
-              {compareTargetHex && deltaEValue != null && (
-                <div className="flex items-center gap-2">
-                  <div
-                    className="w-8 h-8 rounded border border-gray-600 flex-shrink-0"
-                    style={{ backgroundColor: compareTargetHex }}
-                  />
-                  <span className="text-sm text-gray-300">
-                    ΔE = <strong>{deltaEValue.toFixed(2)}</strong>
-                    {customHexValid ? ' (vs custom)' : ' (vs palette)'}
-                  </span>
+              {compareTargetHex && (
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <div
+                      className="w-24 h-24 rounded border-2 border-gray-600 flex-shrink-0"
+                      style={{ backgroundColor: compareTargetHex }}
+                    />
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-sm text-gray-300">
+                        Mix ΔE = <strong>{mixDeltaE != null ? mixDeltaE.toFixed(2) : '…'}</strong>
+                        {customHexValid ? ' (vs custom)' : ' (vs palette)'}
+                      </span>
+                      {!customHexValid && recipeError != null && (
+                        <span className="text-xs text-gray-400">
+                          Recipe: {recipeError.toFixed(2)} ΔE
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
             </div>

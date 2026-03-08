@@ -1,11 +1,12 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
 import type { SessionData } from './types'
 import { API_BASE_URL } from '@/lib/config'
 import { getProjectBySessionId, syncProjectsFromServer } from '@/lib/projects'
 import { VirtualPaintMixer } from './VirtualPaintMixer'
+import { SpotTestModal } from './SpotTestModal'
 
 type LayerWithSource = SessionData['layers'][0] & { source_palette_indices?: number[] }
 
@@ -21,6 +22,11 @@ function hexToRgbObject(hex: string): { r: number; g: number; b: number } | null
   return result
     ? { r: parseInt(result[1], 16), g: parseInt(result[2], 16), b: parseInt(result[3], 16) }
     : null
+}
+
+function hexToRgbTuple(hex: string): [number, number, number] | null {
+  const o = hexToRgbObject(hex)
+  return o ? [o.r, o.g, o.b] : null
 }
 
 function formatRecipe(recipeData: any, totalWeightGrams: number | null = null): string {
@@ -94,6 +100,9 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
   const [selectedLibraryGroup, setSelectedLibraryGroup] = useState('default')
   const [mounted, setMounted] = useState(false)
   const [, setProjectSyncTick] = useState(0)
+  const [showRecipeColours, setShowRecipeColours] = useState(false)
+  const recipePreviewCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const [spotTestPaletteIndex, setSpotTestPaletteIndex] = useState<number | null>(null)
 
   const project = typeof window !== 'undefined' ? getProjectBySessionId(sessionId) : null
   const recipeMargin = typeof window !== 'undefined' ? (parseFloat(localStorage.getItem('layerpainter_recipe_margin') || '1.33') || 1.33) : 1.33
@@ -164,6 +173,45 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
       setProjectSyncTick((v) => v + 1)
     })()
   }, [sessionId])
+
+  // On load: fetch any existing cached recipes for the current palette so we show them without waiting for 'Generate recipes'.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const palette = sessionData?.palette
+    if (!palette?.length || !selectedLibraryGroup || !libraryGroupsLoaded) return
+    const url = `${API_BASE_URL}/api/paint/recipes/cached`
+    let cancelled = false
+    const load = async () => {
+      try {
+        const body = {
+          palette: palette.map((c) => ({
+            index: c.index,
+            hex: c.hex,
+            target_grams: getTotalWeightGrams(c.index),
+          })),
+          library_group: selectedLibraryGroup,
+        }
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          cache: 'no-store',
+        })
+        if (cancelled) return
+        if (!res.ok) return
+        const data = await res.json()
+        if (cancelled) return
+        const list = data?.recipes
+        if (Array.isArray(list) && list.length > 0) {
+          setRecipes(list)
+        }
+      } catch (_) {
+        // Ignore: cache lookup is best-effort on load
+      }
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [sessionId, sessionData?.palette, selectedLibraryGroup, libraryGroupsLoaded])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -371,6 +419,71 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
     return () => window.removeEventListener('keydown', handleEsc)
   }, [])
 
+  const canShowRecipeColours =
+    sessionData.palette.length > 0 &&
+    sessionData.palette.every((c) => {
+      const r = recipes.find((rec: any) => rec.palette_index === c.index)
+      return r?.recipe && typeof (r.recipe as any).predicted_hex === 'string'
+    })
+
+  useEffect(() => {
+    if (!showRecipeColours || !canShowRecipeColours || !sessionData.quantized_preview_url || !recipePreviewCanvasRef.current) return
+    const canvas = recipePreviewCanvasRef.current
+    const palette = sessionData.palette
+    const indexToRecipeRgb: Map<number, [number, number, number]> = new Map()
+    for (const c of palette) {
+      const rec = recipes.find((r: any) => r.palette_index === c.index)
+      const hex = (rec?.recipe as any)?.predicted_hex
+      if (typeof hex === 'string') {
+        const t = hexToRgbTuple(hex)
+        if (t) indexToRecipeRgb.set(c.index, t)
+      }
+    }
+    if (indexToRecipeRgb.size !== palette.length) return
+    const hexToIndex = new Map<string, number>()
+    for (const c of palette) {
+      const h = c.hex.toUpperCase().replace(/^#/, '')
+      hexToIndex.set(h, c.index)
+    }
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => {
+      if (!recipePreviewCanvasRef.current) return
+      const cvs = recipePreviewCanvasRef.current
+      cvs.width = img.naturalWidth
+      cvs.height = img.naturalHeight
+      const ctx = cvs.getContext('2d')
+      if (!ctx) return
+      ctx.drawImage(img, 0, 0)
+      try {
+        const id = ctx.getImageData(0, 0, cvs.width, cvs.height)
+        const data = id.data
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i]
+          const g = data[i + 1]
+          const b = data[i + 2]
+          const hex = [r, g, b].map((x) => x.toString(16).padStart(2, '0')).join('')
+          const idx = hexToIndex.get(hex.toUpperCase())
+          if (idx !== undefined) {
+            const repl = indexToRecipeRgb.get(idx)
+            if (repl) {
+              data[i] = repl[0]
+              data[i + 1] = repl[1]
+              data[i + 2] = repl[2]
+            }
+          }
+        }
+        ctx.putImageData(id, 0, 0)
+      } catch {
+        // Canvas tainted (e.g. CORS) or getImageData failed; leave canvas as drawn image
+      }
+    }
+    img.onerror = () => {}
+    // Use same-origin URL so the request goes through Next.js rewrites and avoids CORS (e.g. localhost vs 127.0.0.1)
+    const imageOrigin = typeof window !== 'undefined' ? window.location.origin : API_BASE_URL
+    img.src = imageOrigin + sessionData.quantized_preview_url
+  }, [showRecipeColours, canShowRecipeColours, sessionData.quantized_preview_url, sessionData.palette, recipes])
+
   const layers = sessionData.layers as LayerWithSource[]
 
   return (
@@ -385,7 +498,30 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
       {sessionData.quantized_preview_url && (
         <div>
           <h2 className="text-2xl font-bold mb-4">Quantized Preview</h2>
-          <img src={`${API_BASE_URL}${sessionData.quantized_preview_url}`} alt="Quantized" className="max-w-full rounded" />
+          <label className="flex items-center gap-2 mb-2 text-sm text-gray-300">
+            <input
+              type="checkbox"
+              checked={showRecipeColours}
+              onChange={(e) => setShowRecipeColours(e.target.checked)}
+              disabled={!canShowRecipeColours}
+              className="rounded border-gray-500 bg-gray-700"
+            />
+            <span>Use recipe colours</span>
+            {!canShowRecipeColours && (
+              <span className="text-gray-500 text-xs">(Generate recipes for all palette colours to enable)</span>
+            )}
+          </label>
+          {!showRecipeColours && (
+            <img src={`${API_BASE_URL}${sessionData.quantized_preview_url}`} alt="Quantized" className="max-w-full rounded" />
+          )}
+          {showRecipeColours && (
+            <canvas
+              ref={recipePreviewCanvasRef}
+              className="max-w-full rounded block"
+              style={{ maxWidth: '100%', height: 'auto' }}
+              aria-label="Quantized preview with recipe colours"
+            />
+          )}
         </div>
       )}
 
@@ -412,7 +548,7 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
         </div>
 
         <div className="mb-4">
-          <VirtualPaintMixer sessionData={sessionData} selectedLibraryGroup={selectedLibraryGroup} />
+          <VirtualPaintMixer sessionData={sessionData} selectedLibraryGroup={selectedLibraryGroup} recipes={recipes} />
         </div>
 
         <div className="mb-4">
@@ -544,12 +680,38 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
                         {recipe.error?.toFixed(2)} ΔE – {errorInfo.level}
                       </span>
                     )}
+                    {recipe && (
+                      <button
+                        type="button"
+                        onClick={() => setSpotTestPaletteIndex(recipeData.palette_index)}
+                        className="mt-2 px-3 py-1.5 text-sm bg-amber-600 hover:bg-amber-500 rounded text-white"
+                      >
+                        Verify mix
+                      </button>
+                    )}
                   </div>
                 </div>
               )
             })}
           </div>
         )}
+
+        {spotTestPaletteIndex != null && (() => {
+          const recipeData = recipes.find((r: any) => r.palette_index === spotTestPaletteIndex)
+          const color = sessionData.palette.find((p) => p.index === spotTestPaletteIndex)
+          if (!recipeData?.recipe || !color) return null
+          return (
+            <SpotTestModal
+              open={true}
+              onClose={() => setSpotTestPaletteIndex(null)}
+              sessionId={sessionId}
+              paletteIndex={spotTestPaletteIndex}
+              targetHex={color.hex}
+              recipe={recipeData.recipe}
+              libraryGroup={selectedLibraryGroup}
+            />
+          )
+        })()}
       </div>
 
       <div>

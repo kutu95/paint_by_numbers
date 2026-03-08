@@ -22,8 +22,53 @@ LIBRARIES_DIR = PAINT_DIR / "libraries"
 LIBRARIES_DIR.mkdir(parents=True, exist_ok=True)
 RECIPES_CACHE_DIR = PAINT_DIR / "recipes_cache"
 RECIPES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+FEEDBACK_BIAS_DIR = PAINT_DIR / "feedback_bias"
+FEEDBACK_BIAS_DIR.mkdir(parents=True, exist_ok=True)
 
 _CALIBRATION_CACHE: Dict[str, Tuple[int, Dict[str, Any]]] = {}
+
+
+def _feedback_bias_file(group: str) -> Path:
+    safe = (group or "default").strip() or "default"
+    return FEEDBACK_BIAS_DIR / f"{safe}.json"
+
+
+def load_feedback_bias(group: str) -> Dict[str, List[float]]:
+    """Load per-paint Lab bias from feedback (L, a, b corrections)."""
+    path = _feedback_bias_file(group)
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return {}
+        out = {}
+        for pid, v in raw.items():
+            if isinstance(v, (list, tuple)) and len(v) >= 3:
+                out[str(pid)] = [float(v[0]), float(v[1]), float(v[2])]
+            elif isinstance(v, dict) and "L" in v and "a" in v and "b" in v:
+                out[str(pid)] = [float(v["L"]), float(v["a"]), float(v["b"])]
+        return out
+    except Exception:
+        return {}
+
+
+def save_feedback_bias(group: str, biases: Dict[str, List[float]]) -> None:
+    """Save per-paint Lab bias (L, a, b)."""
+    path = _feedback_bias_file(group)
+    payload = {pid: {"L": b[0], "a": b[1], "b": b[2]} for pid, b in biases.items()}
+    try:
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2)
+    except Exception as e:
+        logger.warning("Failed to save feedback bias for %s: %s", group, e)
+
+
+def get_paint_bias(group: str, paint_id: str) -> Optional[List[float]]:
+    """Return [L, a, b] bias for a paint, or None if none."""
+    biases = load_feedback_bias(group)
+    return biases.get(str(paint_id))
 
 
 def calibration_file_for(group: str, paint_id: str) -> Path:
@@ -663,35 +708,48 @@ def normalize_calibration_samples(
     return out
 
 
-def interpolate_lab_from_calibration(calibration: Dict, ratio: float) -> Optional[List[float]]:
-    """Interpolate Lab color for a given ratio from calibration samples."""
+def interpolate_lab_from_calibration(
+    calibration: Dict,
+    ratio: float,
+    group: Optional[str] = None,
+    paint_id: Optional[str] = None,
+) -> Optional[List[float]]:
+    """Interpolate Lab color for a given ratio from calibration samples.
+    If group and paint_id are provided, adds feedback bias (learned from spot tests).
+    """
     samples = calibration.get('samples', [])
     if not samples:
         return None
-    
+
     # Sort by ratio
     sorted_samples = sorted(samples, key=lambda x: x['ratio'])
     ratios = [s['ratio'] for s in sorted_samples]
     labs = [_coerce_lab_to_cielab(s['lab']) for s in sorted_samples]
-    
+
     # Find bounding ratios
     if ratio <= ratios[0]:
-        return labs[0]
-    if ratio >= ratios[-1]:
-        return labs[-1]
-    
-    # Linear interpolation
-    for i in range(len(ratios) - 1):
-        if ratios[i] <= ratio <= ratios[i + 1]:
-            t = (ratio - ratios[i]) / (ratios[i + 1] - ratios[i])
-            lab = [
-                labs[i][0] + t * (labs[i + 1][0] - labs[i][0]),
-                labs[i][1] + t * (labs[i + 1][1] - labs[i][1]),
-                labs[i][2] + t * (labs[i + 1][2] - labs[i][2])
-            ]
-            return lab
-    
-    return None
+        lab = list(labs[0])
+    elif ratio >= ratios[-1]:
+        lab = list(labs[-1])
+    else:
+        for i in range(len(ratios) - 1):
+            if ratios[i] <= ratio <= ratios[i + 1]:
+                t = (ratio - ratios[i]) / (ratios[i + 1] - ratios[i])
+                lab = [
+                    labs[i][0] + t * (labs[i + 1][0] - labs[i][0]),
+                    labs[i][1] + t * (labs[i + 1][1] - labs[i][1]),
+                    labs[i][2] + t * (labs[i + 1][2] - labs[i][2]),
+                ]
+                break
+        else:
+            return None
+
+    # Apply feedback bias so solver learns from spot-test corrections (e.g. "too dark" -> negative L bias).
+    if group and paint_id:
+        bias = get_paint_bias(group, paint_id)
+        if bias:
+            lab = [lab[0] + bias[0], lab[1] + bias[1], lab[2] + bias[2]]
+    return lab
 
 
 def get_calibration_max_ratio(calibration: Dict) -> float:
@@ -857,8 +915,12 @@ def _predict_mix_lab_batch(
     ratios_batch: np.ndarray,
     min_white_ratio: float,
     max_total_pigment: float,
+    library_group: Optional[str] = None,
+    paint_ids: Optional[List[str]] = None,
 ) -> np.ndarray:
-    """Batch mix prediction. ratios_batch (N, n_pigments). Returns (N, 3) CIELAB; invalid rows are NaN."""
+    """Batch mix prediction. ratios_batch (N, n_pigments). Returns (N, 3) CIELAB; invalid rows are NaN.
+    If library_group and paint_ids are provided, applies feedback bias per paint.
+    """
     ratios_batch = np.asarray(ratios_batch, dtype=np.float64)
     n, n_pigments = ratios_batch.shape
     if n == 0:
@@ -886,6 +948,10 @@ def _predict_mix_lab_batch(
         if calibration is not None:
             lab_i = _interpolate_lab_from_calibration_batch(calibration, eff_ratio)
             if lab_i is not None:
+                if library_group and paint_ids and i < len(paint_ids):
+                    bias = get_paint_bias(library_group, paint_ids[i])
+                    if bias:
+                        lab_i = lab_i + np.array(bias, dtype=np.float64)
                 rgb_i = _lab_to_rgb_batch(lab_i)
         elif hex_rgb is not None:
             paint_lin = _rgb_to_linear([float(c) for c in hex_rgb])
@@ -948,7 +1014,9 @@ def find_best_one_pigment_recipe(
             # Test pigment ratios across target-appropriate range.
             upper_ratio = min(max_total_pigment, cal_max_ratio)
             for test_ratio in np.arange(0.0, upper_ratio + 0.001, 0.01):
-                predicted_lab = interpolate_lab_from_calibration(calibration, test_ratio)
+                predicted_lab = interpolate_lab_from_calibration(
+                    calibration, test_ratio, group=library_group, paint_id=paint_id
+                )
                 if predicted_lab:
                     error = delta_e_lab(target_lab, predicted_lab)
                     if error < best_error:
@@ -1066,6 +1134,8 @@ def find_best_two_pigment_recipe(
             ratios_batch,
             min_white_ratio,
             max_total_pigment,
+            library_group=library_group,
+            paint_ids=[paint_id1, paint_id2],
         )
         errors = _delta_e_batch(lab_batch, target_lab)
         idx = np.argmin(errors)
@@ -1214,6 +1284,8 @@ def find_best_multi_pigment_recipe(
             ratios_arr,
             min_white_ratio,
             max_total_pigment,
+            library_group=library_group,
+            paint_ids=paint_ids,
         )
         errors = _delta_e_batch(lab_batch, target_lab)
         errors += uncalibrated_penalty

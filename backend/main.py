@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Body
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
@@ -25,7 +25,8 @@ from paint_manager import (
     get_hex_from_calibration, calibration_file_for, migrate_global_calibrations_to_group_scope,
     rgb_to_lab, lab_to_rgb, delta_e_lab, interpolate_lab_from_calibration, CALIBRATION_DIR, PAINT_DIR,
     list_library_groups, get_library_info,
-    generate_recipes_for_palette, load_recipe_cache, save_recipe_cache
+    generate_recipes_for_palette, load_recipe_cache, save_recipe_cache,
+    load_feedback_bias, save_feedback_bias,
 )
 import json
 
@@ -1319,15 +1320,44 @@ async def get_palette_gamut_slice(
             })
             idx += 1
 
-    recipe_resp = await generate_recipes_from_palette(
-        palette=json.dumps(palette),
-        library_group=group,
-        force_regenerate="false",
-        use_ai_second_pass="false",
-        progress_id="",
-    )
-    recipe_items = recipe_resp.get("recipes", [])
-    recipe_by_idx = {int(r.get("palette_index", -1)): r for r in recipe_items}
+    # Generate recipes in chunks to avoid timeouts and ensure every cell gets a result.
+    GAMUT_CHUNK_SIZE = 150
+    recipe_by_idx: dict[int, dict] = {}
+    for chunk_start in range(0, len(palette), GAMUT_CHUNK_SIZE):
+        chunk = palette[chunk_start : chunk_start + GAMUT_CHUNK_SIZE]
+        chunk_palette = [{"index": i, "hex": c["hex"], "rgb": c["rgb"]} for i, c in enumerate(chunk)]
+        try:
+            recipe_resp = await _compute_recipes_async(
+                chunk_palette,
+                group,
+                force=False,
+                use_ai=False,
+                progress_key=None,
+                quality_mode="balanced",
+                cache_only=False,
+            )
+        except Exception as e:
+            logger.exception("Gamut slice recipe chunk failed at %d: %s", chunk_start, e)
+            for i, c in enumerate(chunk):
+                recipe_by_idx[chunk_start + i] = {
+                    "palette_index": chunk_start + i,
+                    "recipe": None,
+                    "error": f"Recipe generation failed: {e}",
+                }
+            continue
+        recipe_items = recipe_resp.get("recipes", [])
+        for i, item in enumerate(recipe_items):
+            orig_idx = chunk_start + i
+            recipe_by_idx[orig_idx] = dict(item, palette_index=orig_idx)
+
+    # Ensure every cell has an entry (solver may omit some indices on error).
+    for idx in range(len(palette)):
+        if idx not in recipe_by_idx:
+            recipe_by_idx[idx] = {
+                "palette_index": idx,
+                "recipe": None,
+                "error": "Recipe generation failed: no solver output",
+            }
 
     cells = []
     idx = 0
@@ -1393,6 +1423,7 @@ async def _compute_recipes_async(
     use_ai: bool,
     progress_key: Optional[str] = None,
     quality_mode: str = "balanced",
+    cache_only: bool = False,
 ) -> dict:
     """Run recipe computation; returns {"recipes": [...]}. Used by sync endpoint and job worker."""
     run_started_at = time.perf_counter()
@@ -1624,7 +1655,9 @@ async def _compute_recipes_async(
                     with open(cal_file, "r") as f:
                         calibration = json.load(f)
                     if isinstance(calibration, dict):
-                        predicted_lab = interpolate_lab_from_calibration(calibration, eff_ratio)
+                        predicted_lab = interpolate_lab_from_calibration(
+                            calibration, eff_ratio, group=library_group, paint_id=paint_id
+                        )
                         if predicted_lab is not None:
                             predicted_rgb = [float(c) for c in lab_to_rgb(predicted_lab)]
                 except Exception:
@@ -1963,7 +1996,21 @@ async def _compute_recipes_async(
                     continue
             missing_for_solver.append(color)
         phase_cache_lookup_ms = (time.perf_counter() - cache_lookup_started_at) * 1000.0
-    
+
+        if cache_only:
+            ordered = []
+            for color in palette_list:
+                idx = _safe_index(color.get("index", -1))
+                item = recipes_by_index.get(idx, {
+                    "palette_index": idx,
+                    "recipe": None,
+                })
+                if isinstance(item, dict) and isinstance(item.get("recipe"), dict):
+                    item = dict(item)
+                    item["recipe"] = _apply_total_grams(item.get("recipe"), color.get("__target_grams"))
+                ordered.append(item)
+            return {"recipes": ordered}
+
         if missing_for_solver and not cancelled:
             solver_palette = []
             missing_meta: dict[int, tuple[str, Optional[float]]] = {}
@@ -2189,6 +2236,224 @@ async def _compute_recipes_async(
         }
 
 
+def _hex_to_rgb_list(hex_str: str) -> Optional[list]:
+    """Parse #RRGGBB or RRGGBB to [r, g, b] 0-255, or None if invalid."""
+    s = (hex_str or "").strip().lstrip("#")
+    if len(s) != 6:
+        return None
+    try:
+        return [int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)]
+    except ValueError:
+        return None
+
+
+def _predict_mix_hex_standalone(library_group: str, components: list) -> Optional[str]:
+    """Predict mix hex from (paint_id, ratio) components using same calibration logic as recipe generation.
+    components: list of (paint_id, ratio) where ratio is proportional (e.g. 0.96, 0.04 or 9.6, 0.4).
+    """
+    library = load_library(library_group)
+    paints = library.get("paints", [])
+    if not paints:
+        return None
+    paints_by_id = {p.get("id"): p for p in paints if p.get("id")}
+
+    def _hex_to_rgb_local(value: str) -> Optional[list]:
+        v = (value or "").strip().lstrip("#")
+        if len(v) != 6:
+            return None
+        try:
+            return [int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16)]
+        except Exception:
+            return None
+
+    def _is_white_paint(paint: dict) -> bool:
+        pid = str(paint.get("id", "")).lower()
+        name = str(paint.get("name", "")).lower()
+        if "white" in pid or "white" in name:
+            return True
+        rgb = _hex_to_rgb_local(str(paint.get("hex_approx", "")))
+        if rgb is None:
+            return False
+        return rgb[0] > 240 and rgb[1] > 240 and rgb[2] > 240
+
+    merged = {}
+    for item in components:
+        if not isinstance(item, (list, tuple)) and isinstance(item, dict):
+            pid = item.get("paint_id") or item.get("id")
+            ratio = item.get("ratio")
+            if pid is None or ratio is None:
+                continue
+            try:
+                r = float(ratio)
+            except Exception:
+                continue
+            if r <= 0:
+                continue
+            key = str(pid)
+            merged[key] = merged.get(key, 0.0) + r
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            pid, ratio = item[0], item[1]
+            try:
+                r = float(ratio)
+            except Exception:
+                continue
+            if r <= 0:
+                continue
+            merged[str(pid)] = merged.get(str(pid), 0.0) + r
+    if not merged:
+        return None
+
+    total = sum(merged.values())
+    if total <= 0:
+        return None
+
+    def _to_linear(rgb: list) -> np.ndarray:
+        arr = np.array([max(0.0, min(255.0, float(c))) / 255.0 for c in rgb], dtype=np.float64)
+        return np.power(arr, 2.2)
+
+    def _to_srgb(linear_rgb: np.ndarray) -> list:
+        clamped = np.clip(np.asarray(linear_rgb, dtype=np.float64), 0.0, 1.0)
+        srgb = np.power(clamped, 1.0 / 2.2) * 255.0
+        return [int(max(0, min(255, round(v)))) for v in srgb.tolist()]
+
+    white_ratio = 0.0
+    pigment_ratios = {}
+    for paint_id, ratio in merged.items():
+        paint = paints_by_id.get(paint_id, {})
+        if _is_white_paint(paint):
+            white_ratio += ratio
+        else:
+            pigment_ratios[paint_id] = pigment_ratios.get(paint_id, 0.0) + ratio
+
+    total_pigment = sum(pigment_ratios.values())
+    if total_pigment <= 1e-9:
+        return "#FFFFFF"
+
+    mixed_linear = np.zeros(3, dtype=np.float64)
+    used_share = 0.0
+    for paint_id, pigment_ratio in pigment_ratios.items():
+        paint = paints_by_id.get(paint_id, {})
+        if pigment_ratio <= 0:
+            continue
+        share = pigment_ratio / total_pigment
+        eff_ratio = pigment_ratio / (pigment_ratio + white_ratio) if (pigment_ratio + white_ratio) > 0 else 0.0
+        eff_ratio = max(0.0, min(1.0, eff_ratio))
+
+        predicted_rgb = None
+        cal_file = calibration_file_for(library_group, paint_id)
+        if cal_file.exists():
+            try:
+                with open(cal_file, "r") as f:
+                    calibration = json.load(f)
+                if isinstance(calibration, dict):
+                    predicted_lab = interpolate_lab_from_calibration(
+                        calibration, eff_ratio, group=library_group, paint_id=paint_id
+                    )
+                    if predicted_lab is not None:
+                        predicted_rgb = [float(c) for c in lab_to_rgb(predicted_lab)]
+            except Exception:
+                predicted_rgb = None
+
+        if predicted_rgb is None:
+            base_rgb = _hex_to_rgb_local(str(paint.get("hex_approx", "")))
+            if base_rgb is None:
+                continue
+            base_lin = _to_linear([float(c) for c in base_rgb])
+            white_lin = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+            tinted = (base_lin * eff_ratio) + (white_lin * (1.0 - eff_ratio))
+            predicted_rgb = _to_srgb(tinted)
+
+        mixed_linear += _to_linear(predicted_rgb) * share
+        used_share += share
+
+    if used_share <= 0:
+        return None
+    if used_share < 0.999:
+        mixed_linear /= used_share
+    r8, g8, b8 = _to_srgb(mixed_linear)
+    return "#{:02X}{:02X}{:02X}".format(r8, g8, b8)
+
+
+@app.post("/api/paint/recipes/predict-mix")
+async def predict_mix(body: dict = Body(...)):
+    """Predict mix color and ΔE to target using same calibration as recipe generation (for virtual mixer)."""
+    library_group = (body.get("library_group") or "default").strip()
+    target_hex = (body.get("target_hex") or "").strip()
+    components_in = body.get("components")
+    if not isinstance(components_in, list):
+        raise HTTPException(status_code=400, detail="Missing or invalid 'components' array")
+    components = []
+    for item in components_in:
+        if isinstance(item, dict):
+            pid = item.get("paint_id") or item.get("id")
+            ratio = item.get("ratio")
+            if pid is not None and ratio is not None:
+                try:
+                    components.append((str(pid), float(ratio)))
+                except Exception:
+                    pass
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            try:
+                components.append((str(item[0]), float(item[1])))
+            except Exception:
+                pass
+    if not components:
+        raise HTTPException(status_code=400, detail="No valid components (paint_id, ratio)")
+    predicted_hex = _predict_mix_hex_standalone(library_group, components)
+    if predicted_hex is None:
+        raise HTTPException(status_code=500, detail="Could not predict mix")
+    target_rgb = _hex_to_rgb_list(target_hex)
+    if target_rgb is None:
+        raise HTTPException(status_code=400, detail="Invalid target_hex")
+    pred_rgb = _hex_to_rgb_list(predicted_hex)
+    if pred_rgb is None:
+        raise HTTPException(status_code=500, detail="Invalid predicted hex")
+    pred_lab = rgb_to_lab([float(c) for c in pred_rgb])
+    target_lab = rgb_to_lab([float(c) for c in target_rgb])
+    d = delta_e_lab(pred_lab, target_lab)
+    return {"predicted_hex": predicted_hex, "delta_e": float(d)}
+
+
+@app.post("/api/paint/recipes/delta-e")
+async def compute_delta_e(body: dict = Body(...)):
+    """Compute ΔE between two hex colors using the same Lab/ΔE as recipe generation (for UI consistency)."""
+    hex1 = (body.get("hex1") or "").strip()
+    hex2 = (body.get("hex2") or "").strip()
+    rgb1 = _hex_to_rgb_list(hex1)
+    rgb2 = _hex_to_rgb_list(hex2)
+    if rgb1 is None or rgb2 is None:
+        raise HTTPException(status_code=400, detail="Invalid hex1 or hex2 (expected #RRGGBB or RRGGBB)")
+    lab1 = rgb_to_lab(rgb1)
+    lab2 = rgb_to_lab(rgb2)
+    d = delta_e_lab(lab1, lab2)
+    return {"delta_e": float(d)}
+
+
+@app.post("/api/paint/recipes/cached")
+async def get_cached_recipes(
+    body: dict = Body(...),
+):
+    """Return cached recipes only for the given palette and library. No solver run."""
+    palette_list = body.get("palette")
+    library_group = (body.get("library_group") or "default").strip()
+    if not isinstance(palette_list, list):
+        raise HTTPException(status_code=400, detail="Missing or invalid 'palette' array")
+    try:
+        result = await _compute_recipes_async(
+            palette_list, library_group, force=False, use_ai=False,
+            progress_key=None, quality_mode="balanced", cache_only=True,
+        )
+        return result
+    except Exception as e:
+        logger.exception("Cached recipes lookup failed: %s", e)
+        return {
+            "recipes": [
+                {"palette_index": palette_list[i].get("index", i) if i < len(palette_list) else i, "recipe": None, "error": str(e)}
+                for i in range(len(palette_list))
+            ]
+        }
+
+
 @app.post("/api/paint/recipes/from-palette")
 async def generate_recipes_from_palette(
     palette: str = Form(...),
@@ -2345,6 +2610,15 @@ async def get_recipe_progress(progress_id: str):
     return progress
 
 
+# Feedback bias (spot-test corrections)
+@app.get("/api/paint/feedback-bias")
+async def get_feedback_bias(group: str = "default"):
+    """Return current per-paint Lab bias for the given library group (from spot-test feedback)."""
+    group = (group or "default").strip() or "default"
+    biases = load_feedback_bias(group)
+    return {"group": group, "biases": biases}
+
+
 # Verification endpoints
 @app.post("/api/paint/verify/upload")
 async def upload_verification_photo(
@@ -2397,39 +2671,133 @@ async def get_verification_image(session_id: str, filename: str, request: Reques
     return response
 
 
+def _parse_recipe_components(recipe_json: Optional[str]) -> list[tuple[str, float]]:
+    """Parse recipe JSON into [(paint_id, ratio), ...]. Ratio in 0..1. White excluded from bias updates."""
+    if not recipe_json or not recipe_json.strip():
+        return []
+    try:
+        data = json.loads(recipe_json)
+    except Exception:
+        return []
+    out = []
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            pid = item.get("paint_id") or item.get("id")
+            if not pid:
+                continue
+            r = item.get("ratio")
+            if r is None and "percentage" in item:
+                r = (item.get("percentage") or 0) / 100.0
+            if r is not None:
+                try:
+                    out.append((str(pid), float(r)))
+                except Exception:
+                    pass
+    return out
+
+
 @app.post("/api/paint/verify/sample")
 async def verify_swatch(
     session_id: str = Form(...),
     palette_index: int = Form(...),
     image_id: str = Form(...),
-    x: int = Form(...),
-    y: int = Form(...)
+    x: Optional[int] = Form(None),
+    y: Optional[int] = Form(None),
+    x1: Optional[int] = Form(None),
+    y1: Optional[int] = Form(None),
+    x2: Optional[int] = Form(None),
+    y2: Optional[int] = Form(None),
+    library_group: str = Form("default"),
+    target_hex: str = Form(""),
+    recipe: str = Form(""),
+    apply_feedback: str = Form("true"),
 ):
-    """Sample verification swatch and compare to target."""
+    """Sample verification swatch and compare to target. Average over a region (x1,y1,x2,y2) if provided, else over a small area around (x,y). If target_hex and recipe are provided and apply_feedback is true, updates per-paint feedback bias."""
     session_dir = DATA_DIR / session_id
     if not session_dir.exists():
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Find the image file
+
     verify_dir = session_dir / "verify"
     image_files = list(verify_dir.glob(f"{palette_index}_{image_id}*"))
     if not image_files:
         raise HTTPException(status_code=404, detail="Verification image not found")
-    
+
     image_path = image_files[0]
-    
-    # Sample color
-    rgb, lab = sample_color_from_image(str(image_path), x, y)
-    
-    # Get target color from session (would need to load session data)
-    # For MVP, return the measured values and let frontend handle comparison
-    # TODO: Load session palette and compare
-    
-    return {
-        "measured_rgb": rgb,
-        "measured_lab": lab,
-        "suggestion": "Compare measured Lab to target Lab. If too light, increase white. If hue off, add small amount of closest pigment."
+    if x1 is not None and y1 is not None and x2 is not None and y2 is not None:
+        measured_rgb, measured_lab = sample_color_from_region(
+            str(image_path), x1, y1, x2, y2
+        )
+    else:
+        if x is None or y is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either (x, y) or (x1, y1, x2, y2) for the sample area",
+            )
+        measured_rgb, measured_lab = sample_color_from_image(str(image_path), x, y)
+    measured_lab = list(measured_lab) if measured_lab else [50.0, 0.0, 0.0]
+
+    result = {
+        "measured_rgb": measured_rgb,
+        "measured_lab": measured_lab,
+        "delta_e": None,
+        "feedback_updated": False,
+        "paints_updated": [],
     }
+
+    hex_str = (target_hex or "").strip().lstrip("#")
+    if len(hex_str) != 6:
+        return result
+    hex_str = "#" + hex_str
+
+    target_rgb = _hex_to_rgb_list(hex_str)
+    if target_rgb is None:
+        return result
+    target_lab = rgb_to_lab([float(c) for c in target_rgb])
+    delta_e = delta_e_lab(measured_lab, target_lab)
+    result["target_hex"] = hex_str
+    result["target_lab"] = target_lab
+    result["delta_e"] = round(float(delta_e), 3)
+
+    if apply_feedback.lower() != "true" or not recipe.strip():
+        return result
+
+    components = _parse_recipe_components(recipe)
+    if not components:
+        return result
+
+    # Exclude white so we only bias pigment calibrations
+    white_ids = {"white", "titanium white", "zinc white"}
+    pigment_components = [(pid, r) for pid, r in components if str(pid).strip().lower() not in {w.lower() for w in white_ids}]
+    if not pigment_components:
+        return result
+
+    total_pigment = sum(r for _, r in pigment_components)
+    if total_pigment <= 0:
+        return result
+
+    error_lab = [
+        measured_lab[0] - target_lab[0],
+        measured_lab[1] - target_lab[1],
+        measured_lab[2] - target_lab[2],
+    ]
+    alpha = 0.35
+    group = (library_group or "default").strip() or "default"
+    biases = load_feedback_bias(group)
+    for pid, ratio in pigment_components:
+        share = ratio / total_pigment
+        update = [alpha * share * error_lab[0], alpha * share * error_lab[1], alpha * share * error_lab[2]]
+        existing = biases.get(pid, [0.0, 0.0, 0.0])
+        biases[pid] = [
+            existing[0] + update[0],
+            existing[1] + update[1],
+            existing[2] + update[2],
+        ]
+        result["paints_updated"].append(pid)
+    save_feedback_bias(group, biases)
+    result["feedback_updated"] = True
+    return result
 
 
 if __name__ == "__main__":
