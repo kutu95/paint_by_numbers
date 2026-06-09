@@ -2,7 +2,18 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams } from 'next/navigation'
-import { API_BASE_URL } from '@/lib/config'
+import { projectAssetUrl } from '@/lib/projectAssets'
+import { fetchProjectSession, fetchProjectState, saveProjectState } from '@/lib/projectSession'
+import type { MaskDisplayMode, ProjectionViewerHudState } from './projectionViewerState'
+import {
+  buildColorMaskDataUrl,
+  buildDetailMaskDataUrl,
+  cycleMaskDisplayMode,
+  maskDisplayModeLabel,
+  resolveMaskDisplayMode,
+} from './maskDisplay'
+import { PROJECTION_SHORTCUTS_LINES } from './projectionKeyboardHelp'
+import { writeProjectionPopupBounds } from '@/lib/projectionWindowBounds'
 import type { Layer, SessionData } from '../types'
 import { loadViewerHudState, saveViewerHudState, getViewerHudKey } from './projectionViewerState'
 import {
@@ -38,12 +49,11 @@ export default function ProjectionViewerWindow() {
   const [currentLayer, setCurrentLayerState] = useState(0)
   const setCurrentLayer = useCallback((n: number) => {
     setCurrentLayerState(n)
-    if (sessionId) localStorage.setItem(PROJECTION_LAYER_KEY(sessionId), String(n))
-  }, [sessionId])
+  }, [])
   const [crosshairs, setCrosshairs] = useState(true)
   const [grid, setGrid] = useState(false)
   const [inverted, setInverted] = useState(false)
-  const [showColor, setShowColor] = useState(false)
+  const [maskDisplayMode, setMaskDisplayMode] = useState<MaskDisplayMode>('white')
   const [outlineMode, setOutlineMode] = useState<OutlineMode>('off')
   const [maskOpacity, setMaskOpacity] = useState(85)
   const [registrationMode, setRegistrationMode] = useState(false)
@@ -56,6 +66,7 @@ export default function ProjectionViewerWindow() {
   const [showFinalPreview, setShowFinalPreview] = useState(false)
   const [showOriginalImage, setShowOriginalImage] = useState(false)
   const [usePureMask, setUsePureMask] = useState(false)
+  const [showHudOverlay, setShowHudOverlay] = useState(false)
   const [maskLoadError, setMaskLoadError] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const imageContainerRef = useRef<HTMLDivElement>(null)
@@ -69,35 +80,65 @@ export default function ProjectionViewerWindow() {
   const lassoPathComputedRef = useRef(false)
 
   useEffect(() => {
-    const stored = localStorage.getItem(`session_${sessionId}`)
-    if (stored) {
-      try {
-        const data = JSON.parse(stored) as SessionData
-        setSessionData(data)
-        const done = localStorage.getItem(`done_${sessionId}`)
-        if (done) setDoneLayers(new Set(JSON.parse(done)))
-        const layerStored = localStorage.getItem(PROJECTION_LAYER_KEY(sessionId))
-        if (layerStored !== null) {
-          const n = parseInt(layerStored, 10)
-          if (!Number.isNaN(n) && n >= 0) setCurrentLayerState(n)
-        }
-        const hud = loadViewerHudState(sessionId)
-        setCrosshairs(hud.crosshairs)
-        setGrid(hud.grid)
-        setInverted(hud.inverted)
-        setShowColor(hud.showColor)
-        setOutlineMode(hud.outlineMode)
-        setMaskOpacity(hud.maskOpacity)
-        setRegistrationMode(hud.registrationMode)
-        setBlackScreen(hud.blackScreen)
-        setWhiteScreen(hud.whiteScreen)
-        setShowDoneLayers(hud.showDoneLayers)
-        setShowFinalPreview(hud.showFinalPreview)
-        setShowOriginalImage(hud.showOriginalImage)
-        setUsePureMask(hud.usePureMask)
-      } catch (e) {
-        console.error('Failed to load session data')
+    let debounce: ReturnType<typeof setTimeout> | undefined
+    const scheduleSave = () => {
+      if (debounce !== undefined) clearTimeout(debounce)
+      debounce = setTimeout(() => writeProjectionPopupBounds(), 250)
+    }
+    const saveNow = () => writeProjectionPopupBounds()
+    scheduleSave()
+    window.addEventListener('move', scheduleSave)
+    window.addEventListener('resize', scheduleSave)
+    window.addEventListener('beforeunload', saveNow)
+    window.addEventListener('pagehide', saveNow)
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') saveNow()
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      if (debounce !== undefined) clearTimeout(debounce)
+      window.removeEventListener('move', scheduleSave)
+      window.removeEventListener('resize', scheduleSave)
+      window.removeEventListener('beforeunload', saveNow)
+      window.removeEventListener('pagehide', saveNow)
+      document.removeEventListener('visibilitychange', onVis)
+      saveNow()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!sessionId) return
+    let cancelled = false
+    void (async () => {
+      const [session, ui] = await Promise.all([
+        fetchProjectSession(sessionId),
+        fetchProjectState(sessionId),
+      ])
+      if (cancelled) return
+      if (session) setSessionData(session)
+      if (Array.isArray(ui.doneLayers)) setDoneLayers(new Set(ui.doneLayers))
+      if (typeof ui.currentLayer === 'number' && ui.currentLayer >= 0) {
+        setCurrentLayerState(ui.currentLayer)
       }
+      const hud = (ui.projectionHud ?? {}) as Partial<ProjectionViewerHudState>
+      setCrosshairs(hud.crosshairs ?? true)
+      setGrid(hud.grid ?? false)
+      setInverted(hud.inverted ?? false)
+      setMaskDisplayMode(resolveMaskDisplayMode(hud))
+      setOutlineMode(hud.outlineMode ?? 'off')
+      setMaskOpacity(hud.maskOpacity ?? 85)
+      setRegistrationMode(hud.registrationMode ?? false)
+      setBlackScreen(hud.blackScreen ?? false)
+      setWhiteScreen(hud.whiteScreen ?? false)
+      setShowDoneLayers(hud.showDoneLayers ?? false)
+      setShowFinalPreview(hud.showFinalPreview ?? false)
+      setShowOriginalImage(hud.showOriginalImage ?? false)
+      setUsePureMask(hud.usePureMask ?? false)
+      setShowHudOverlay(hud.showHudOverlay ?? false)
+      if (typeof ui.projectionScale === 'number') setProjectionScale(ui.projectionScale)
+    })()
+    return () => {
+      cancelled = true
     }
   }, [sessionId])
 
@@ -110,7 +151,9 @@ export default function ProjectionViewerWindow() {
           if (hud.crosshairs !== undefined) setCrosshairs(hud.crosshairs)
           if (hud.grid !== undefined) setGrid(hud.grid)
           if (hud.inverted !== undefined) setInverted(hud.inverted)
-          if (hud.showColor !== undefined) setShowColor(hud.showColor)
+          if (hud.maskDisplayMode !== undefined || hud.showColor !== undefined) {
+            setMaskDisplayMode(resolveMaskDisplayMode(hud))
+          }
           if (hud.outlineMode !== undefined) setOutlineMode(hud.outlineMode)
           if (hud.maskOpacity !== undefined) setMaskOpacity(hud.maskOpacity)
           if (hud.registrationMode !== undefined) setRegistrationMode(hud.registrationMode)
@@ -120,6 +163,7 @@ export default function ProjectionViewerWindow() {
           if (hud.showFinalPreview !== undefined) setShowFinalPreview(hud.showFinalPreview)
           if (hud.showOriginalImage !== undefined) setShowOriginalImage(hud.showOriginalImage)
           if (hud.usePureMask !== undefined) setUsePureMask(hud.usePureMask)
+          if (hud.showHudOverlay !== undefined) setShowHudOverlay(hud.showHudOverlay)
         } catch (_) {}
       }
     }
@@ -129,11 +173,11 @@ export default function ProjectionViewerWindow() {
 
   useEffect(() => {
     if (!sessionId) return
-    saveViewerHudState(sessionId, {
+    const hud = {
       crosshairs,
       grid,
       inverted,
-      showColor,
+      maskDisplayMode,
       outlineMode,
       maskOpacity,
       registrationMode,
@@ -143,20 +187,35 @@ export default function ProjectionViewerWindow() {
       showFinalPreview,
       showOriginalImage,
       usePureMask,
-    })
-  }, [sessionId, crosshairs, grid, inverted, showColor, outlineMode, maskOpacity, registrationMode, blackScreen, whiteScreen, showDoneLayers, showFinalPreview, showOriginalImage, usePureMask])
-
-  useEffect(() => {
-    const key = PROJECTION_LAYER_KEY(sessionId)
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === key && e.newValue !== null) {
-        const n = parseInt(e.newValue, 10)
-        if (!Number.isNaN(n) && n >= 0) setCurrentLayerState(n)
-      }
+      showHudOverlay,
     }
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
-  }, [sessionId])
+    saveViewerHudState(sessionId, hud)
+    void saveProjectState(sessionId, {
+      currentLayer,
+      doneLayers: Array.from(doneLayers),
+      projectionScale,
+      projectionHud: hud,
+    })
+  }, [
+    sessionId,
+    currentLayer,
+    doneLayers,
+    projectionScale,
+    crosshairs,
+    grid,
+    inverted,
+    maskDisplayMode,
+    outlineMode,
+    maskOpacity,
+    registrationMode,
+    blackScreen,
+    whiteScreen,
+    showDoneLayers,
+    showFinalPreview,
+    showOriginalImage,
+    usePureMask,
+    showHudOverlay,
+  ])
 
   useEffect(() => {
     setLassoModeState(getLassoMode(sessionId))
@@ -186,34 +245,31 @@ export default function ProjectionViewerWindow() {
   }, [sessionId])
 
   useEffect(() => {
-    const saved = localStorage.getItem(`projection_scale_${sessionId}`)
-    if (saved != null) {
-      const n = parseFloat(saved)
-      if (!Number.isNaN(n) && n >= 0.25 && n <= 2) setProjectionScale(n)
-    }
+    if (!sessionId) return
+    const id = window.setInterval(() => {
+      void fetchProjectState(sessionId).then((ui) => {
+        if (typeof ui.currentLayer === 'number' && ui.currentLayer >= 0) {
+          setCurrentLayerState((prev) => (prev === ui.currentLayer ? prev : ui.currentLayer!))
+        }
+        if (typeof ui.projectionScale === 'number') {
+          const n = ui.projectionScale
+          if (n >= 0.25 && n <= 2) setProjectionScale((prev) => (prev === n ? prev : n))
+        }
+        if (Array.isArray(ui.doneLayers)) {
+          setDoneLayers((prev) => {
+            const next = new Set(ui.doneLayers)
+            if (prev.size === next.size && [...prev].every((x) => next.has(x))) return prev
+            return next
+          })
+        }
+      })
+    }, 5000)
+    return () => clearInterval(id)
   }, [sessionId])
 
-  useEffect(() => {
-    if (projectionScale >= 0.25 && projectionScale <= 2) {
-      localStorage.setItem(`projection_scale_${sessionId}`, String(projectionScale))
-    }
-  }, [sessionId, projectionScale])
-
-  useEffect(() => {
-    const scaleKey = `projection_scale_${sessionId}`
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === scaleKey && e.newValue != null) {
-        const n = parseFloat(e.newValue)
-        if (!Number.isNaN(n) && n >= 0.25 && n <= 2) setProjectionScale(n)
-      }
-    }
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
-  }, [sessionId])
-
-  const saveDoneLayers = useCallback((layers: Set<number>) => {
-    localStorage.setItem(`done_${sessionId}`, JSON.stringify(Array.from(layers)))
-  }, [sessionId])
+  const saveDoneLayers = useCallback((_layers: Set<number>) => {
+    /* persisted via saveProjectState effect */
+  }, [])
 
   const navigateLayer = useCallback((direction: number) => {
     if (!sessionData) return
@@ -242,11 +298,14 @@ export default function ProjectionViewerWindow() {
       return
     }
     let cancelled = false
-    const baseUrl = API_BASE_URL
+    const assetVersion = sessionData.artifacts_version
     const checkLayer = async (layerIndex: number): Promise<boolean> => {
       const layer = sessionData.layers[layerIndex]
       if (!layer?.mask_url) return false
-      const url = `${baseUrl}${usePureMask && layer.mask_pure_url ? layer.mask_pure_url : layer.mask_url}`
+      const url = projectAssetUrl(
+        usePureMask && layer.mask_pure_url ? layer.mask_pure_url : layer.mask_url,
+        sessionData.artifacts_version
+      )
       return new Promise((resolve) => {
         const img = new Image()
         img.crossOrigin = 'anonymous'
@@ -364,8 +423,19 @@ export default function ProjectionViewerWindow() {
           e.preventDefault()
           setShowOriginalImage((p) => { if (!p) setShowFinalPreview(false); return !p })
           break
-        case 'i': setInverted((p) => { if (!p) setShowColor(false); return !p }); break
-        case 'k': setShowColor((p) => { if (!p) setInverted(false); return !p }); break
+        case 'i':
+          setInverted((p) => {
+            if (!p) setMaskDisplayMode('white')
+            return !p
+          })
+          break
+        case 'k':
+          setMaskDisplayMode((mode) => {
+            const next = cycleMaskDisplayMode(mode)
+            if (next !== 'white') setInverted(false)
+            return next
+          })
+          break
         case 'o':
           setOutlineMode((p) => (['off', 'thin', 'thick', 'glow'] as OutlineMode[])[((['off', 'thin', 'thick', 'glow'].indexOf(p)) + 1) % 4])
           break
@@ -374,7 +444,9 @@ export default function ProjectionViewerWindow() {
         case 'r': setRegistrationMode((p) => !p); break
         case 'b': setBlackScreen((p) => !p); setWhiteScreen(false); break
         case 'w': setWhiteScreen((p) => !p); setBlackScreen(false); break
-        case 'h': break // HUD controls are on the Projection tab
+        case 'h':
+          setShowHudOverlay((p) => !p)
+          break
         case 'arrowleft': navigateLayer(-1); break
         case 'arrowright': navigateLayer(1); break
         case ' ': e.preventDefault(); navigateLayer(1); break
@@ -423,61 +495,91 @@ export default function ProjectionViewerWindow() {
   }, [navigateLayer, toggleDone, showDoneLayers, lassoMode, sessionId, lassoDrawingPoints])
 
   useEffect(() => {
-    if (!showColor || !sessionData || currentLayer < 0 || currentLayer >= sessionData.layers.length) {
+    if (maskDisplayMode === 'white' || !sessionData || currentLayer < 0 || currentLayer >= sessionData.layers.length) {
       setColoredMaskUrl(null)
       return
     }
     const layerData = sessionData.layers[currentLayer]
-    if (!layerData || layerData.is_finished) { setColoredMaskUrl(null); return }
-    let colorHex: string | null = null
-    if (layerData.is_gradient && layerData.hex) colorHex = layerData.hex
-    else {
-      const pc = sessionData.palette.find((p) => p.index === layerData.palette_index)
-      if (pc?.hex) colorHex = pc.hex
+    if (!layerData || layerData.is_finished) {
+      setColoredMaskUrl(null)
+      return
     }
-    if (!colorHex || !layerData.mask_url) { setColoredMaskUrl(null); return }
-    const pureMaskUrl = layerData.mask_pure_url ?? `/api/sessions/${sessionData.session_id}/layer_${layerData.layer_index}_pure_mask.png`
-    const maskUrlForColor = usePureMask ? pureMaskUrl : layerData.mask_url
-    const paintMaskWithColor = (image: HTMLImageElement) => {
-      try {
-        const canvas = document.createElement('canvas')
-        canvas.width = image.width
-        canvas.height = image.height
-        const ctx = canvas.getContext('2d')
-        if (!ctx) { setColoredMaskUrl(null); return }
-        ctx.imageSmoothingEnabled = false
-        ctx.drawImage(image, 0, 0)
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-        const data = imageData.data
-        const r = parseInt(colorHex!.slice(1, 3), 16)
-        const g = parseInt(colorHex!.slice(3, 5), 16)
-        const b = parseInt(colorHex!.slice(5, 7), 16)
-        for (let i = 0; i < data.length; i += 4) {
-          // Treat any non-black mask pixel as paintable to avoid threshold holes.
-          if (data[i] > 0 || data[i + 1] > 0 || data[i + 2] > 0) {
-            data[i] = r
-            data[i + 1] = g
-            data[i + 2] = b
-          }
-        }
-        ctx.putImageData(imageData, 0, 0)
-        setColoredMaskUrl(canvas.toDataURL())
-        setMaskLoadError(null)
-      } catch (_) {
+    if (!layerData.mask_url) {
+      setColoredMaskUrl(null)
+      return
+    }
+
+    const assetVersion = sessionData.artifacts_version
+    const purePath =
+      layerData.mask_pure_url ??
+      `/api/projects/${sessionData.session_id}/artifacts/layer_${layerData.layer_index}_pure_mask.png`
+    const expandedPath = layerData.mask_url
+    let cancelled = false
+
+    const fail = (message: string) => {
+      if (!cancelled) {
         setColoredMaskUrl(null)
+        setMaskLoadError(message)
       }
     }
-    const img = new Image()
-    img.crossOrigin = 'anonymous'
-    img.onload = () => paintMaskWithColor(img)
-    img.onerror = () => {
-      setColoredMaskUrl(null)
-      setMaskLoadError(usePureMask ? 'Pure mask failed to load' : 'Mask failed to load')
-    }
-    img.src = `${API_BASE_URL}${maskUrlForColor}`
-  }, [showColor, currentLayer, sessionData, API_BASE_URL, usePureMask])
 
-  useEffect(() => { setMaskLoadError(null) }, [currentLayer, usePureMask])
+    ;(async () => {
+      try {
+        if (maskDisplayMode === 'detail') {
+          const dataUrl = await buildDetailMaskDataUrl(
+            projectAssetUrl(expandedPath, assetVersion),
+            projectAssetUrl(purePath, assetVersion)
+          )
+          if (!cancelled) {
+            setColoredMaskUrl(dataUrl)
+            setMaskLoadError(null)
+          }
+          return
+        }
+
+        let colorHex: string | null = null
+        if (layerData.is_gradient && layerData.hex) colorHex = layerData.hex
+        else {
+          const pc = sessionData.palette.find((p) => p.index === layerData.palette_index)
+          if (pc?.hex) colorHex = pc.hex
+        }
+        if (!colorHex) {
+          fail('No palette color for layer')
+          return
+        }
+
+        const maskPath = usePureMask ? purePath : expandedPath
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const el = new Image()
+          el.crossOrigin = 'anonymous'
+          el.onload = () => resolve(el)
+          el.onerror = () => reject(new Error('mask load failed'))
+          el.src = projectAssetUrl(maskPath, assetVersion)
+        })
+        const dataUrl = buildColorMaskDataUrl(img, colorHex)
+        if (!cancelled) {
+          setColoredMaskUrl(dataUrl)
+          setMaskLoadError(null)
+        }
+      } catch {
+        fail(
+          maskDisplayMode === 'detail'
+            ? 'Detail mask failed to load (need expanded + pure masks)'
+            : usePureMask
+              ? 'Pure mask failed to load'
+              : 'Mask failed to load'
+        )
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [maskDisplayMode, currentLayer, sessionData, usePureMask])
+
+  useEffect(() => {
+    setMaskLoadError(null)
+  }, [currentLayer, usePureMask, maskDisplayMode])
 
   const handleLassoMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -522,17 +624,22 @@ export default function ProjectionViewerWindow() {
   if (currentLayerData.is_gradient && currentLayerData.hex) layerColor = { hex: currentLayerData.hex }
   else layerColor = sessionData.palette.find((p) => p.index === currentLayerData.palette_index)
 
-  const baseUrl = API_BASE_URL
-  const originalImageUrl = sessionData.original_url ? `${baseUrl}${sessionData.original_url}` : null
+  const assetVersion = sessionData.artifacts_version
+  const originalImageUrl = sessionData.original_url
+    ? projectAssetUrl(sessionData.original_url, assetVersion)
+    : null
   const outlineUrl =
     currentLayerData.is_finished || outlineMode === 'off'
       ? null
-      : `${baseUrl}${currentLayerData[`outline_${outlineMode}_url` as keyof Layer]}`
+      : projectAssetUrl(
+          String(currentLayerData[`outline_${outlineMode}_url` as keyof Layer] ?? ''),
+          assetVersion
+        ) || null
   const finishedLayer = sessionData.layers.find((l) => l.is_finished)
   const finalPreviewUrl = finishedLayer
-    ? `${baseUrl}${finishedLayer.finished_url || finishedLayer.mask_url}`
+    ? projectAssetUrl(finishedLayer.finished_url || finishedLayer.mask_url, assetVersion)
     : sessionData.quantized_preview_url
-      ? `${baseUrl}${sessionData.quantized_preview_url}`
+      ? projectAssetUrl(sessionData.quantized_preview_url, assetVersion)
       : null
 
   return (
@@ -555,6 +662,49 @@ export default function ProjectionViewerWindow() {
           >
             Close window
           </button>
+
+          {showHudOverlay && (
+            <div
+              className="fixed top-4 right-4 z-[55] max-w-sm rounded-lg bg-black/85 text-white p-3 text-sm shadow-lg border border-white/10 pointer-events-none"
+              style={{ opacity: mouseActive ? 1 : 0.85 }}
+            >
+              <div className="font-semibold text-base mb-2 border-b border-white/20 pb-2">Projection HUD</div>
+              <div className="space-y-1.5">
+                <div>
+                  {!currentLayerData
+                    ? '—'
+                    : currentLayerData.is_finished
+                      ? 'Finished'
+                      : `Layer ${currentLayer + 1} / ${sessionData.layers.length}`}
+                </div>
+                {!currentLayerData?.is_finished &&
+                  (currentLayerData.is_gradient ? (
+                    <div className="text-gray-300">
+                      {(() => {
+                        const stepNum =
+                          (currentLayerData.gradient_step_index ?? 0) >= 0
+                            ? (currentLayerData.gradient_step_index ?? 0) + 1
+                            : 0
+                        const src = (currentLayerData as Layer & { source_palette_indices?: number[] }).source_palette_indices
+                        if (src?.length === 1) return `Gradient ${stepNum} → Palette ${src[0]}`
+                        if (src?.length) return `Gradient ${stepNum} → Palettes ${src.join(', ')}`
+                        return `Gradient step ${stepNum}`
+                      })()}
+                    </div>
+                  ) : (
+                    <div className="text-gray-300">Palette {currentLayerData.palette_index}</div>
+                  ))}
+                <div className="text-xs text-gray-400 pt-2 border-t border-white/15 leading-relaxed space-y-1">
+                  {PROJECTION_SHORTCUTS_LINES.map((line) => (
+                    <div key={line}>{line}</div>
+                  ))}
+                </div>
+                <div className="text-xs text-gray-500">
+                  Mask: {maskDisplayModeLabel(maskDisplayMode)}
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
             <div
@@ -583,7 +733,14 @@ export default function ProjectionViewerWindow() {
                 />
               ) : currentLayerData.is_finished || showFinalPreview ? (
                 <img
-                  src={showFinalPreview && finalPreviewUrl ? finalPreviewUrl : `${baseUrl}${currentLayerData.finished_url || currentLayerData.mask_url}`}
+                  src={
+                    showFinalPreview && finalPreviewUrl
+                      ? finalPreviewUrl
+                      : projectAssetUrl(
+                          currentLayerData.finished_url || currentLayerData.mask_url,
+                          assetVersion
+                        )
+                  }
                   alt="Final"
                   className="absolute"
                   style={{
@@ -596,21 +753,35 @@ export default function ProjectionViewerWindow() {
                 />
               ) : (
                 <>
-                  {showColor && layerColor && coloredMaskUrl ? (
+                  {maskDisplayMode !== 'white' && coloredMaskUrl ? (
                     <img
                       src={coloredMaskUrl}
                       alt={`Layer ${currentLayer + 1}`}
                       className="absolute"
-                      style={{ opacity: registrationMode ? 0 : maskOpacity / 100, maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                      style={{
+                        opacity: registrationMode ? 0 : maskOpacity / 100,
+                        filter: inverted ? 'invert(1)' : 'none',
+                        maxWidth: '100%',
+                        maxHeight: '100%',
+                        objectFit: 'contain',
+                      }}
                     />
                   ) : (
                     <img
-                      src={`${baseUrl}${usePureMask ? (currentLayerData.mask_pure_url ?? `/api/sessions/${sessionData.session_id}/layer_${currentLayerData.layer_index}_pure_mask.png`) : currentLayerData.mask_url}`}
+                      src={projectAssetUrl(
+                        usePureMask
+                          ? (currentLayerData.mask_pure_url ??
+                              `/api/projects/${sessionData.session_id}/artifacts/layer_${currentLayerData.layer_index}_pure_mask.png`)
+                          : currentLayerData.mask_url,
+                        assetVersion
+                      )}
                       alt={`Layer ${currentLayer + 1}`}
                       className="absolute"
                       crossOrigin="anonymous"
                       onLoad={() => setMaskLoadError(null)}
-                      onError={() => setMaskLoadError(usePureMask ? 'Pure mask failed to load' : 'Mask failed to load')}
+                      onError={() =>
+                        setMaskLoadError(usePureMask ? 'Pure mask failed to load' : 'Mask failed to load')
+                      }
                       style={{
                         opacity: registrationMode ? 0 : maskOpacity / 100,
                         filter: inverted ? 'invert(1)' : 'none',

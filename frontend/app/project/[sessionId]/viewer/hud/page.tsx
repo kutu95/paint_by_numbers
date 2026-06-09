@@ -3,8 +3,8 @@
 import { useState, useEffect } from 'react'
 import { useParams } from 'next/navigation'
 import type { SessionData } from '../../types'
-
-const PROJECTION_LAYER_KEY = (id: string) => `projection_current_layer_${id}`
+import { fetchProjectSession, fetchProjectState } from '@/lib/projectSession'
+import { PROJECTION_SHORTCUTS_LINES } from '../projectionKeyboardHelp'
 
 export default function HudOnlyWindow() {
   const params = useParams()
@@ -13,29 +13,26 @@ export default function HudOnlyWindow() {
   const [currentLayer, setCurrentLayer] = useState(0)
 
   useEffect(() => {
-    const stored = localStorage.getItem(`session_${sessionId}`)
-    if (stored) {
-      try {
-        setSessionData(JSON.parse(stored) as SessionData)
-        const layerStored = localStorage.getItem(PROJECTION_LAYER_KEY(sessionId))
-        if (layerStored !== null) {
-          const n = parseInt(layerStored, 10)
-          if (!Number.isNaN(n) && n >= 0) setCurrentLayer(n)
-        }
-      } catch (_) {}
+    if (!sessionId) return
+    let cancelled = false
+    void (async () => {
+      const [session, ui] = await Promise.all([
+        fetchProjectSession(sessionId),
+        fetchProjectState(sessionId),
+      ])
+      if (cancelled) return
+      if (session) setSessionData(session)
+      if (typeof ui.currentLayer === 'number' && ui.currentLayer >= 0) setCurrentLayer(ui.currentLayer)
+    })()
+    const id = window.setInterval(() => {
+      void fetchProjectState(sessionId).then((ui) => {
+        if (typeof ui.currentLayer === 'number') setCurrentLayer(ui.currentLayer!)
+      })
+    }, 2000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
     }
-  }, [sessionId])
-
-  useEffect(() => {
-    const key = PROJECTION_LAYER_KEY(sessionId)
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === key && e.newValue !== null) {
-        const n = parseInt(e.newValue, 10)
-        if (!Number.isNaN(n)) setCurrentLayer(n)
-      }
-    }
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
   }, [sessionId])
 
   if (!sessionData) {
@@ -59,8 +56,10 @@ export default function HudOnlyWindow() {
         <div className="font-semibold text-base mb-3 border-b border-white/20 pb-2">Projection HUD</div>
         <div className="space-y-2">
           <div>{layerLabel}</div>
-          <div className="text-xs text-gray-400 pt-2 border-t border-white/20">
-            ← → Space: Navigate | D: Done | C: Crosshairs | X: Grid | I: Invert | K: Color | L: Pure/Expanded | O: Outline | [ ]: Opacity | - +: Scale | F: Final | G: Original | R: Registration | B/W: Black/White | S: Show Done | H: HUD | Esc: Close
+          <div className="text-xs text-gray-400 pt-2 border-t border-white/20 space-y-1 leading-relaxed">
+            {PROJECTION_SHORTCUTS_LINES.map((line) => (
+              <div key={line}>{line}</div>
+            ))}
           </div>
         </div>
         <p className="text-xs text-gray-500 mt-4">This window can be moved to any display. Layer updates in sync with the projection window.</p>

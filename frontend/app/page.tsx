@@ -4,7 +4,9 @@ import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { getProjects, getProjectBySessionId, saveProject, removeProject, syncProjectsFromServer, type Project } from '@/lib/projects'
+import { fetchProjectSession, fetchProjectState } from '@/lib/projectSession'
 import { ProjectionControlPanel } from '@/app/project/[sessionId]/ProjectionControlPanel'
+import { ProjectFileList } from '@/components/ProjectFileList'
 
 const TABS = ['file', 'settings', 'image', 'paint', 'layers', 'projection'] as const
 type TabId = (typeof TABS)[number]
@@ -28,6 +30,7 @@ export default function Home() {
   const [canvasWidthCm, setCanvasWidthCm] = useState(DEFAULT_CANVAS_WIDTH_CM)
   const [canvasHeightCm, setCanvasHeightCm] = useState(DEFAULT_CANVAS_HEIGHT_CM)
   const [settingsSaved, setSettingsSaved] = useState(false)
+  const [sessionRevision, setSessionRevision] = useState(0)
 
   useEffect(() => {
     setMounted(true)
@@ -39,7 +42,7 @@ export default function Home() {
       await syncProjectsFromServer()
       setProjects(getProjects())
     })()
-  }, [mounted, activeTab])
+  }, [mounted])
 
   useEffect(() => {
     if (!mounted || typeof window === 'undefined') return
@@ -94,6 +97,31 @@ export default function Home() {
   }, [tabParam])
 
   useEffect(() => {
+    if (activeTab === 'layers' || activeTab === 'projection') {
+      setSessionRevision((r) => r + 1)
+    }
+  }, [activeTab, currentSessionId])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return
+      if (event.data?.type !== 'layerpainter-session-updated') return
+      const id = event.data.sessionId as string | undefined
+      if (!id) return
+      setCurrentSessionId(id)
+      localStorage.setItem(CURRENT_SESSION_KEY, id)
+      const url = new URL(window.location.href)
+      url.searchParams.set('session', id)
+      window.history.replaceState({}, '', url.toString())
+      setSessionRevision((r) => r + 1)
+      void syncProjectsFromServer().then(() => setProjects(getProjects()))
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
+
+  useEffect(() => {
     if (sessionParam) {
       setCurrentSessionId(sessionParam)
       if (typeof window !== 'undefined') localStorage.setItem(CURRENT_SESSION_KEY, sessionParam)
@@ -122,24 +150,19 @@ export default function Home() {
 
   const handleSave = useCallback(() => {
     if (!currentSessionId || typeof window === 'undefined') return
-    const sessionJson = localStorage.getItem(`session_${currentSessionId}`)
     const proj = getProjectBySessionId(currentSessionId)
     if (!proj) return
-    if (sessionJson) {
-      try {
-        const session = JSON.parse(sessionJson) as { canvas_width_cm?: number; canvas_height_cm?: number }
+    void (async () => {
+      const session = await fetchProjectSession(currentSessionId)
+      if (session) {
         saveProject({
           ...proj,
           canvasWidthCm: session.canvas_width_cm ?? proj.canvasWidthCm,
           canvasHeightCm: session.canvas_height_cm ?? proj.canvasHeightCm,
         })
-      } catch {
+      } else {
         saveProject(proj)
       }
-    } else {
-      saveProject(proj)
-    }
-    void (async () => {
       await syncProjectsFromServer(true)
       setProjects(getProjects())
     })()
@@ -147,27 +170,31 @@ export default function Home() {
 
   const handleDownloadJson = useCallback(() => {
     if (!currentSessionId || typeof window === 'undefined') return
-    const sessionJson = localStorage.getItem(`session_${currentSessionId}`)
     const proj = getProjectBySessionId(currentSessionId)
-    const payload = {
-      project: proj ?? null,
-      session: sessionJson ? JSON.parse(sessionJson) : null,
-      exportedAt: new Date().toISOString(),
-    }
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `layerpainter-${proj?.name?.replace(/\s+/g, '-') ?? currentSessionId.slice(0, 8)}.json`
-    a.click()
-    URL.revokeObjectURL(url)
+    void (async () => {
+      const [session, state] = await Promise.all([
+        fetchProjectSession(currentSessionId),
+        fetchProjectState(currentSessionId),
+      ])
+      const payload = {
+        project: proj ?? null,
+        session,
+        state,
+        exportedAt: new Date().toISOString(),
+      }
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `layerpainter-${proj?.name?.replace(/\s+/g, '-') ?? currentSessionId.slice(0, 8)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    })()
   }, [currentSessionId])
 
   const handleDelete = useCallback(() => {
     if (!currentSessionId || typeof window === 'undefined') return
     removeProject(currentSessionId)
-    localStorage.removeItem(`session_${currentSessionId}`)
-    localStorage.removeItem(`projection_current_layer_${currentSessionId}`)
     if (localStorage.getItem(CURRENT_SESSION_KEY) === currentSessionId) {
       localStorage.removeItem(CURRENT_SESSION_KEY)
       setCurrentSessionId(null)
@@ -184,8 +211,8 @@ export default function Home() {
     : '/upload?new=1&returnTo=home'
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white flex flex-col">
-      <header className="border-b border-gray-700 px-4 py-3 flex items-center justify-between flex-wrap gap-2">
+    <div className="h-screen min-h-0 bg-gray-900 text-white flex flex-col overflow-hidden">
+      <header className="flex-shrink-0 border-b border-gray-700 bg-gray-900 px-4 py-3 flex items-center justify-between flex-wrap gap-2">
         <h1 className="text-xl font-bold">LayerPainter</h1>
         <nav className="flex gap-1" aria-label="Tabs">
           {TABS.map((tab) => (
@@ -207,9 +234,9 @@ export default function Home() {
         </nav>
       </header>
 
-      <main className="flex-1 overflow-auto p-6">
+      <main className="flex-1 min-h-0 overflow-auto p-6">
         <div className={activeTab !== 'file' ? 'hidden' : ''}>
-          <div className="max-w-2xl mx-auto space-y-6">
+          <div className="max-w-4xl mx-auto space-y-4">
             <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
@@ -257,32 +284,17 @@ export default function Home() {
                 Current project: <span className="text-white font-medium">{currentProject.name || 'Untitled'}</span>
               </p>
             )}
-            <div>
-              <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Recent projects</h2>
-              {!mounted ? (
-                <p className="text-gray-500">Loading…</p>
-              ) : projects.length === 0 ? (
-                <p className="text-gray-500">No projects yet. Create one with New project.</p>
-              ) : (
-                <ul className="space-y-2">
-                  {projects.map((p) => (
-                    <li key={p.sessionId}>
-                      <button
-                        type="button"
-                        onClick={() => setSessionAndTab(p.sessionId, activeTab)}
-                        className={`block w-full py-3 px-4 rounded-lg text-left transition-colors ${currentSessionId === p.sessionId ? 'bg-gray-700 border border-gray-600' : 'bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600'}`}
-                      >
-                        <span className="font-medium text-white">{p.name || 'Untitled'}</span>
-                        <span className="block text-xs text-gray-500 mt-0.5">
-                          {p.imageFileName} · {p.canvasWidthCm}×{p.canvasHeightCm} cm
-                          {p.libraryGroup && p.libraryGroup !== 'default' && ` · ${p.libraryGroup}`}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+            {!mounted ? (
+              <p className="text-gray-500 text-sm">Loading…</p>
+            ) : projects.length === 0 ? (
+              <p className="text-gray-500 text-sm">No projects yet. Create one with New project.</p>
+            ) : (
+              <ProjectFileList
+                projects={projects}
+                currentSessionId={currentSessionId}
+                onSelect={(sessionId) => setSessionAndTab(sessionId, activeTab)}
+              />
+            )}
           </div>
         </div>
 
@@ -376,6 +388,7 @@ export default function Home() {
             {currentSessionId ? (
               <ProjectionControlPanel
                 sessionId={currentSessionId}
+                sessionRevision={sessionRevision}
                 embedMode
                 panelMode="layers"
                 onProjectDeleted={() => {
@@ -406,6 +419,7 @@ export default function Home() {
             {currentSessionId ? (
               <ProjectionControlPanel
                 sessionId={currentSessionId}
+                sessionRevision={sessionRevision}
                 embedMode
                 panelMode="projection"
                 onProjectDeleted={() => {

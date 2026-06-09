@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Body
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
+import base64
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 from typing import Optional, Any
@@ -11,6 +12,7 @@ import os
 import traceback
 import logging
 import hashlib
+import tempfile
 import urllib.request
 import urllib.error
 import threading
@@ -18,15 +20,24 @@ import time
 import cv2
 import numpy as np
 from sklearn.cluster import KMeans
-from image_processor import process_image, regenerate_pure_mask_from_labels
+from image_processor import (
+    process_image,
+    regenerate_pure_mask_from_labels,
+    make_quantization_preview_jpeg,
+    make_quantization_preview,
+)
+import project_store
 from paint_manager import (
     load_library, save_library, slugify, atomic_write,
     sample_color_from_image, sample_color_from_region, normalize_calibration_samples,
     get_hex_from_calibration, calibration_file_for, migrate_global_calibrations_to_group_scope,
     rgb_to_lab, lab_to_rgb, delta_e_lab, interpolate_lab_from_calibration, CALIBRATION_DIR, PAINT_DIR,
     list_library_groups, get_library_info,
+    build_library_export, import_library_data,
     generate_recipes_for_palette, load_recipe_cache, save_recipe_cache, invalidate_recipe_cache,
     load_feedback_bias, save_feedback_bias, _bias_key,
+    get_substrate_compensation, _apply_substrate_l_compensation,
+    predict_mix_lab_for_paint_ratios,
 )
 import json
 
@@ -68,57 +79,302 @@ app.add_middleware(
     expose_headers=["*"],  # Expose all headers for CORS
 )
 
-# Data directory relative to backend folder, go up one level to project root
-DATA_DIR = Path(__file__).parent.parent / "data" / "sessions"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-PROJECTS_DIR = Path(__file__).parent.parent / "data" / "projects"
-PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 CALIBRATION_MIGRATION_MARKER = PAINT_DIR / ".calibration_scope_migration_v1.done"
 
-SESSION_CLEANUP_HOURS = 24 * 30  # 30 days so project images persist when reopened
+
+def _cors_file_response(file_path: Path, request: Request) -> FileResponse:
+    response = FileResponse(file_path)
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    origin = request.headers.get("origin")
+    if origin:
+        if origin in allowed_origins or "layerpainter.margies.app" in origin or "margies.app" in origin:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
 
 
-def _project_file_for_payload(project: dict) -> Path:
-    name = str(project.get("name") or project.get("sessionId") or "project")
-    session_id = str(project.get("sessionId") or "").strip()
-    if not session_id:
-        raise ValueError("Missing sessionId")
-    base = slugify(name) or "project"
-    return PROJECTS_DIR / f"{base}--{session_id}.json"
+def _parse_form_bool(value: str) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _list_project_files() -> list[Path]:
-    if not PROJECTS_DIR.exists():
+def _validate_processing_params(
+    n_colors: int,
+    overpaint_mm: float,
+    order_mode: str,
+    max_side: int,
+    saturation_boost: float,
+    detail_level: float,
+    mask_dilation_px: int,
+) -> None:
+    if n_colors < 2 or n_colors > 100:
+        raise HTTPException(status_code=400, detail="n_colors must be between 2 and 100")
+    if overpaint_mm < 0 or overpaint_mm > 50:
+        raise HTTPException(status_code=400, detail="overpaint_mm must be between 0 and 50")
+    if order_mode not in ["auto", "largest", "smallest", "manual", "lightest"]:
+        raise HTTPException(status_code=400, detail="order_mode must be auto, largest, smallest, manual, or lightest")
+    if max_side < 100 or max_side > 5000:
+        raise HTTPException(status_code=400, detail="max_side must be between 100 and 5000")
+    if saturation_boost < 0.5 or saturation_boost > 5.0:
+        raise HTTPException(status_code=400, detail="saturation_boost must be between 0.5 and 5.0")
+    if detail_level < 0.0 or detail_level > 1.0:
+        raise HTTPException(status_code=400, detail="detail_level must be between 0.0 and 1.0")
+    if mask_dilation_px < 0 or mask_dilation_px > 20:
+        raise HTTPException(status_code=400, detail="mask_dilation_px must be between 0 and 20")
+
+
+def _validate_easy_painting_params(easy_simplify: float) -> float:
+    s = float(easy_simplify)
+    if s < 0.0 or s > 1.0:
+        raise HTTPException(status_code=400, detail="easy_simplify must be between 0.0 and 1.0")
+    return s
+
+
+def _validate_skin_tone_strength(skin_tone_strength: float) -> float:
+    s = float(skin_tone_strength)
+    if s < 0.0 or s > 1.0:
+        raise HTTPException(status_code=400, detail="skin_tone_strength must be between 0.0 and 1.0")
+    return s
+
+
+def _validate_priority_region_strength(strength: float) -> float:
+    s = float(strength)
+    if s < 0.0 or s > 1.0:
+        raise HTTPException(status_code=400, detail="priority_region_strength must be between 0.0 and 1.0")
+    return s
+
+
+def _parse_must_include_colors(raw: str) -> list[str]:
+    from image_processor import _normalize_must_include_hex_list
+
+    if not raw or not str(raw).strip():
         return []
-    return sorted([p for p in PROJECTS_DIR.iterdir() if p.is_file() and p.suffix == ".json"])
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=400, detail="must_include_colors must be a JSON array of hex strings"
+        )
+    if not isinstance(data, list):
+        raise HTTPException(
+            status_code=400, detail="must_include_colors must be a JSON array of hex strings"
+        )
+    return _normalize_must_include_hex_list([str(x) for x in data])
 
 
-def _load_all_projects() -> list[dict]:
-    projects: list[dict] = []
-    for p in _list_project_files():
-        try:
-            with open(p, "r") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and data.get("sessionId"):
-                projects.append(data)
-        except Exception:
-            continue
-    projects.sort(key=lambda x: int(x.get("createdAt", 0) or 0), reverse=True)
-    return projects
+def _session_must_include_colors(project_id: str) -> list[str]:
+    """Recover must-include picks from generated palette when manifest was not persisted."""
+    from image_processor import _normalize_must_include_hex_list
+
+    snap = project_store.load_session_snapshot(project_id)
+    if not snap:
+        return []
+    palette = snap.get("palette")
+    if not isinstance(palette, list):
+        return []
+    hexes: list[str] = []
+    for entry in palette:
+        if isinstance(entry, dict) and entry.get("must_include"):
+            h = entry.get("hex")
+            if h:
+                hexes.append(str(h))
+    return _normalize_must_include_hex_list(hexes)
 
 
-def _find_project_file_by_session(session_id: str) -> Optional[Path]:
-    if not session_id:
+def _manifest_must_include_colors(project_id: str) -> list[str]:
+    from image_processor import _normalize_must_include_hex_list
+
+    manifest = project_store.load_manifest(project_id)
+    if not manifest:
+        return _session_must_include_colors(project_id)
+    raw = manifest.get("mustIncludeColors")
+    if raw is None:
+        raw = (manifest.get("processing") or {}).get("mustIncludeColors")
+    colors: list[str] = []
+    if isinstance(raw, list):
+        colors = _normalize_must_include_hex_list([str(x) for x in raw])
+    if colors:
+        return colors
+    return _session_must_include_colors(project_id)
+
+
+def _manifest_favor_skin_tones(project_id: str) -> bool | None:
+    manifest = project_store.load_manifest(project_id)
+    if not manifest:
         return None
-    for p in _list_project_files():
-        try:
-            with open(p, "r") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and str(data.get("sessionId")) == session_id:
-                return p
-        except Exception:
-            continue
+    if manifest.get("favorSkinTones") is not None:
+        return bool(manifest.get("favorSkinTones"))
+    processing = manifest.get("processing") if isinstance(manifest.get("processing"), dict) else {}
+    if processing.get("favorSkinTones") is not None:
+        return bool(processing.get("favorSkinTones"))
     return None
+
+
+def _manifest_skin_tone_strength(project_id: str) -> float | None:
+    manifest = project_store.load_manifest(project_id)
+    if not manifest:
+        return None
+    if manifest.get("skinToneStrength") is not None:
+        return float(manifest.get("skinToneStrength"))
+    processing = manifest.get("processing") if isinstance(manifest.get("processing"), dict) else {}
+    if processing.get("skinToneStrength") is not None:
+        return float(processing.get("skinToneStrength"))
+    return None
+
+
+async def _handle_priority_region_upload(
+    project_id: str,
+    mask_file: Optional[UploadFile],
+    clear_mask: bool,
+) -> Optional[Path]:
+    """Persist or remove user-drawn priority region mask on the project bundle."""
+    if clear_mask:
+        project_store.delete_priority_region(project_id)
+        return None
+    if mask_file is None or not mask_file.filename:
+        existing = project_store.priority_region_path(project_id)
+        return existing if existing.is_file() else None
+    content = await mask_file.read()
+    if not content:
+        project_store.delete_priority_region(project_id)
+        return None
+    return project_store.save_priority_region(project_id, content)
+
+
+def _parse_figure_detail_params(
+    easy_face_detail: str,
+    detail_eyes: str = "true",
+    detail_face: str = "true",
+    detail_body_outline: str = "true",
+) -> tuple[bool, bool, bool, bool]:
+    """Master switch + per-region auto-detection toggles."""
+    master = _parse_form_bool(easy_face_detail)
+    if not master:
+        return False, False, False, False
+    eyes = _parse_form_bool(detail_eyes)
+    face = _parse_form_bool(detail_face)
+    outline = _parse_form_bool(detail_body_outline)
+    if not (eyes or face or outline):
+        eyes = face = outline = True
+    return master, eyes, face, outline
+
+
+def _run_project_processing(
+    project_id: str,
+    image_path: Path,
+    n_colors: int,
+    overpaint_mm: float,
+    order_mode: str,
+    max_side: int,
+    saturation_boost: float,
+    detail_level: float,
+    mask_dilation_px: int,
+    canvas_width_cm: float,
+    canvas_height_cm: float,
+    manifest_updates: Optional[dict] = None,
+    easy_painting: bool = False,
+    easy_simplify: float = 0.65,
+    easy_face_detail: bool = False,
+    detail_eyes: bool = True,
+    detail_face: bool = True,
+    detail_body_outline: bool = True,
+    style_preset: str = "none",
+    favor_skin_tones: bool = True,
+    skin_tone_strength: float = 0.65,
+    priority_region_strength: float = 0.7,
+    must_include_hex: Optional[list[str]] = None,
+) -> dict:
+    from image_processor import normalize_style_preset, resolve_image_style
+
+    preset = normalize_style_preset(style_preset or "none")
+    skin_tone_strength = _validate_skin_tone_strength(skin_tone_strength)
+    style = resolve_image_style(
+        preset,
+        easy_painting=easy_painting if preset == "none" else None,
+        easy_simplify=easy_simplify,
+        easy_face_detail=easy_face_detail,
+        detail_eyes=detail_eyes,
+        detail_face=detail_face,
+        detail_body_outline=detail_body_outline,
+    )
+    easy_painting = style.easy_painting
+    easy_simplify = _validate_easy_painting_params(style.easy_simplify) if style.easy_painting else 0.65
+    project_store.ensure_project_dirs(project_id)
+    if manifest_updates:
+        project_store.upsert_manifest_from_client_payload(project_id, manifest_updates)
+    project_store.clear_artifacts(project_id)
+    # Reset UI state so old done-layer / layer indices do not apply to a new layer stack.
+    project_store.save_state(
+        project_id,
+        {
+            "currentLayer": 0,
+            "doneLayers": [],
+            "projectionScale": 1.0,
+        },
+    )
+    root = project_store.project_root(project_id)
+    result = process_image(
+        str(image_path),
+        root,
+        project_id,
+        n_colors,
+        overpaint_mm,
+        order_mode,
+        max_side,
+        saturation_boost,
+        detail_level,
+        mask_dilation_px,
+        easy_painting=easy_painting,
+        easy_simplify=easy_simplify,
+        easy_face_detail=easy_face_detail,
+        detail_eyes=detail_eyes,
+        detail_face=detail_face,
+        detail_body_outline=detail_body_outline,
+        style_preset=preset,
+        favor_skin_tones=favor_skin_tones,
+        skin_tone_strength=skin_tone_strength,
+        priority_region_path=(
+            str(project_store.priority_region_path(project_id))
+            if project_store.has_priority_region(project_id)
+            else None
+        ),
+        priority_region_strength=priority_region_strength,
+        must_include_hex=must_include_hex,
+    )
+    result["session_id"] = project_id
+    result["canvas_width_cm"] = max(0.0, float(canvas_width_cm))
+    result["canvas_height_cm"] = max(0.0, float(canvas_height_cm))
+    project_store.save_session_snapshot(project_id, result)
+    project_store.apply_processing_to_manifest(
+        project_id,
+        {
+            "nColors": n_colors,
+            "overpaintMm": overpaint_mm,
+            "orderMode": order_mode,
+            "maxSide": max_side,
+            "saturationBoost": saturation_boost,
+            "detailLevel": detail_level,
+            "maskDilationPx": mask_dilation_px,
+            "easyPainting": easy_painting,
+            "easySimplify": easy_simplify,
+            "easyFaceDetail": easy_face_detail,
+            "stylePreset": preset,
+            "detailEyes": detail_eyes,
+            "detailFace": detail_face,
+            "detailBodyOutline": detail_body_outline,
+            "favorSkinTones": favor_skin_tones,
+            "skinToneStrength": skin_tone_strength,
+            "priorityRegionStrength": priority_region_strength,
+            "mustIncludeColors": must_include_hex or [],
+        },
+    )
+    manifest = project_store.load_manifest(project_id)
+    if manifest:
+        updated = manifest.get("updatedAt") or manifest.get("createdAt")
+        if updated:
+            result["artifacts_version"] = int(updated)
+    return result
 
 
 def _upsert_group_calibration(group: str, paint_id: str, calibration: dict) -> None:
@@ -133,22 +389,6 @@ def _upsert_group_calibration(group: str, paint_id: str, calibration: dict) -> N
     cal_map[paint_id] = calibration
     lib["calibration_data"] = cal_map
     save_library(lib, group)
-
-
-def cleanup_old_sessions():
-    """Delete sessions older than SESSION_CLEANUP_HOURS."""
-    if not DATA_DIR.exists():
-        return
-    
-    cutoff = datetime.now() - timedelta(hours=SESSION_CLEANUP_HOURS)
-    for session_dir in DATA_DIR.iterdir():
-        if session_dir.is_dir():
-            try:
-                mtime = datetime.fromtimestamp(session_dir.stat().st_mtime)
-                if mtime < cutoff:
-                    shutil.rmtree(session_dir)
-            except Exception:
-                pass
 
 
 def run_calibration_scope_migration_once() -> None:
@@ -171,7 +411,30 @@ def run_calibration_scope_migration_once() -> None:
 @app.on_event("startup")
 async def startup_event():
     run_calibration_scope_migration_once()
-    cleanup_old_sessions()
+    project_store.migrate_storage_on_startup()
+
+
+def _project_info_payload(project_id: str) -> dict:
+    if not project_store.project_root(project_id).is_dir():
+        raise HTTPException(status_code=404, detail="Project not found")
+    has_source = project_store.find_source_input(project_id) is not None
+    has_oriented = project_store.has_oriented_source(project_id)
+    original_url = project_store.source_url(project_id, project_store.SOURCE_ORIENTED) if has_oriented else None
+    pr_url = None
+    if project_store.has_priority_region(project_id):
+        pr_url = project_store.source_url(project_id, project_store.SOURCE_PRIORITY_REGION)
+    return {
+        "session_id": project_id,
+        "project_id": project_id,
+        "original_url": original_url,
+        "priority_region_url": pr_url,
+        "has_stored_image": has_source,
+        "has_artifacts": project_store.load_session_snapshot(project_id) is not None,
+        "has_priority_region": project_store.has_priority_region(project_id),
+        "must_include_colors": _manifest_must_include_colors(project_id),
+        "favor_skin_tones": _manifest_favor_skin_tones(project_id),
+        "skin_tone_strength": _manifest_skin_tone_strength(project_id),
+    }
 
 
 @app.post("/api/sessions")
@@ -184,61 +447,98 @@ async def create_session(
     saturation_boost: float = Form(1.0),
     detail_level: float = Form(0.5),
     mask_dilation_px: int = Form(0),
+    easy_painting: str = Form("false"),
+    easy_simplify: float = Form(0.65),
+    easy_face_detail: str = Form("false"),
+    detail_eyes: str = Form("true"),
+    detail_face: str = Form("true"),
+    detail_body_outline: str = Form("true"),
+    style_preset: str = Form(""),
+    favor_skin_tones: str = Form("true"),
+    skin_tone_strength: float = Form(0.65),
+    priority_region_mask: Optional[UploadFile] = File(None),
+    clear_priority_region: str = Form("false"),
+    priority_region_strength: float = Form(0.7),
+    must_include_colors: str = Form(""),
     canvas_width_cm: float = Form(0),
     canvas_height_cm: float = Form(0),
+    project_id: str = Form(""),
+    name: str = Form(""),
+    library_group: str = Form("default"),
 ):
-    """Create a new session and process the image."""
+    """Create a project bundle, store source image, and generate layers."""
+    easy = _parse_form_bool(easy_painting)
+    favor_skin = _parse_form_bool(favor_skin_tones)
+    skin_strength = _validate_skin_tone_strength(skin_tone_strength)
+    pr_strength = _validate_priority_region_strength(priority_region_strength)
+    preserve, d_eyes, d_face, d_outline = _parse_figure_detail_params(
+        easy_face_detail, detail_eyes, detail_face, detail_body_outline
+    )
+    from image_processor import normalize_style_preset, resolve_image_style
+
+    preset = normalize_style_preset((style_preset or "").strip() or "none")
+    style = resolve_image_style(
+        preset,
+        easy_painting=easy if preset == "none" else None,
+        easy_simplify=easy_simplify,
+        easy_face_detail=preserve,
+        detail_eyes=d_eyes,
+        detail_face=d_face,
+        detail_body_outline=d_outline,
+    )
+    easy = style.easy_painting
+    easy_simp = _validate_easy_painting_params(style.easy_simplify) if easy else 0.65
+    _validate_processing_params(
+        n_colors, overpaint_mm, order_mode, max_side, saturation_boost, detail_level, mask_dilation_px
+    )
+    pid = (project_id or "").strip() or project_store.new_project_id()
+    if project_store.project_exists(pid) and (project_id or "").strip():
+        project_store.clear_artifacts(pid)
+    else:
+        project_store.ensure_project_dirs(pid)
+    content = await image.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded image is empty")
+    image_path = project_store.save_uploaded_source(pid, content, image.filename or "image.jpg")
+    await _handle_priority_region_upload(
+        pid, priority_region_mask, _parse_form_bool(clear_priority_region)
+    )
+    manifest_updates = {
+        "sessionId": pid,
+        "name": (name or "").strip() or "Untitled",
+        "imageFileName": image.filename or "image",
+        "libraryGroup": library_group or "default",
+        "canvasWidthCm": canvas_width_cm,
+        "canvasHeightCm": canvas_height_cm,
+        "saturationBoost": saturation_boost,
+        "detailLevel": detail_level,
+        "easyPainting": easy,
+        "easySimplify": easy_simp,
+        "easyFaceDetail": preserve,
+        "stylePreset": preset,
+        "detailEyes": d_eyes,
+        "detailFace": d_face,
+        "detailBodyOutline": d_outline,
+        "favorSkinTones": favor_skin,
+        "skinToneStrength": skin_strength,
+        "priorityRegionStrength": pr_strength,
+        "mustIncludeColors": _parse_must_include_colors(must_include_colors),
+        "nColors": n_colors,
+        "overpaintMm": overpaint_mm,
+        "orderMode": order_mode,
+        "maxSide": max_side,
+        "createdAt": int(datetime.now().timestamp() * 1000),
+    }
+    must_include = _parse_must_include_colors(must_include_colors)
+    if must_include and len(must_include) >= n_colors:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many must-include colours ({len(must_include)}) for palette size {n_colors}",
+        )
     try:
-        logger.info(f"Received request: n_colors={n_colors}, overpaint_mm={overpaint_mm}, order_mode={order_mode}, max_side={max_side}, image={image.filename}")
-    except Exception as e:
-        logger.error(f"Error logging request: {e}")
-    
-    # Validate inputs
-    if n_colors < 2 or n_colors > 100:
-        logger.error(f"Invalid n_colors: {n_colors}")
-        raise HTTPException(status_code=400, detail="n_colors must be between 2 and 100")
-    if overpaint_mm < 0 or overpaint_mm > 50:
-        logger.error(f"Invalid overpaint_mm: {overpaint_mm}")
-        raise HTTPException(status_code=400, detail="overpaint_mm must be between 0 and 50")
-    if order_mode not in ["auto", "largest", "smallest", "manual", "lightest"]:
-        logger.error(f"Invalid order_mode: {order_mode}")
-        raise HTTPException(status_code=400, detail="order_mode must be auto, largest, smallest, manual, or lightest")
-    if max_side < 100 or max_side > 5000:
-        logger.error(f"Invalid max_side: {max_side}")
-        raise HTTPException(status_code=400, detail="max_side must be between 100 and 5000")
-    if saturation_boost < 0.5 or saturation_boost > 5.0:
-        logger.error(f"Invalid saturation_boost: {saturation_boost}")
-        raise HTTPException(status_code=400, detail="saturation_boost must be between 0.5 and 5.0")
-    if detail_level < 0.0 or detail_level > 1.0:
-        logger.error(f"Invalid detail_level: {detail_level}")
-        raise HTTPException(status_code=400, detail="detail_level must be between 0.0 and 1.0")
-    if mask_dilation_px < 0 or mask_dilation_px > 20:
-        logger.error(f"Invalid mask_dilation_px: {mask_dilation_px}")
-        raise HTTPException(status_code=400, detail="mask_dilation_px must be between 0 and 20")
-    
-    # Create session directory
-    session_id = str(uuid.uuid4())
-    session_dir = DATA_DIR / session_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Save uploaded image - preserve original extension or default to jpg
-    file_ext = Path(image.filename).suffix if image.filename else '.jpg'
-    if not file_ext or file_ext not in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']:
-        file_ext = '.jpg'
-    image_path = session_dir / f"input{file_ext}"
-    
-    with open(image_path, "wb") as f:
-        content = await image.read()
-        f.write(content)
-    
-    logger.info(f"Saved uploaded image to {image_path}, size: {image_path.stat().st_size} bytes")
-    
-    try:
-        # Process image
-        logger.info(f"Processing image: {image_path}, n_colors={n_colors}, overpaint_mm={overpaint_mm}, saturation_boost={saturation_boost}")
-        result = process_image(
-            str(image_path),
-            session_dir,
+        return _run_project_processing(
+            pid,
+            image_path,
             n_colors,
             overpaint_mm,
             order_mode,
@@ -246,48 +546,225 @@ async def create_session(
             saturation_boost,
             detail_level,
             mask_dilation_px,
+            canvas_width_cm,
+            canvas_height_cm,
+            manifest_updates,
+            easy_painting=easy,
+            easy_simplify=easy_simp,
+            easy_face_detail=preserve,
+            detail_eyes=d_eyes,
+            detail_face=d_face,
+            detail_body_outline=d_outline,
+            style_preset=preset,
+            favor_skin_tones=favor_skin,
+            skin_tone_strength=skin_strength,
+            priority_region_strength=pr_strength,
+            must_include_hex=must_include or None,
         )
-        
-        # Attach session ID and canvas dimensions (original/oriented URLs from process_image)
-        result['session_id'] = session_id
-        result['canvas_width_cm'] = max(0, float(canvas_width_cm))
-        result['canvas_height_cm'] = max(0, float(canvas_height_cm))
-        return result
     except Exception as e:
-        # Log the full traceback for debugging
-        logger.error(f"Processing failed: {str(e)}")
+        logger.error(f"Processing failed: {e}")
         logger.error(traceback.format_exc())
-        # Cleanup on error
-        shutil.rmtree(session_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 
-def _find_stored_input_path(session_dir: Path) -> Optional[Path]:
-    """Find the stored original image in a session directory (input.jpg, input.png, etc.)."""
-    for name in ["input.jpg", "input.jpeg", "input.png", "input.webp", "input.bmp", "input.gif"]:
-        p = session_dir / name
-        if p.exists() and p.is_file():
-            return p
-    # Fallback: any file starting with 'input.'
-    for f in session_dir.iterdir():
-        if f.is_file() and f.name.startswith("input."):
-            return f
-    return None
+@app.post("/api/preview/quantize")
+async def preview_quantize(
+    image: Optional[UploadFile] = File(None),
+    project_id: str = Form(""),
+    n_colors: int = Form(16),
+    max_side: int = Form(1024),
+    saturation_boost: float = Form(1.0),
+    easy_painting: str = Form("false"),
+    easy_simplify: float = Form(0.65),
+    easy_face_detail: str = Form("false"),
+    detail_eyes: str = Form("true"),
+    detail_face: str = Form("true"),
+    detail_body_outline: str = Form("true"),
+    style_preset: str = Form("none"),
+    favor_skin_tones: str = Form("true"),
+    skin_tone_strength: float = Form(0.65),
+    priority_region_mask: Optional[UploadFile] = File(None),
+    clear_priority_region: str = Form("false"),
+    priority_region_strength: float = Form(0.7),
+    detail_level: float = Form(0.5),
+    include_palette: str = Form("false"),
+    must_include_colors: str = Form(""),
+):
+    """JPEG preview of quantized colours (fast; no layer masks)."""
+    if n_colors < 2 or n_colors > 100:
+        raise HTTPException(status_code=400, detail="n_colors must be between 2 and 100")
+    if max_side < 200 or max_side > 2400:
+        raise HTTPException(status_code=400, detail="max_side must be between 200 and 2400")
+    if saturation_boost < 0.5 or saturation_boost > 5.0:
+        raise HTTPException(status_code=400, detail="saturation_boost must be between 0.5 and 5.0")
+    if detail_level < 0.0 or detail_level > 1.0:
+        raise HTTPException(status_code=400, detail="detail_level must be between 0.0 and 1.0")
+
+    from image_processor import normalize_style_preset, resolve_image_style
+
+    preserve, d_eyes, d_face, d_outline = _parse_figure_detail_params(
+        easy_face_detail, detail_eyes, detail_face, detail_body_outline
+    )
+    legacy_easy = _parse_form_bool(easy_painting)
+    favor_skin = _parse_form_bool(favor_skin_tones)
+    skin_strength = _validate_skin_tone_strength(skin_tone_strength)
+    pr_strength = _validate_priority_region_strength(priority_region_strength)
+    mask_detail = float(detail_level)
+    preset = normalize_style_preset((style_preset or "").strip() or "none")
+    style = resolve_image_style(
+        preset,
+        easy_painting=legacy_easy if preset == "none" else None,
+        easy_simplify=easy_simplify,
+        easy_face_detail=preserve,
+        detail_eyes=d_eyes,
+        detail_face=d_face,
+        detail_body_outline=d_outline,
+    )
+    easy_simp = _validate_easy_painting_params(style.easy_simplify) if style.easy_painting else 0.0
+    from image_processor import (
+        load_priority_region_mask,
+        load_priority_region_mask_bytes,
+        load_rgb_image_normalized,
+    )
+
+    tmp_path: Optional[Path] = None
+    preview_pid = ""
+    try:
+        if image is not None and image.filename:
+            content = await image.read()
+            if not content:
+                raise HTTPException(status_code=400, detail="Uploaded image is empty")
+            fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="pbn_preview_")
+            os.close(fd)
+            tmp_path = Path(tmp_name)
+            tmp_path.write_bytes(content)
+            image_path = tmp_path
+        else:
+            preview_pid = (project_id or "").strip()
+            if not preview_pid:
+                raise HTTPException(status_code=400, detail="Provide an image or project_id")
+            image_path = project_store.find_source_input(preview_pid)
+            if not image_path:
+                raise HTTPException(status_code=404, detail="No stored source image for this project")
+
+        if preview_pid:
+            await _handle_priority_region_upload(
+                preview_pid,
+                priority_region_mask,
+                _parse_form_bool(clear_priority_region),
+            )
+
+        quantize_side = int(max_side)
+        priority_mask = None
+        if priority_region_mask is not None and priority_region_mask.filename and not preview_pid:
+            mask_bytes = await priority_region_mask.read()
+            if mask_bytes:
+                norm = load_rgb_image_normalized(str(image_path), quantize_side)
+                priority_mask = load_priority_region_mask_bytes(
+                    mask_bytes, norm.shape[0], norm.shape[1]
+                )
+        if priority_mask is None and preview_pid and project_store.has_priority_region(preview_pid):
+            norm = load_rgb_image_normalized(str(image_path), quantize_side)
+            priority_mask = load_priority_region_mask(
+                str(project_store.priority_region_path(preview_pid)),
+                norm.shape[0],
+                norm.shape[1],
+            )
+
+        must_include = _parse_must_include_colors(must_include_colors)
+        if not must_include and preview_pid:
+            must_include = _manifest_must_include_colors(preview_pid)
+        if must_include and len(must_include) >= n_colors:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Too many must-include colours ({len(must_include)}) for palette size {n_colors}",
+            )
+
+        preview_kwargs = dict(
+            image_path=str(image_path),
+            n_colors=n_colors,
+            max_side=max_side,
+            saturation_boost=saturation_boost,
+            easy_painting=style.easy_painting,
+            easy_simplify=easy_simp,
+            easy_face_detail=preserve,
+            detail_eyes=d_eyes,
+            detail_face=d_face,
+            detail_body_outline=d_outline,
+            style_preset=preset,
+            favor_skin_tones=favor_skin,
+            skin_tone_strength=skin_strength,
+            priority_region_mask=priority_mask,
+            priority_region_strength=pr_strength,
+            mask_detail_level=mask_detail,
+            must_include_hex=must_include or None,
+        )
+
+        if _parse_form_bool(include_palette):
+            jpeg, palette = make_quantization_preview(**preview_kwargs)
+            return JSONResponse(
+                {
+                    "jpeg_base64": base64.standard_b64encode(jpeg).decode("ascii"),
+                    "palette": palette,
+                    "pipeline_version": __import__("image_processor").PIPELINE_VERSION,
+                }
+            )
+
+        jpeg, _palette = make_quantization_preview(**preview_kwargs)
+        return Response(content=jpeg, media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Preview quantize failed: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 
 @app.get("/api/sessions/{session_id}/info")
 async def get_session_info(session_id: str):
-    """Return minimal session info (e.g. original_url) so the client can show stored image without re-upload."""
-    session_dir = DATA_DIR / session_id
-    if not session_dir.exists() or not session_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Session not found or expired")
-    original_path = session_dir / "original_oriented.jpg"
-    has_stored = _find_stored_input_path(session_dir) is not None
-    return {
-        "session_id": session_id,
-        "original_url": f"/api/sessions/{session_id}/original_oriented.jpg" if original_path.exists() else None,
-        "has_stored_image": has_stored,
-    }
+    """Legacy alias for project info."""
+    return _project_info_payload(session_id)
+
+
+@app.get("/api/projects/{project_id}/info")
+async def get_project_info(project_id: str):
+    return _project_info_payload(project_id)
+
+
+@app.get("/api/projects/{project_id}/session")
+async def get_project_session(project_id: str):
+    """Full layer pipeline data for a project (single source of truth on disk)."""
+    session = project_store.build_session_response(project_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="No generated layers for this project yet")
+    return session
+
+
+@app.get("/api/projects/{project_id}/state")
+async def get_project_state(project_id: str):
+    if not project_store.project_root(project_id).is_dir():
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project_store.load_state(project_id)
+
+
+@app.put("/api/projects/{project_id}/state")
+async def put_project_state(project_id: str, request: Request):
+    if not project_store.project_root(project_id).is_dir():
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object")
+    project_store.save_state(project_id, body)
+    return body
 
 
 @app.post("/api/sessions/{session_id}/reprocess")
@@ -300,35 +777,233 @@ async def reprocess_session(
     saturation_boost: float = Form(1.0),
     detail_level: float = Form(0.5),
     mask_dilation_px: int = Form(0),
+    easy_painting: str = Form("false"),
+    easy_simplify: float = Form(0.65),
+    easy_face_detail: str = Form("false"),
+    detail_eyes: str = Form("true"),
+    detail_face: str = Form("true"),
+    detail_body_outline: str = Form("true"),
+    style_preset: str = Form(""),
+    favor_skin_tones: str = Form("true"),
+    skin_tone_strength: float = Form(0.65),
+    priority_region_mask: Optional[UploadFile] = File(None),
+    clear_priority_region: str = Form("false"),
+    priority_region_strength: float = Form(0.7),
+    must_include_colors: str = Form(""),
     canvas_width_cm: float = Form(0),
     canvas_height_cm: float = Form(0),
+    name: str = Form(""),
+    library_group: str = Form(""),
 ):
-    """Reprocess a session using the stored original image (no upload). Use when editing project settings only."""
-    session_dir = DATA_DIR / session_id
-    if not session_dir.exists() or not session_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Session not found or expired")
-    image_path = _find_stored_input_path(session_dir)
+    """Regenerate layers from stored project source image."""
+    easy = _parse_form_bool(easy_painting)
+    favor_skin = _parse_form_bool(favor_skin_tones)
+    skin_strength = _validate_skin_tone_strength(skin_tone_strength)
+    pr_strength = _validate_priority_region_strength(priority_region_strength)
+    preserve, d_eyes, d_face, d_outline = _parse_figure_detail_params(
+        easy_face_detail, detail_eyes, detail_face, detail_body_outline
+    )
+    await _handle_priority_region_upload(
+        session_id, priority_region_mask, _parse_form_bool(clear_priority_region)
+    )
+    must_include = _parse_must_include_colors(must_include_colors)
+    if not must_include:
+        must_include = _manifest_must_include_colors(session_id)
+    if must_include and len(must_include) >= n_colors:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many must-include colours ({len(must_include)}) for palette size {n_colors}",
+        )
+    return await _reprocess_project(
+        session_id,
+        n_colors,
+        overpaint_mm,
+        order_mode,
+        max_side,
+        saturation_boost,
+        detail_level,
+        mask_dilation_px,
+        easy,
+        _validate_easy_painting_params(easy_simplify) if easy else 0.65,
+        preserve,
+        d_eyes,
+        d_face,
+        d_outline,
+        canvas_width_cm,
+        canvas_height_cm,
+        name,
+        library_group,
+        style_preset=style_preset,
+        favor_skin_tones=favor_skin,
+        skin_tone_strength=skin_strength,
+        priority_region_strength=pr_strength,
+        must_include_hex=must_include or None,
+    )
+
+
+@app.post("/api/projects/{project_id}/generate")
+async def generate_project(
+    project_id: str,
+    n_colors: int = Form(16),
+    overpaint_mm: float = Form(5.0),
+    order_mode: str = Form("largest"),
+    max_side: int = Form(1920),
+    saturation_boost: float = Form(1.0),
+    detail_level: float = Form(0.5),
+    mask_dilation_px: int = Form(0),
+    easy_painting: str = Form("false"),
+    easy_simplify: float = Form(0.65),
+    easy_face_detail: str = Form("false"),
+    detail_eyes: str = Form("true"),
+    detail_face: str = Form("true"),
+    detail_body_outline: str = Form("true"),
+    style_preset: str = Form(""),
+    favor_skin_tones: str = Form("true"),
+    skin_tone_strength: float = Form(0.65),
+    priority_region_mask: Optional[UploadFile] = File(None),
+    clear_priority_region: str = Form("false"),
+    priority_region_strength: float = Form(0.7),
+    must_include_colors: str = Form(""),
+    canvas_width_cm: float = Form(0),
+    canvas_height_cm: float = Form(0),
+    name: str = Form(""),
+    library_group: str = Form(""),
+    image: Optional[UploadFile] = File(None),
+):
+    """Regenerate layers; optional image upload replaces project source."""
+    if image is not None:
+        content = await image.read()
+        if content:
+            project_store.save_uploaded_source(project_id, content, image.filename or "image.jpg")
+    await _handle_priority_region_upload(
+        project_id, priority_region_mask, _parse_form_bool(clear_priority_region)
+    )
+    easy = _parse_form_bool(easy_painting)
+    favor_skin = _parse_form_bool(favor_skin_tones)
+    skin_strength = _validate_skin_tone_strength(skin_tone_strength)
+    pr_strength = _validate_priority_region_strength(priority_region_strength)
+    preserve, d_eyes, d_face, d_outline = _parse_figure_detail_params(
+        easy_face_detail, detail_eyes, detail_face, detail_body_outline
+    )
+    must_include = _parse_must_include_colors(must_include_colors)
+    if not must_include:
+        must_include = _manifest_must_include_colors(project_id)
+    if must_include and len(must_include) >= n_colors:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many must-include colours ({len(must_include)}) for palette size {n_colors}",
+        )
+    return await _reprocess_project(
+        project_id,
+        n_colors,
+        overpaint_mm,
+        order_mode,
+        max_side,
+        saturation_boost,
+        detail_level,
+        mask_dilation_px,
+        easy,
+        _validate_easy_painting_params(easy_simplify) if easy else 0.65,
+        preserve,
+        d_eyes,
+        d_face,
+        d_outline,
+        canvas_width_cm,
+        canvas_height_cm,
+        name,
+        library_group,
+        style_preset=style_preset,
+        favor_skin_tones=favor_skin,
+        skin_tone_strength=skin_strength,
+        priority_region_strength=pr_strength,
+        must_include_hex=must_include or None,
+    )
+
+
+async def _reprocess_project(
+    project_id: str,
+    n_colors: int,
+    overpaint_mm: float,
+    order_mode: str,
+    max_side: int,
+    saturation_boost: float,
+    detail_level: float,
+    mask_dilation_px: int,
+    easy_painting: bool,
+    easy_simplify: float,
+    easy_face_detail: bool,
+    detail_eyes: bool,
+    detail_face: bool,
+    detail_body_outline: bool,
+    canvas_width_cm: float,
+    canvas_height_cm: float,
+    name: str,
+    library_group: str,
+    style_preset: str = "",
+    favor_skin_tones: bool = True,
+    skin_tone_strength: float = 0.65,
+    priority_region_strength: float = 0.7,
+    must_include_hex: Optional[list[str]] = None,
+):
+    from image_processor import normalize_style_preset, resolve_image_style
+
+    skin_tone_strength = _validate_skin_tone_strength(skin_tone_strength)
+    priority_region_strength = _validate_priority_region_strength(priority_region_strength)
+    if must_include_hex and len(must_include_hex) >= n_colors:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many must-include colours ({len(must_include_hex)}) for palette size {n_colors}",
+        )
+    preset = normalize_style_preset((style_preset or "").strip() or "none")
+    style = resolve_image_style(
+        preset,
+        easy_painting=easy_painting if preset == "none" else None,
+        easy_simplify=easy_simplify,
+        easy_face_detail=easy_face_detail,
+        detail_eyes=detail_eyes,
+        detail_face=detail_face,
+        detail_body_outline=detail_body_outline,
+    )
+    easy_painting = style.easy_painting
+    easy_simplify = _validate_easy_painting_params(style.easy_simplify) if easy_painting else 0.65
+
+    if not project_store.project_root(project_id).is_dir():
+        raise HTTPException(status_code=404, detail="Project not found")
+    image_path = project_store.find_source_input(project_id)
     if not image_path:
-        raise HTTPException(status_code=404, detail="No stored original image for this session. Upload a new image instead.")
-    # Validate same as create_session
-    if n_colors < 2 or n_colors > 100:
-        raise HTTPException(status_code=400, detail="n_colors must be between 2 and 100")
-    if overpaint_mm < 0 or overpaint_mm > 50:
-        raise HTTPException(status_code=400, detail="overpaint_mm must be between 0 and 50")
-    if order_mode not in ["auto", "largest", "smallest", "manual", "lightest"]:
-        raise HTTPException(status_code=400, detail="order_mode must be auto, largest, smallest, manual, or lightest")
-    if max_side < 100 or max_side > 5000:
-        raise HTTPException(status_code=400, detail="max_side must be between 100 and 5000")
-    if saturation_boost < 0.5 or saturation_boost > 5.0:
-        raise HTTPException(status_code=400, detail="saturation_boost must be between 0.5 and 5.0")
-    if detail_level < 0.0 or detail_level > 1.0:
-        raise HTTPException(status_code=400, detail="detail_level must be between 0.0 and 1.0")
-    if mask_dilation_px < 0 or mask_dilation_px > 20:
-        raise HTTPException(status_code=400, detail="mask_dilation_px must be between 0 and 20")
+        raise HTTPException(status_code=404, detail="No stored source image for this project. Upload a new image.")
+    _validate_processing_params(
+        n_colors, overpaint_mm, order_mode, max_side, saturation_boost, detail_level, mask_dilation_px
+    )
+    updates: dict = {
+        "canvasWidthCm": canvas_width_cm,
+        "canvasHeightCm": canvas_height_cm,
+        "saturationBoost": saturation_boost,
+        "detailLevel": detail_level,
+        "easyPainting": easy_painting,
+        "easySimplify": easy_simplify,
+        "easyFaceDetail": easy_face_detail,
+        "stylePreset": preset,
+        "detailEyes": detail_eyes,
+        "detailFace": detail_face,
+        "detailBodyOutline": detail_body_outline,
+        "favorSkinTones": favor_skin_tones,
+        "skinToneStrength": skin_tone_strength,
+        "priorityRegionStrength": priority_region_strength,
+        "mustIncludeColors": must_include_hex or [],
+        "nColors": n_colors,
+        "overpaintMm": overpaint_mm,
+        "orderMode": order_mode,
+        "maxSide": max_side,
+    }
+    if name.strip():
+        updates["name"] = name.strip()
+    if library_group.strip():
+        updates["libraryGroup"] = library_group.strip()
     try:
-        result = process_image(
-            str(image_path),
-            session_dir,
+        return _run_project_processing(
+            project_id,
+            image_path,
             n_colors,
             overpaint_mm,
             order_mode,
@@ -336,111 +1011,119 @@ async def reprocess_session(
             saturation_boost,
             detail_level,
             mask_dilation_px,
+            canvas_width_cm,
+            canvas_height_cm,
+            updates,
+            easy_painting=easy_painting,
+            easy_simplify=easy_simplify,
+            easy_face_detail=easy_face_detail,
+            detail_eyes=detail_eyes,
+            detail_face=detail_face,
+            detail_body_outline=detail_body_outline,
+            style_preset=preset,
+            favor_skin_tones=favor_skin_tones,
+            skin_tone_strength=skin_tone_strength,
+            priority_region_strength=priority_region_strength,
+            must_include_hex=must_include_hex,
         )
-        result["session_id"] = session_id
-        result["canvas_width_cm"] = max(0, float(canvas_width_cm))
-        result["canvas_height_cm"] = max(0, float(canvas_height_cm))
-        return result
     except Exception as e:
-        logger.error(f"Reprocess failed: {str(e)}")
+        logger.error(f"Reprocess failed: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Reprocessing failed: {str(e)}")
 
 
-@app.options("/api/sessions/{session_id}/{filename}")
-async def options_session_file(session_id: str, filename: str, request: Request):
-    """Handle CORS preflight for session files."""
-    origin = request.headers.get("origin", "https://layerpainter.margies.app")
-    
-    # Always allow our domain - set CORS headers unconditionally
-    origin_lower = origin.lower() if origin else ""
-    if (not origin or 
-        "layerpainter.margies.app" in origin_lower or 
-        "margies.app" in origin_lower or
-        origin in allowed_origins or
-        origin_lower.startswith("https://layerpainter") or
-        origin_lower.startswith("http://localhost")):
-        cors_origin = origin if origin else "https://layerpainter.margies.app"
-    else:
-        cors_origin = "https://layerpainter.margies.app"
-    
-    from fastapi.responses import Response
-    return Response(
-        status_code=200,
-        headers={
-            "Access-Control-Allow-Origin": cors_origin,
-            "Access-Control-Allow-Credentials": "true",
-            "Access-Control-Allow-Methods": "GET, OPTIONS, HEAD",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Max-Age": "86400",
-        }
-    )
-
-
-@app.get("/api/sessions/{session_id}/{filename}")
-async def get_session_file(session_id: str, filename: str, request: Request):
-    """Serve session files with CORS headers for canvas/image loading."""
-    file_path = DATA_DIR / session_id / filename
-
-    session_dir = DATA_DIR / session_id
-    if not file_path.exists() or not file_path.is_file():
-        # Pure mask: regenerate from labels when possible (exact quantized region, no gaps)
+def _serve_project_artifact(project_id: str, filename: str, request: Request) -> FileResponse:
+    adir = project_store.artifacts_dir(project_id)
+    file_path = project_store.resolve_artifact_file(project_id, filename)
+    if not file_path or not file_path.is_file():
         if filename.endswith("_pure_mask.png"):
             try:
                 layer_index = int(filename.replace("layer_", "").replace("_pure_mask.png", ""))
             except ValueError:
                 layer_index = -1
-            if layer_index >= 0 and regenerate_pure_mask_from_labels(session_dir, layer_index):
-                pass  # file_path now exists, fall through to serve
-            else:
-                raise HTTPException(status_code=404, detail="Pure mask unavailable")
-        else:
+            if layer_index >= 0 and regenerate_pure_mask_from_labels(adir, layer_index):
+                file_path = adir / filename
+        if not file_path or not file_path.is_file():
             raise HTTPException(status_code=404, detail="File not found")
     elif filename.endswith("_pure_mask.png"):
-        # Always regenerate pure mask from labels when available so display has no gaps
         try:
             layer_index = int(filename.replace("layer_", "").replace("_pure_mask.png", ""))
         except ValueError:
             layer_index = -1
         if layer_index >= 0:
-            regenerate_pure_mask_from_labels(session_dir, layer_index)
-    
-    # Security check: ensure file is within session directory
+            regenerate_pure_mask_from_labels(adir, layer_index)
+            file_path = adir / filename
     try:
-        file_path.resolve().relative_to(DATA_DIR.resolve())
+        file_path.resolve().relative_to(project_store.artifacts_dir(project_id).resolve())
     except ValueError:
-        raise HTTPException(status_code=403, detail="Access denied")
-    
-    # Return FileResponse with explicit CORS headers - ALWAYS set for our domain
-    # This is required for CSS mask-image and canvas loading to work across origins
-    response = FileResponse(file_path)
-    
-    # Get origin from request header
-    origin = request.headers.get("origin")
-    
-    # Always set CORS headers - use origin if it's from our domain, otherwise default to our domain
-    if origin:
-        origin_lower = origin.lower()
-        if ("layerpainter.margies.app" in origin_lower or 
-            "margies.app" in origin_lower or
-            origin in allowed_origins or
-            origin_lower.startswith("https://layerpainter") or
-            origin_lower.startswith("http://localhost")):
-            response.headers["Access-Control-Allow-Origin"] = origin
-        else:
-            # Default to our domain if origin doesn't match
-            response.headers["Access-Control-Allow-Origin"] = "https://layerpainter.margies.app"
-    else:
-        # No origin header (common with CSS mask-image) - allow our domain
-        response.headers["Access-Control-Allow-Origin"] = "https://layerpainter.margies.app"
-    
-    response.headers["Access-Control-Allow-Credentials"] = "true"
-    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS, HEAD"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    response.headers["Access-Control-Expose-Headers"] = "*"
-    response.headers["Access-Control-Max-Age"] = "86400"
-    
-    return response
+        try:
+            file_path.resolve().relative_to(project_store.source_dir(project_id).resolve())
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Access denied")
+    return _cors_file_response(file_path, request)
+
+
+def _options_cors_response(request: Request) -> Response:
+    origin = request.headers.get("origin", "https://layerpainter.margies.app")
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, OPTIONS, HEAD",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+        },
+    )
+
+
+@app.options("/api/projects/{project_id}/artifacts/{filename}")
+async def options_project_artifact(project_id: str, filename: str, request: Request):
+    return _options_cors_response(request)
+
+
+@app.options("/api/projects/{project_id}/source/{filename}")
+async def options_project_source(project_id: str, filename: str, request: Request):
+    return _options_cors_response(request)
+
+
+@app.options("/api/sessions/{session_id}/{filename}")
+async def options_session_file(session_id: str, filename: str, request: Request):
+    return _options_cors_response(request)
+
+
+@app.get("/api/projects/{project_id}/artifacts/{filename}")
+async def get_project_artifact(project_id: str, filename: str, request: Request):
+    return _serve_project_artifact(project_id, filename, request)
+
+
+@app.get("/api/projects/{project_id}/source/{filename}")
+async def get_project_source(project_id: str, filename: str, request: Request):
+    if not project_store.project_root(project_id).is_dir():
+        raise HTTPException(status_code=404, detail="Project not found")
+    file_path = project_store.resolve_source_file(project_id, filename)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="File not found")
+    return _cors_file_response(file_path, request)
+
+
+@app.get("/api/sessions/{session_id}/{filename}")
+async def get_session_file(session_id: str, filename: str, request: Request):
+    """Legacy session URLs → project bundle paths."""
+    if filename == "original_oriented.jpg":
+        return await get_project_source(session_id, project_store.SOURCE_ORIENTED, request)
+    if filename.startswith("verify/"):
+        verify_name = filename.split("/", 1)[1]
+        verify_path = project_store.artifacts_dir(session_id) / "verify" / verify_name
+        if verify_path.is_file():
+            return _cors_file_response(verify_path, request)
+        raise HTTPException(status_code=404, detail="File not found")
+    return _serve_project_artifact(session_id, filename, request)
+
+
+@app.get("/api/sessions/{session_id}/verify/{filename}")
+async def get_verification_image_legacy(session_id: str, filename: str, request: Request):
+    return await get_session_file(session_id, f"verify/{filename}", request)
 
 
 # ===== Paint Management Endpoints =====
@@ -453,50 +1136,29 @@ async def get_paint_library(group: str = "default"):
 
 @app.get("/api/projects")
 async def list_projects():
-    """List persisted projects from server-side JSON files."""
-    return {"projects": _load_all_projects()}
+    """List persisted project bundles."""
+    return {"projects": project_store.list_projects()}
 
 
 @app.put("/api/projects/{session_id}")
 async def upsert_project(session_id: str, request: Request):
-    """Create/update one project JSON file named from project name + session id."""
+    """Update project manifest (settings/metadata). Creates bundle dir if needed."""
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Payload must be an object")
-
-    payload = dict(body)
-    payload["sessionId"] = session_id
-    if not payload.get("name"):
-        payload["name"] = session_id
-    if not payload.get("createdAt"):
-        payload["createdAt"] = int(datetime.now().timestamp() * 1000)
-
-    existing = _find_project_file_by_session(session_id)
-    target_file = _project_file_for_payload(payload)
-    try:
-        atomic_write(target_file, payload)
-        if existing and existing != target_file and existing.exists():
-            existing.unlink(missing_ok=True)
-    except Exception as e:
-        logger.exception("Failed to save project %s: %s", session_id, e)
-        raise HTTPException(status_code=500, detail="Failed to save project")
-    return payload
+    project_store.ensure_project_dirs(session_id)
+    manifest = project_store.upsert_manifest_from_client_payload(session_id, body)
+    return project_store.manifest_to_list_item(manifest)
 
 
 @app.delete("/api/projects/{session_id}")
 async def delete_project(session_id: str):
-    """Delete one persisted project by session id."""
-    existing = _find_project_file_by_session(session_id)
-    if not existing:
-        return {"success": True, "deleted": False}
-    try:
-        existing.unlink(missing_ok=True)
-    except Exception:
-        pass
-    return {"success": True, "deleted": True}
+    """Delete entire project bundle."""
+    deleted = project_store.delete_project(session_id)
+    return {"success": True, "deleted": deleted}
 
 
 @app.get("/api/paint/library/groups")
@@ -558,6 +1220,45 @@ async def update_library_settings(
     return get_library_info(group_id)
 
 
+@app.get("/api/paint/library/groups/{group_id}/substrate-compensation")
+async def get_substrate_compensation_endpoint(group_id: str):
+    """Return paper / substrate black-point compensation params for the given library group."""
+    existing_groups = list_library_groups()
+    if group_id not in existing_groups:
+        raise HTTPException(status_code=404, detail=f"Library group '{group_id}' not found")
+    return get_substrate_compensation(group_id)
+
+
+@app.put("/api/paint/library/groups/{group_id}/substrate-compensation")
+async def update_substrate_compensation(
+    group_id: str,
+    body: dict = Body(...),
+):
+    """Update paper / substrate black-point compensation params for the given library group.
+
+    Body fields (all optional): enabled (bool), L_paper_min (float), L_break (float), alpha_dark (float).
+    Recipe cache is invalidated so the next recipe generation re-uses the new params.
+    """
+    existing_groups = list_library_groups()
+    if group_id not in existing_groups:
+        raise HTTPException(status_code=404, detail=f"Library group '{group_id}' not found")
+    library = load_library(group_id)
+    sc = library.get("substrate_compensation")
+    sc = dict(sc) if isinstance(sc, dict) else {}
+    if "enabled" in body:
+        sc["enabled"] = bool(body.get("enabled"))
+    for key in ("L_paper_min", "L_break", "alpha_dark"):
+        if key in body and body.get(key) is not None:
+            try:
+                sc[key] = float(body.get(key))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"{key} must be numeric")
+    library["substrate_compensation"] = sc
+    save_library(library, group_id)
+    invalidate_recipe_cache(group_id)
+    return get_substrate_compensation(group_id)
+
+
 @app.put("/api/paint/library/groups/{group_id}")
 async def rename_library_group(
     group_id: str,
@@ -579,6 +1280,54 @@ async def rename_library_group(
     save_library(library, group_id)
     
     return get_library_info(group_id)
+
+
+@app.get("/api/paint/library/groups/{group_id}/export")
+async def export_library_group(group_id: str):
+    """Download a full paint library group as JSON (paints, calibrations, recipes, settings)."""
+    existing_groups = list_library_groups()
+    if group_id not in existing_groups:
+        raise HTTPException(status_code=404, detail=f"Library group '{group_id}' not found")
+    payload = build_library_export(group_id)
+    filename = f"paint_library_{group_id}.json"
+    return Response(
+        content=json.dumps(payload, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/paint/library/import")
+async def import_library_group(
+    file: UploadFile = File(...),
+    mode: str = Form("replace"),
+    target_group: str = Form(""),
+):
+    """Import a paint library from JSON. Replace an existing group or create a new one."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+    try:
+        raw = await file.read()
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="Invalid JSON file")
+
+    import_mode = (mode or "replace").strip().lower()
+    if import_mode not in ("replace", "new"):
+        raise HTTPException(status_code=400, detail="mode must be 'replace' or 'new'")
+
+    try:
+        if import_mode == "new":
+            info = import_library_data(payload, create_new=True)
+        else:
+            group = (target_group or "").strip()
+            if not group:
+                raise ValueError("target_group is required when replacing a library")
+            info = import_library_data(payload, target_group=group, create_new=False)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {"success": True, "library": info}
 
 
 @app.post("/api/paint/library")
@@ -1114,12 +1863,11 @@ async def optimize_palette_size(
         sid = (session_id or "").strip()
         if not sid:
             raise HTTPException(status_code=400, detail="Provide either image or session_id")
-        session_dir = DATA_DIR / sid
-        if not session_dir.exists() or not session_dir.is_dir():
-            raise HTTPException(status_code=404, detail="Session not found")
-        stored = _find_stored_input_path(session_dir)
+        if not project_store.project_root(sid).is_dir():
+            raise HTTPException(status_code=404, detail="Project not found")
+        stored = project_store.find_source_input(sid)
         if not stored:
-            raise HTTPException(status_code=404, detail="No stored input image for this session")
+            raise HTTPException(status_code=404, detail="No stored source image for this project")
         try:
             image_rgb = _optimize_image_from_path(stored)
             image_signature_bytes = stored.read_bytes()
@@ -1154,121 +1902,160 @@ async def optimize_palette_size(
     rgb_norm = downsampled.astype(np.float32) / 255.0
     lab_img = cv2.cvtColor(rgb_norm, cv2.COLOR_RGB2LAB)
     lab_pixels = lab_img.reshape(-1, 3).astype(np.float32)
+    lab_pixels = np.nan_to_num(lab_pixels, nan=50.0, posinf=100.0, neginf=0.0)
+    lab_pixels[:, 0] = np.clip(lab_pixels[:, 0], 0, 100)
+    lab_pixels[:, 1] = np.clip(lab_pixels[:, 1], -128, 127)
+    lab_pixels[:, 2] = np.clip(lab_pixels[:, 2], -128, 127)
     total_pixels = lab_pixels.shape[0]
     paint_names = _paint_name_lookup(library_group)
     white_paint_id = _find_white_paint_id(library_group)
 
+    def _kmeans_for_size(palette_size: int) -> tuple[np.ndarray, np.ndarray, float, float]:
+        """Cluster colours; return labels, centers, mean quant ΔE, max quant ΔE."""
+        kmeans = KMeans(n_clusters=palette_size, random_state=42, n_init=3, init="k-means++")
+        labels = kmeans.fit_predict(lab_pixels)
+        centers = kmeans.cluster_centers_.astype(np.float32)
+        per_pixel = np.zeros(total_pixels, dtype=np.float32)
+        for idx, center in enumerate(centers):
+            mask = labels == idx
+            if not np.any(mask):
+                continue
+            diffs = lab_pixels[mask] - center
+            per_pixel[mask] = np.sqrt(np.sum(diffs * diffs, axis=1))
+        avg_q = float(np.mean(per_pixel)) if total_pixels > 0 else 999.0
+        max_q = float(np.max(per_pixel)) if total_pixels > 0 else 999.0
+        return labels, centers, avg_q, max_q
+
+    def _build_result(
+        palette_size: int,
+        labels: np.ndarray,
+        centers: np.ndarray,
+    ) -> dict[str, Any]:
+        solver_palette = []
+        for idx, center in enumerate(centers):
+            rgb_center = lab_to_rgb([float(center[0]), float(center[1]), float(center[2])])
+            rgb_i = [int(max(0, min(255, round(c)))) for c in rgb_center]
+            solver_palette.append({"index": idx, "rgb": rgb_i})
+
+        logger.info("Palette optimisation: solving recipes for %s colours", palette_size)
+        solver_results = generate_recipes_for_palette(
+            "palette_optimization",
+            solver_palette,
+            library_group,
+            None,
+        )
+        by_index = {
+            int(item.get("palette_index", -1)): item
+            for item in solver_results
+            if item.get("palette_index") is not None
+        }
+
+        per_pixel_delta = np.zeros(total_pixels, dtype=np.float32)
+        palette_rows: list[dict[str, Any]] = []
+
+        for idx, center in enumerate(centers):
+            mask = labels == idx
+            if not np.any(mask):
+                continue
+            center_diffs = lab_pixels[mask] - center
+            quant_err = np.sqrt(np.sum(center_diffs * center_diffs, axis=1))
+
+            solver_item = by_index.get(idx, {})
+            raw_recipe = solver_item.get("recipe")
+            solver_err = 50.0
+            if isinstance(raw_recipe, dict):
+                try:
+                    solver_err = float(raw_recipe.get("error", 50.0))
+                except Exception:
+                    solver_err = 50.0
+            if use_prefer_simpler:
+                pigment_count = _solver_recipe_pigment_count(raw_recipe)
+                if pigment_count > 2:
+                    solver_err += pigment_count * 0.5
+
+            combined = np.sqrt((quant_err * quant_err) + (solver_err * solver_err))
+            per_pixel_delta[mask] = combined.astype(np.float32)
+
+            rgb_center = lab_to_rgb([float(center[0]), float(center[1]), float(center[2])])
+            rgb_i = [int(max(0, min(255, round(c)))) for c in rgb_center]
+            target_hex = "#{:02X}{:02X}{:02X}".format(rgb_i[0], rgb_i[1], rgb_i[2])
+            ingredients = _recipe_ingredients_from_solver_recipe(raw_recipe, paint_names, white_paint_id)
+            recipe_error = None
+            if isinstance(raw_recipe, dict) and raw_recipe.get("error") is not None:
+                try:
+                    recipe_error = float(raw_recipe.get("error"))
+                except Exception:
+                    recipe_error = None
+            coverage = float(np.sum(mask)) / float(total_pixels)
+            palette_rows.append({
+                "index": idx,
+                "target_hex": target_hex,
+                "coverage": round(coverage * 100.0, 2),
+                "lab": [round(float(center[0]), 3), round(float(center[1]), 3), round(float(center[2]), 3)],
+                "recipe": {
+                    "ingredients": ingredients,
+                    "error": round(recipe_error, 3) if recipe_error is not None else None,
+                    "type": solver_item.get("type"),
+                    "error_text": solver_item.get("error"),
+                },
+            })
+
+        avg_delta = float(np.mean(per_pixel_delta)) if total_pixels > 0 else 999.0
+        max_delta = float(np.max(per_pixel_delta)) if total_pixels > 0 else 999.0
+
+        priorities: list[tuple[int, float]] = []
+        for row in palette_rows:
+            lab = row["lab"]
+            area_score = float(row["coverage"]) / 100.0
+            lightness_score = max(0.0, min(1.0, float(lab[0]) / 100.0))
+            chroma = (float(lab[1]) ** 2 + float(lab[2]) ** 2) ** 0.5
+            base_color_bonus = max(0.0, min(1.0, chroma / 181.0))
+            priority = 0.6 * area_score + 0.3 * lightness_score + 0.1 * base_color_bonus
+            priorities.append((int(row["index"]), float(priority)))
+        paint_order = [idx for idx, _ in sorted(priorities, key=lambda x: x[1], reverse=True)]
+
+        return {
+            "optimal_palette_size": int(palette_size),
+            "average_delta_e": round(avg_delta, 3),
+            "maximum_delta_e": round(max_delta, 3),
+            "target_delta_e": round(float(target_delta_e), 3),
+            "max_palette_size": int(max_palette_size),
+            "library_group": library_group,
+            "prefer_simpler": use_prefer_simpler,
+            "downsample": {"width": int(width), "height": int(height)},
+            "palette": sorted(palette_rows, key=lambda x: x["index"]),
+            "paint_order": paint_order,
+            "met_target": bool(avg_delta <= float(target_delta_e)),
+        }
+
     def _compute() -> dict[str, Any]:
-        fallback_result: Optional[dict[str, Any]] = None
+        logger.info(
+            "Palette optimisation: scanning sizes 2..%s (quant pass, then one recipe solve)",
+            max_palette_size,
+        )
+        chosen_size = int(max_palette_size)
+        chosen_labels: Optional[np.ndarray] = None
+        chosen_centers: Optional[np.ndarray] = None
+        fallback_size = 2
+        fallback_labels: Optional[np.ndarray] = None
+        fallback_centers: Optional[np.ndarray] = None
 
         for palette_size in range(2, int(max_palette_size) + 1):
-            kmeans = KMeans(n_clusters=palette_size, random_state=42, n_init=8, init='k-means++')
-            labels = kmeans.fit_predict(lab_pixels)
-            centers = kmeans.cluster_centers_.astype(np.float32)
+            labels, centers, avg_q, _ = _kmeans_for_size(palette_size)
+            logger.info("Palette optimisation: size=%s quant_avg=%.3f", palette_size, avg_q)
+            fallback_size, fallback_labels, fallback_centers = palette_size, labels, centers
+            chosen_size, chosen_labels, chosen_centers = palette_size, labels, centers
+            if avg_q <= float(target_delta_e):
+                break
 
-            solver_palette = []
-            for idx, center in enumerate(centers):
-                rgb_center = lab_to_rgb([float(center[0]), float(center[1]), float(center[2])])
-                rgb_i = [int(max(0, min(255, round(c)))) for c in rgb_center]
-                solver_palette.append({"index": idx, "rgb": rgb_i})
-
-            solver_results = generate_recipes_for_palette(
-                "palette_optimization",
-                solver_palette,
-                library_group,
-                None,
-            )
-            by_index = {
-                int(item.get("palette_index", -1)): item
-                for item in solver_results
-                if item.get("palette_index") is not None
-            }
-
-            per_pixel_delta = np.zeros(total_pixels, dtype=np.float32)
-            palette_rows: list[dict[str, Any]] = []
-
-            for idx, center in enumerate(centers):
-                mask = labels == idx
-                if not np.any(mask):
-                    continue
-                center_diffs = lab_pixels[mask] - center
-                quant_err = np.sqrt(np.sum(center_diffs * center_diffs, axis=1))
-
-                solver_item = by_index.get(idx, {})
-                raw_recipe = solver_item.get("recipe")
-                solver_err = 50.0
-                if isinstance(raw_recipe, dict):
-                    try:
-                        solver_err = float(raw_recipe.get("error", 50.0))
-                    except Exception:
-                        solver_err = 50.0
-                if use_prefer_simpler:
-                    pigment_count = _solver_recipe_pigment_count(raw_recipe)
-                    if pigment_count > 2:
-                        solver_err += (pigment_count * 0.5)
-
-                combined = np.sqrt((quant_err * quant_err) + (solver_err * solver_err))
-                per_pixel_delta[mask] = combined.astype(np.float32)
-
-                rgb_center = lab_to_rgb([float(center[0]), float(center[1]), float(center[2])])
-                rgb_i = [int(max(0, min(255, round(c)))) for c in rgb_center]
-                target_hex = "#{:02X}{:02X}{:02X}".format(rgb_i[0], rgb_i[1], rgb_i[2])
-                ingredients = _recipe_ingredients_from_solver_recipe(raw_recipe, paint_names, white_paint_id)
-                recipe_error = None
-                if isinstance(raw_recipe, dict) and raw_recipe.get("error") is not None:
-                    try:
-                        recipe_error = float(raw_recipe.get("error"))
-                    except Exception:
-                        recipe_error = None
-                coverage = float(np.sum(mask)) / float(total_pixels)
-                palette_rows.append({
-                    "index": idx,
-                    "target_hex": target_hex,
-                    "coverage": round(coverage * 100.0, 2),
-                    "lab": [round(float(center[0]), 3), round(float(center[1]), 3), round(float(center[2]), 3)],
-                    "recipe": {
-                        "ingredients": ingredients,
-                        "error": round(recipe_error, 3) if recipe_error is not None else None,
-                        "type": solver_item.get("type"),
-                        "error_text": solver_item.get("error"),
-                    },
-                })
-
-            avg_delta = float(np.mean(per_pixel_delta)) if total_pixels > 0 else 999.0
-            max_delta = float(np.max(per_pixel_delta)) if total_pixels > 0 else 999.0
-
-            # Paint order heuristic: large + lighter + slightly more saturated first.
-            priorities: list[tuple[int, float]] = []
-            for row in palette_rows:
-                lab = row["lab"]
-                area_score = float(row["coverage"]) / 100.0
-                lightness_score = max(0.0, min(1.0, float(lab[0]) / 100.0))
-                chroma = (float(lab[1]) ** 2 + float(lab[2]) ** 2) ** 0.5
-                base_color_bonus = max(0.0, min(1.0, chroma / 181.0))
-                priority = 0.6 * area_score + 0.3 * lightness_score + 0.1 * base_color_bonus
-                priorities.append((int(row["index"]), float(priority)))
-            paint_order = [idx for idx, _ in sorted(priorities, key=lambda x: x[1], reverse=True)]
-
-            result_payload = {
-                "optimal_palette_size": int(palette_size),
-                "average_delta_e": round(avg_delta, 3),
-                "maximum_delta_e": round(max_delta, 3),
-                "target_delta_e": round(float(target_delta_e), 3),
-                "max_palette_size": int(max_palette_size),
-                "library_group": library_group,
-                "prefer_simpler": use_prefer_simpler,
-                "downsample": {"width": int(width), "height": int(height)},
-                "palette": sorted(palette_rows, key=lambda x: x["index"]),
-                "paint_order": paint_order,
-                "met_target": bool(avg_delta <= float(target_delta_e)),
-            }
-            fallback_result = result_payload
-            if avg_delta <= float(target_delta_e):
-                return result_payload
-
-        if fallback_result is None:
+        if chosen_labels is None or chosen_centers is None:
+            chosen_size = fallback_size
+            chosen_labels = fallback_labels
+            chosen_centers = fallback_centers
+        if chosen_labels is None or chosen_centers is None:
             raise RuntimeError("Palette optimisation failed to produce a result")
-        return fallback_result
+
+        return _build_result(chosen_size, chosen_labels, chosen_centers)
 
     try:
         result = await asyncio.to_thread(_compute)
@@ -1596,7 +2383,7 @@ async def _compute_recipes_async(
         return out
 
     def _predict_mix_hex(components: list[tuple[str, float]]) -> Optional[str]:
-        """Predict expected mixed color using calibration tint curves + white-aware dilution."""
+        """Predict expected mixed color (same model as recipe solver)."""
         merged: dict[str, float] = {}
         for pid, ratio in components:
             if ratio is None:
@@ -1617,15 +2404,6 @@ async def _compute_recipes_async(
         if total <= 0:
             return None
 
-        def _to_linear(rgb: list[float]) -> np.ndarray:
-            arr = np.array([max(0.0, min(255.0, float(c))) / 255.0 for c in rgb], dtype=np.float64)
-            return np.power(arr, 2.2)
-
-        def _to_srgb(linear_rgb: np.ndarray) -> list[int]:
-            clamped = np.clip(np.asarray(linear_rgb, dtype=np.float64), 0.0, 1.0)
-            srgb = np.power(clamped, 1.0 / 2.2) * 255.0
-            return [int(max(0, min(255, round(v)))) for v in srgb.tolist()]
-
         white_ratio = 0.0
         pigment_ratios: dict[str, float] = {}
         for paint_id, ratio in merged.items():
@@ -1635,55 +2413,20 @@ async def _compute_recipes_async(
             else:
                 pigment_ratios[paint_id] = pigment_ratios.get(paint_id, 0.0) + ratio
 
-        total_pigment = sum(pigment_ratios.values())
-        if total_pigment <= 1e-9:
-            # Essentially white-only mix.
+        if sum(pigment_ratios.values()) <= 1e-9:
             return "#FFFFFF"
 
-        mixed_linear = np.zeros(3, dtype=np.float64)
-        used_share = 0.0
-        for paint_id, pigment_ratio in pigment_ratios.items():
-            paint = paints_by_id.get(paint_id, {})
-            if pigment_ratio <= 0:
-                continue
-            share = pigment_ratio / total_pigment
-            eff_ratio = pigment_ratio / (pigment_ratio + white_ratio) if (pigment_ratio + white_ratio) > 0 else 0.0
-            eff_ratio = max(0.0, min(1.0, eff_ratio))
-
-            predicted_rgb: Optional[list[float]] = None
-            cal_file = calibration_file_for(library_group, paint_id)
-            if cal_file.exists():
-                try:
-                    with open(cal_file, "r") as f:
-                        calibration = json.load(f)
-                    if isinstance(calibration, dict):
-                        predicted_lab = interpolate_lab_from_calibration(
-                            calibration, eff_ratio, group=library_group, paint_id=paint_id
-                        )
-                        if predicted_lab is not None:
-                            predicted_rgb = [float(c) for c in lab_to_rgb(predicted_lab)]
-                except Exception:
-                    predicted_rgb = None
-
-            if predicted_rgb is None:
-                base_rgb = _hex_to_rgb(str(paint.get("hex_approx", "")))
-                if base_rgb is None:
-                    continue
-                # Fallback for uncalibrated paint: tint toward white at effective ratio.
-                base_lin = _to_linear([float(c) for c in base_rgb])
-                white_lin = np.array([1.0, 1.0, 1.0], dtype=np.float64)
-                tinted = (base_lin * eff_ratio) + (white_lin * (1.0 - eff_ratio))
-                predicted_rgb = [float(c) for c in _to_srgb(tinted)]
-
-            mixed_linear += _to_linear(predicted_rgb) * share
-            used_share += share
-
-        if used_share <= 0:
+        pigment_ids = list(pigment_ratios.keys())
+        ratios_list = [pigment_ratios[k] for k in pigment_ids]
+        lab = predict_mix_lab_for_paint_ratios(
+            library_group, pigment_ids, ratios_list, white_ratio
+        )
+        if lab is None:
             return None
-        if used_share < 0.999:
-            mixed_linear /= used_share
-        r8, g8, b8 = _to_srgb(mixed_linear)
-        return "#{:02X}{:02X}{:02X}".format(r8, g8, b8)
+        r8, g8, b8 = (int(round(c)) for c in lab_to_rgb(lab))
+        return "#{:02X}{:02X}{:02X}".format(
+            max(0, min(255, r8)), max(0, min(255, g8)), max(0, min(255, b8))
+        )
 
     def _recipe_to_structured(
         target_hex: str,
@@ -2309,17 +3052,8 @@ def _predict_mix_hex_standalone(library_group: str, components: list) -> Optiona
     if total <= 0:
         return None
 
-    def _to_linear(rgb: list) -> np.ndarray:
-        arr = np.array([max(0.0, min(255.0, float(c))) / 255.0 for c in rgb], dtype=np.float64)
-        return np.power(arr, 2.2)
-
-    def _to_srgb(linear_rgb: np.ndarray) -> list:
-        clamped = np.clip(np.asarray(linear_rgb, dtype=np.float64), 0.0, 1.0)
-        srgb = np.power(clamped, 1.0 / 2.2) * 255.0
-        return [int(max(0, min(255, round(v)))) for v in srgb.tolist()]
-
     white_ratio = 0.0
-    pigment_ratios = {}
+    pigment_ratios: dict[str, float] = {}
     for paint_id, ratio in merged.items():
         paint = paints_by_id.get(paint_id, {})
         if _is_white_paint(paint):
@@ -2327,53 +3061,20 @@ def _predict_mix_hex_standalone(library_group: str, components: list) -> Optiona
         else:
             pigment_ratios[paint_id] = pigment_ratios.get(paint_id, 0.0) + ratio
 
-    total_pigment = sum(pigment_ratios.values())
-    if total_pigment <= 1e-9:
+    if sum(pigment_ratios.values()) <= 1e-9:
         return "#FFFFFF"
 
-    mixed_linear = np.zeros(3, dtype=np.float64)
-    used_share = 0.0
-    for paint_id, pigment_ratio in pigment_ratios.items():
-        paint = paints_by_id.get(paint_id, {})
-        if pigment_ratio <= 0:
-            continue
-        share = pigment_ratio / total_pigment
-        eff_ratio = pigment_ratio / (pigment_ratio + white_ratio) if (pigment_ratio + white_ratio) > 0 else 0.0
-        eff_ratio = max(0.0, min(1.0, eff_ratio))
-
-        predicted_rgb = None
-        cal_file = calibration_file_for(library_group, paint_id)
-        if cal_file.exists():
-            try:
-                with open(cal_file, "r") as f:
-                    calibration = json.load(f)
-                if isinstance(calibration, dict):
-                    predicted_lab = interpolate_lab_from_calibration(
-                        calibration, eff_ratio, group=library_group, paint_id=paint_id
-                    )
-                    if predicted_lab is not None:
-                        predicted_rgb = [float(c) for c in lab_to_rgb(predicted_lab)]
-            except Exception:
-                predicted_rgb = None
-
-        if predicted_rgb is None:
-            base_rgb = _hex_to_rgb_local(str(paint.get("hex_approx", "")))
-            if base_rgb is None:
-                continue
-            base_lin = _to_linear([float(c) for c in base_rgb])
-            white_lin = np.array([1.0, 1.0, 1.0], dtype=np.float64)
-            tinted = (base_lin * eff_ratio) + (white_lin * (1.0 - eff_ratio))
-            predicted_rgb = _to_srgb(tinted)
-
-        mixed_linear += _to_linear(predicted_rgb) * share
-        used_share += share
-
-    if used_share <= 0:
+    pigment_ids = list(pigment_ratios.keys())
+    ratios_list = [pigment_ratios[k] for k in pigment_ids]
+    lab = predict_mix_lab_for_paint_ratios(
+        library_group, pigment_ids, ratios_list, white_ratio
+    )
+    if lab is None:
         return None
-    if used_share < 0.999:
-        mixed_linear /= used_share
-    r8, g8, b8 = _to_srgb(mixed_linear)
-    return "#{:02X}{:02X}{:02X}".format(r8, g8, b8)
+    r8, g8, b8 = (int(round(c)) for c in lab_to_rgb(lab))
+    return "#{:02X}{:02X}{:02X}".format(
+        max(0, min(255, r8)), max(0, min(255, g8)), max(0, min(255, b8))
+    )
 
 
 @app.post("/api/paint/recipes/predict-mix")
@@ -2647,48 +3348,36 @@ async def upload_verification_photo(
     palette_index: int = Form(...)
 ):
     """Upload a verification swatch photo."""
-    session_dir = DATA_DIR / session_id
-    if not session_dir.exists():
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    verify_dir = session_dir / "verify"
-    verify_dir.mkdir(exist_ok=True)
-    
+    if not project_store.project_root(session_id).is_dir():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    verify_dir = project_store.artifacts_dir(session_id) / "verify"
+    verify_dir.mkdir(parents=True, exist_ok=True)
+
     image_id = str(uuid.uuid4())
     image_path = verify_dir / f"{palette_index}_{image_id}.jpg"
-    
+
     with open(image_path, "wb") as f:
         content = await image.read()
         f.write(content)
-    
+
     return {
         "image_id": image_id,
-        "preview_url": f"/api/sessions/{session_id}/verify/{palette_index}_{image_id}.jpg"
+        "preview_url": f"/api/projects/{session_id}/artifacts/verify/{palette_index}_{image_id}.jpg",
     }
 
 
-@app.get("/api/sessions/{session_id}/verify/{filename}")
-async def get_verification_image(session_id: str, filename: str, request: Request):
-    """Serve verification image with CORS headers."""
-    file_path = DATA_DIR / session_id / "verify" / filename
-    if not file_path.exists():
+@app.get("/api/projects/{project_id}/artifacts/verify/{filename}")
+async def get_verification_image(project_id: str, filename: str, request: Request):
+    """Serve verification swatch image with CORS headers."""
+    file_path = project_store.artifacts_dir(project_id) / "verify" / filename
+    if not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    
-    # Security check
     try:
-        file_path.resolve().relative_to(DATA_DIR.resolve())
+        file_path.resolve().relative_to(project_store.artifacts_dir(project_id).resolve())
     except ValueError:
         raise HTTPException(status_code=403, detail="Access denied")
-    
-    response = FileResponse(file_path)
-    origin = request.headers.get("origin")
-    if origin:
-        if origin in allowed_origins or "layerpainter.margies.app" in origin or "margies.app" in origin:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
+    return _cors_file_response(file_path, request)
 
 
 def _parse_recipe_components(recipe_json: Optional[str]) -> list[tuple[str, float]]:
@@ -2856,11 +3545,10 @@ async def verify_swatch(
     focus_paint_id: str = Form(""),
 ):
     """Sample verification swatch and compare to target. Average over a region (x1,y1,x2,y2) if provided, else over a small area around (x,y). If target_hex and recipe are provided and apply_feedback is true, updates per-paint feedback bias. If focus_paint_id is set, apply 100%% of the correction to that paint only (so other recipes using that paint learn from this spot test)."""
-    session_dir = DATA_DIR / session_id
-    if not session_dir.exists():
-        raise HTTPException(status_code=404, detail="Session not found")
+    if not project_store.project_root(session_id).is_dir():
+        raise HTTPException(status_code=404, detail="Project not found")
 
-    verify_dir = session_dir / "verify"
+    verify_dir = project_store.artifacts_dir(session_id) / "verify"
     image_files = list(verify_dir.glob(f"{palette_index}_{image_id}*"))
     if not image_files:
         raise HTTPException(status_code=404, detail="Verification image not found")

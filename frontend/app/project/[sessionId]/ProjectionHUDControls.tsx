@@ -5,15 +5,31 @@ import type { SessionData } from './types'
 import {
   loadViewerHudState,
   saveViewerHudState,
-  getViewerHudKey,
   DEFAULT_HUD_STATE,
   type ProjectionViewerHudState,
   type OutlineMode,
+  type MaskDisplayMode,
 } from './viewer/projectionViewerState'
+import {
+  cycleMaskDisplayMode,
+  maskDisplayModeLabel,
+  resolveMaskDisplayMode,
+} from './viewer/maskDisplay'
+import { PROJECTION_SHORTCUTS_LINE } from './viewer/projectionKeyboardHelp'
+import { fetchProjectState, saveProjectState } from '@/lib/projectSession'
 
-const PROJECTION_LAYER_KEY = (id: string) => `projection_current_layer_${id}`
-const PROJECTION_SCALE_KEY = (id: string) => `projection_scale_${id}`
-const DONE_LAYERS_KEY = (id: string) => `done_${id}`
+async function persistUiState(
+  sessionId: string,
+  patch: {
+    currentLayer?: number
+    projectionScale?: number
+    doneLayers?: number[]
+    projectionHud?: ProjectionViewerHudState
+  }
+) {
+  const prev = await fetchProjectState(sessionId)
+  await saveProjectState(sessionId, { ...prev, ...patch })
+}
 
 export interface ProjectionHUDControlsProps {
   sessionId: string
@@ -28,68 +44,44 @@ export function ProjectionHUDControls({ sessionId, sessionData }: ProjectionHUDC
 
   const loadState = useCallback(() => {
     if (typeof window === 'undefined') return
-    setHudState(loadViewerHudState(sessionId))
-    const layerStored = localStorage.getItem(PROJECTION_LAYER_KEY(sessionId))
-    if (layerStored !== null) {
-      const n = parseInt(layerStored, 10)
-      if (!Number.isNaN(n) && n >= 0) setCurrentLayer(n)
-    }
-    const scaleStored = localStorage.getItem(PROJECTION_SCALE_KEY(sessionId))
-    if (scaleStored != null) {
-      const n = parseFloat(scaleStored)
-      if (!Number.isNaN(n) && n >= 0.25 && n <= 2) setScale(n)
-    }
-    const doneStored = localStorage.getItem(DONE_LAYERS_KEY(sessionId))
-    if (doneStored) setDoneLayers(new Set(JSON.parse(doneStored)))
+    void fetchProjectState(sessionId).then((ui) => {
+      const hud = (ui.projectionHud ?? {}) as Partial<ProjectionViewerHudState>
+      setHudState({
+        ...DEFAULT_HUD_STATE,
+        ...hud,
+        maskDisplayMode: resolveMaskDisplayMode(hud),
+      })
+      if (typeof ui.currentLayer === 'number' && ui.currentLayer >= 0) setCurrentLayer(ui.currentLayer)
+      if (typeof ui.projectionScale === 'number') {
+        const n = ui.projectionScale
+        if (n >= 0.25 && n <= 2) setScale(n)
+      }
+      if (Array.isArray(ui.doneLayers)) setDoneLayers(new Set(ui.doneLayers))
+    })
   }, [sessionId])
 
   useEffect(() => {
     loadState()
   }, [loadState])
 
+  // Storage events only fire in other tabs/windows; reload when this tab regains focus (e.g. after H in projection window).
   useEffect(() => {
-    const key = PROJECTION_LAYER_KEY(sessionId)
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === key && e.newValue !== null) {
-        const n = parseInt(e.newValue, 10)
-        if (!Number.isNaN(n)) setCurrentLayer(n)
-      }
-    }
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
-  }, [sessionId])
+    const onFocus = () => loadState()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [loadState])
 
   useEffect(() => {
-    const key = getViewerHudKey(sessionId)
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === key && e.newValue !== null) {
-        try {
-          const next = JSON.parse(e.newValue) as ProjectionViewerHudState
-          setHudState(next)
-        } catch (_) {}
-      }
-    }
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
-  }, [sessionId])
-
-  useEffect(() => {
-    const key = PROJECTION_SCALE_KEY(sessionId)
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === key && e.newValue != null) {
-        const n = parseFloat(e.newValue)
-        if (!Number.isNaN(n) && n >= 0.25 && n <= 2) setScale(n)
-      }
-    }
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
-  }, [sessionId])
+    const id = window.setInterval(() => loadState(), 5000)
+    return () => clearInterval(id)
+  }, [loadState])
 
   const updateHud = useCallback(
     (patch: Partial<ProjectionViewerHudState>) => {
       setHudState((prev) => {
         const next = { ...prev, ...patch }
         saveViewerHudState(sessionId, next)
+        void persistUiState(sessionId, { projectionHud: next })
         return next
       })
     },
@@ -100,7 +92,7 @@ export function ProjectionHUDControls({ sessionId, sessionData }: ProjectionHUDC
     (n: number) => {
       if (n >= 0 && n < sessionData.layers.length) {
         setCurrentLayer(n)
-        localStorage.setItem(PROJECTION_LAYER_KEY(sessionId), String(n))
+        void persistUiState(sessionId, { currentLayer: n })
       }
     },
     [sessionId, sessionData.layers.length]
@@ -110,7 +102,7 @@ export function ProjectionHUDControls({ sessionId, sessionData }: ProjectionHUDC
     (v: number) => {
       const clamped = Math.max(0.25, Math.min(2, Math.round(v * 100) / 100))
       setScale(clamped)
-      localStorage.setItem(PROJECTION_SCALE_KEY(sessionId), String(clamped))
+      void persistUiState(sessionId, { projectionScale: clamped })
     },
     [sessionId]
   )
@@ -122,7 +114,7 @@ export function ProjectionHUDControls({ sessionId, sessionData }: ProjectionHUDC
       const next = new Set(prev)
       if (next.has(currentLayer)) next.delete(currentLayer)
       else next.add(currentLayer)
-      localStorage.setItem(DONE_LAYERS_KEY(sessionId), JSON.stringify(Array.from(next)))
+      void persistUiState(sessionId, { doneLayers: Array.from(next) })
       return next
     })
   }, [sessionId, currentLayer, sessionData.layers])
@@ -215,15 +207,24 @@ export function ProjectionHUDControls({ sessionId, sessionData }: ProjectionHUDC
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-4">
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={hudState.showColor}
-                  onChange={(e) => updateHud({ showColor: e.target.checked })}
-                  className="rounded bg-gray-700 border-gray-600"
-                />
-                <span className="text-sm">Color</span>
-              </label>
+              <div className="flex items-center gap-2">
+                <span className="text-sm">Mask view:</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    updateHud({
+                      maskDisplayMode: cycleMaskDisplayMode(hudState.maskDisplayMode),
+                      ...(hudState.maskDisplayMode === 'white'
+                        ? { inverted: false }
+                        : {}),
+                    })
+                  }
+                  className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-sm"
+                  title="Same as K in projection window"
+                >
+                  {maskDisplayModeLabel(hudState.maskDisplayMode)} (K)
+                </button>
+              </div>
               <label className="flex items-center gap-2">
                 <input
                   type="checkbox"
@@ -243,6 +244,15 @@ export function ProjectionHUDControls({ sessionId, sessionData }: ProjectionHUDC
             <button type="button" onClick={() => setScaleValue(scale - 0.05)} className="px-2 py-0.5 rounded bg-gray-700 text-sm">−</button>
             <button type="button" onClick={() => setScaleValue(scale + 0.05)} className="px-2 py-0.5 rounded bg-gray-700 text-sm">+</button>
           </div>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={hudState.showHudOverlay}
+              onChange={(e) => updateHud({ showHudOverlay: e.target.checked })}
+              className="rounded bg-gray-700 border-gray-600"
+            />
+            <span className="text-sm">On-screen HUD (projection window)</span>
+          </label>
           <label className="flex items-center gap-2">
             <input
               type="checkbox"
@@ -293,8 +303,8 @@ export function ProjectionHUDControls({ sessionId, sessionData }: ProjectionHUDC
           </div>
         )}
 
-        <div className="text-xs text-gray-500 pt-2 border-t border-gray-700">
-          ← → Space: Navigate | D: Done | C: Crosshairs | X: Grid | I: Invert | K: Color | L: Pure/Expanded | O: Outline | [ ]: Opacity | − +: Scale | F: Final | G: Original | R: Registration | B/W: Black/White | S: Show Done | H: HUD | E: End lasso | Esc: Close
+        <div className="text-xs text-gray-500 pt-2 border-t border-gray-700 leading-relaxed">
+          {PROJECTION_SHORTCUTS_LINE}
         </div>
       </div>
     </div>

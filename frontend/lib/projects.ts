@@ -18,12 +18,29 @@ export interface Project {
   canvasHeightCm: number
   saturationBoost: number
   detailLevel: number
+  favorSkinTones?: boolean
+  skinToneStrength?: number
+  easyPainting?: boolean
+  easySimplify?: number
+  easyFaceDetail?: boolean
+  stylePreset?: string
+  detailEyes?: boolean
+  detailFace?: boolean
+  detailBodyOutline?: boolean
+  priorityRegionStrength?: number
+  hasPriorityRegion?: boolean
+  mustIncludeColors?: string[]
   createdAt: number
   /** Used by Regenerate Layers on Projection tab */
   nColors?: number
   overpaintMm?: number
   orderMode?: string
   maxSide?: number
+  /** Server list endpoint — oriented source thumbnail URL */
+  thumbUrl?: string | null
+  hasArtifacts?: boolean
+  hasSource?: boolean
+  updatedAt?: number
 }
 
 function getStored(): Project[] {
@@ -63,9 +80,14 @@ export async function syncProjectsFromServer(force: boolean = false): Promise<Pr
       const res = await fetch(`${API_BASE_URL}/api/projects`, { cache: 'no-store' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json() as { projects?: Project[] }
+      const localBefore = getStored()
       const normalized = normalizeProjects(Array.isArray(data.projects) ? data.projects : [])
-      setStored(normalized)
-      return normalized
+      const merged = normalized.map((serverProj) => {
+        const localProj = localBefore.find((p) => p.sessionId === serverProj.sessionId)
+        return mergeServerProjectWithLocal(serverProj, localProj)
+      })
+      setStored(merged)
+      return merged
     } catch (e) {
       // Fall back to local cache if server unavailable.
       return normalizeProjects(getStored())
@@ -77,15 +99,40 @@ export async function syncProjectsFromServer(force: boolean = false): Promise<Pr
   return syncingPromise
 }
 
+const IMAGE_TAB_MERGE_KEYS: (keyof Project)[] = [
+  'favorSkinTones',
+  'skinToneStrength',
+  'mustIncludeColors',
+  'priorityRegionStrength',
+]
+
+function mergeServerProjectWithLocal(server: Project, local?: Project): Project {
+  if (!local || local.sessionId !== server.sessionId) return server
+  const merged: Project = { ...server }
+  for (const key of IMAGE_TAB_MERGE_KEYS) {
+    const localVal = local[key]
+    if (localVal === undefined) continue
+    // Stale empty local cache must not wipe server must-include picks after reload.
+    if (key === 'mustIncludeColors') {
+      const localColors = Array.isArray(localVal) ? localVal : []
+      const serverColors = Array.isArray(server.mustIncludeColors) ? server.mustIncludeColors : []
+      if (localColors.length === 0 && serverColors.length > 0) continue
+    }
+    if (JSON.stringify(localVal) !== JSON.stringify(server[key])) {
+      ;(merged as Record<string, unknown>)[key] = localVal
+    }
+  }
+  return merged
+}
+
 async function upsertProjectToServer(project: Project): Promise<void> {
-  try {
-    await fetch(`${API_BASE_URL}/api/projects/${encodeURIComponent(project.sessionId)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(project),
-    })
-  } catch (e) {
-    // Keep local cache even if server sync fails; next sync can reconcile.
+  const res = await fetch(`${API_BASE_URL}/api/projects/${encodeURIComponent(project.sessionId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(project),
+  })
+  if (!res.ok) {
+    throw new Error(`Project save failed: HTTP ${res.status}`)
   }
 }
 
@@ -109,15 +156,36 @@ export function getProjectBySessionId(sessionId: string): Project | undefined {
   return getStored().find((p) => p.sessionId === sessionId)
 }
 
+/** Paint library for API calls — chosen on the Projection tab and stored on the project. */
+export function resolveProjectLibraryGroup(sessionId?: string | null): string {
+  if (!sessionId) return 'default'
+  return getProjectBySessionId(sessionId)?.libraryGroup || 'default'
+}
+
+export interface SaveProjectOptions {
+  /** Wait for server manifest write (use for Image-tab settings that must survive tab switches). */
+  awaitServer?: boolean
+}
+
 /** Add or update a project by sessionId. Keeps list bounded. */
-export function saveProject(project: Project): void {
+export async function saveProject(project: Project, options?: SaveProjectOptions): Promise<void> {
   const list = getStored()
   const idx = list.findIndex((p) => p.sessionId === project.sessionId)
   if (idx >= 0) list.splice(idx, 1)
   list.unshift(project)
   const trimmed = normalizeProjects(list)
   setStored(trimmed)
-  void upsertProjectToServer(project)
+  if (options?.awaitServer) {
+    try {
+      await upsertProjectToServer(project)
+    } catch (e) {
+      console.error('Failed to save project to server:', e)
+    }
+  } else {
+    void upsertProjectToServer(project).catch((e) => {
+      console.error('Failed to save project to server:', e)
+    })
+  }
 }
 
 /** Remove a project by sessionId. */

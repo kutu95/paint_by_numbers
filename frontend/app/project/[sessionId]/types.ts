@@ -27,4 +27,6 @@ export interface SessionData {
   original_url?: string
   canvas_width_cm?: number
   canvas_height_cm?: number
+  /** Manifest updatedAt — bump when source/artifacts regenerate (cache bust). */
+  artifacts_version?: number
 }

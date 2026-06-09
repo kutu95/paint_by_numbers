@@ -390,6 +390,11 @@ export default function PaintsPage() {
   const [renamingGroup, setRenamingGroup] = useState<string | null>(null)
   const [renameGroupName, setRenameGroupName] = useState('')
   const [downloadingCalibrationExport, setDownloadingCalibrationExport] = useState(false)
+  const [exportingLibrary, setExportingLibrary] = useState(false)
+  const [importingLibrary, setImportingLibrary] = useState(false)
+  const [importFileName, setImportFileName] = useState<string | null>(null)
+  const [importFile, setImportFile] = useState<File | null>(null)
+  const importFileInputRef = useRef<HTMLInputElement>(null)
   const [gamutL, setGamutL] = useState<number>(50)
   const [gamutLoading, setGamutLoading] = useState(false)
   const [gamutData, setGamutData] = useState<any | null>(null)
@@ -691,6 +696,96 @@ export default function PaintsPage() {
     }
   }
 
+  const handleExportLibrary = async () => {
+    if (!selectedGroup) return
+    setExportingLibrary(true)
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/paint/library/groups/${encodeURIComponent(selectedGroup)}/export`
+      )
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `paint_library_${selectedGroup}.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (error) {
+      console.error('Failed to export library:', error)
+      alert('Failed to export paint library')
+    } finally {
+      setExportingLibrary(false)
+    }
+  }
+
+  const handleImportFileChosen = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setImportFile(file)
+    setImportFileName(file.name)
+  }
+
+  const cancelLibraryImport = () => {
+    setImportFile(null)
+    setImportFileName(null)
+  }
+
+  const handleImportLibrary = async (mode: 'replace' | 'new') => {
+    if (!importFile) return
+    const currentGroup = libraryGroups.find((g) => g.group === selectedGroup)
+    const replaceLabel = currentGroup?.name || selectedGroup
+    if (mode === 'replace') {
+      if (
+        !confirm(
+          `Replace "${replaceLabel}" with the imported library? Existing paints, calibrations, and recipes in this group will be overwritten.`
+        )
+      ) {
+        return
+      }
+    }
+    setImportingLibrary(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', importFile)
+      formData.append('mode', mode)
+      if (mode === 'replace') {
+        formData.append('target_group', selectedGroup)
+      }
+      const response = await fetch(`${API_BASE_URL}/api/paint/library/import`, {
+        method: 'POST',
+        body: formData,
+      })
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || `HTTP ${response.status}`)
+      }
+      const data = await response.json()
+      const importedGroup = data.library?.group as string | undefined
+      cancelLibraryImport()
+      await loadLibraryGroups()
+      if (importedGroup) {
+        setSelectedGroup(importedGroup)
+      }
+      loadPaints()
+      alert(
+        mode === 'new'
+          ? `Imported new library "${data.library?.name || importedGroup}".`
+          : `Replaced library "${data.library?.name || replaceLabel}".`
+      )
+    } catch (error) {
+      console.error('Failed to import library:', error)
+      alert(error instanceof Error ? error.message : 'Failed to import paint library')
+    } finally {
+      setImportingLibrary(false)
+    }
+  }
+
   const loadGamutSlice = async (refresh: boolean = false) => {
     if (!selectedGroup) return
     setGamutLoading(true)
@@ -880,6 +975,28 @@ export default function PaintsPage() {
               + New Group
             </button>
             <button
+              onClick={handleExportLibrary}
+              disabled={exportingLibrary}
+              className="px-3 py-2 bg-indigo-700 hover:bg-indigo-600 rounded text-sm disabled:opacity-50"
+            >
+              {exportingLibrary ? 'Exporting…' : 'Export Library JSON'}
+            </button>
+            <button
+              type="button"
+              onClick={() => importFileInputRef.current?.click()}
+              disabled={importingLibrary}
+              className="px-3 py-2 bg-indigo-800 hover:bg-indigo-700 rounded text-sm disabled:opacity-50"
+            >
+              Import Library JSON
+            </button>
+            <input
+              ref={importFileInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={handleImportFileChosen}
+            />
+            <button
               onClick={handleDownloadCalibrationExport}
               disabled={downloadingCalibrationExport}
               className="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-sm disabled:opacity-50"
@@ -887,6 +1004,39 @@ export default function PaintsPage() {
               {downloadingCalibrationExport ? 'Downloading…' : 'Download Calibrations JSON'}
             </button>
           </div>
+          {importFileName && (
+            <div className="mt-4 p-4 rounded-lg border border-indigo-800/60 bg-indigo-950/30">
+              <p className="text-sm text-gray-300 mb-3">
+                Ready to import <span className="font-mono text-indigo-200">{importFileName}</span>
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleImportLibrary('replace')}
+                  disabled={importingLibrary}
+                  className="px-3 py-2 bg-amber-700 hover:bg-amber-600 rounded text-sm disabled:opacity-50"
+                >
+                  {importingLibrary ? 'Importing…' : `Replace "${libraryGroups.find((g) => g.group === selectedGroup)?.name || selectedGroup}"`}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleImportLibrary('new')}
+                  disabled={importingLibrary}
+                  className="px-3 py-2 bg-indigo-700 hover:bg-indigo-600 rounded text-sm disabled:opacity-50"
+                >
+                  Import as new library
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelLibraryImport}
+                  disabled={importingLibrary}
+                  className="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
           <div className="mt-4 pt-4 border-t border-gray-600">
             <label className="block font-semibold mb-2">Library coverage (g/cm²)</label>
             <p className="text-sm text-gray-400 mb-2">

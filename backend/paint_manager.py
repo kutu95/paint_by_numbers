@@ -7,6 +7,7 @@ from typing import List, Dict, Optional, Tuple, Callable, Any
 from datetime import datetime
 import os
 import re
+import time
 import logging
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,18 @@ FEEDBACK_BIAS_DIR = PAINT_DIR / "feedback_bias"
 FEEDBACK_BIAS_DIR.mkdir(parents=True, exist_ok=True)
 
 _CALIBRATION_CACHE: Dict[str, Tuple[int, Dict[str, Any]]] = {}
+
+# ----- Substrate (paper/canvas) black-point compensation defaults -----
+# Real paint on real paper cannot reach L*=0; predicted darks otherwise read too dark
+# vs. what the user actually sees painted. We lift predicted L* monotonically below L_break
+# without touching mids/lights. Per-library overrides come from library["substrate_compensation"].
+_SUBSTRATE_DEFAULTS: Dict[str, Any] = {
+    "enabled": True,
+    "L_paper_min": 10.0,   # darkest L* achievable on the substrate (output floor)
+    "L_break": 35.0,       # L* threshold; values >= L_break pass through unchanged
+    "alpha_dark": 1.25,    # >1 lifts the deepest darks more (concave); 1.0 = linear remap
+}
+_SUBSTRATE_PARAMS_CACHE: Dict[str, Tuple[int, Dict[str, float]]] = {}
 
 
 def _feedback_bias_file(group: str) -> Path:
@@ -136,10 +149,26 @@ def _coerce_library_shape(data: object, group: str) -> Dict:
     return normalized
 
 
-def get_white_mix_limits(target_lab: List[float]) -> Tuple[float, float]:
+def _target_wants_umber_white_floor(target_lab: List[float]) -> bool:
+    """Whether burnt-umber dilution should raise min white (warm mid earth tones only)."""
+    lab = _coerce_lab_to_cielab(target_lab)
+    lightness = float(lab[0])
+    a, b = float(lab[1]), float(lab[2])
+    chroma = (a * a + b * b) ** 0.5
+    if lightness < 28.0 or lightness > 78.0 or chroma > 38.0:
+        return False
+    # Warm orange/brown: positive a* and modest yellow (not cyans/blues: b* << 0).
+    return a > 8.0 and b > -5.0
+
+
+def get_white_mix_limits(
+    target_lab: List[float],
+    library_group: str = "default",
+) -> Tuple[float, float]:
     """Return (min_white_ratio, max_total_pigment) based on target lightness."""
-    lightness = float(target_lab[0]) if target_lab and len(target_lab) > 0 else 60.0
-    # Keep constraints permissive; strict minimum white causes large chroma errors.
+    lab = _coerce_lab_to_cielab(target_lab)
+    lightness = float(lab[0])
+    chroma = (float(lab[1]) ** 2 + float(lab[2]) ** 2) ** 0.5
     if lightness < 25.0:
         min_white_ratio = 0.01
     elif lightness < 40.0:
@@ -147,11 +176,83 @@ def get_white_mix_limits(target_lab: List[float]) -> Tuple[float, float]:
     elif lightness < 55.0:
         min_white_ratio = 0.08
     elif lightness < 70.0:
-        min_white_ratio = 0.15
+        min_white_ratio = 0.12 if chroma > 30.0 else 0.15
     else:
-        min_white_ratio = 0.30
+        # Light saturated hues need pigment headroom; high min-white washed out cyans.
+        min_white_ratio = 0.05 if chroma > 28.0 else 0.12
+
+    # Burnt-umber calibration floor: only for warm mid-tone earth colors (not #41C3D8-style cyans).
+    if _target_wants_umber_white_floor(target_lab):
+        cal_umber = _load_calibration_cached("burnt-umber", library_group)
+        if cal_umber is not None:
+            r_inv = invert_calibration_ratio_for_L(cal_umber, lightness)
+            if r_inv is not None:
+                curve_white = 1.0 - float(r_inv)
+                min_white_ratio = max(min_white_ratio, curve_white * 0.18)
+
     max_total_pigment = 1.0 - min_white_ratio
     return min_white_ratio, max_total_pigment
+
+
+def _value_paint_ratio_cap(
+    paint_id: str,
+    calibration: Optional[Dict],
+    target_lab: List[float],
+    library_group: str,
+) -> Optional[float]:
+    """Max mass fraction for a value paint from inverted L* on its calibration curve."""
+    pid = (paint_id or "").strip().lower()
+    if pid not in _VALUE_PAINT_IDS or calibration is None:
+        return None
+    lightness = float(_coerce_lab_to_cielab(target_lab)[0])
+    if lightness < 20.0 or lightness > 85.0:
+        return None
+    r_inv = invert_calibration_ratio_for_L(calibration, lightness, group=library_group, paint_id=paint_id)
+    if r_inv is None:
+        return None
+    # Stay near the calibration L* inversion (physical mixes run darker than the model).
+    return min(0.75, float(r_inv) * 1.02)
+
+
+def _apply_physical_value_caps_to_recipe(
+    recipe: Dict,
+    target_lab: List[float],
+    library_group: str,
+) -> Dict:
+    """Cap value-paint mass using calibration L* curves; excess goes to white."""
+    if not isinstance(recipe, dict):
+        return recipe
+    out = dict(recipe)
+    if out.get("pigment_ids") and out.get("pigment_ratios"):
+        ids = list(out["pigment_ids"])
+        ratios = [float(r) for r in out["pigment_ratios"]]
+        white = float(out.get("white_ratio", 0.0))
+        freed = 0.0
+        for i, pid in enumerate(ids):
+            cal = _load_calibration_cached(pid, library_group)
+            cap = _value_paint_ratio_cap(pid, cal, target_lab, library_group)
+            if cap is not None and ratios[i] > cap + 1e-6:
+                freed += ratios[i] - cap
+                ratios[i] = cap
+        if freed > 0:
+            white += freed
+        out["pigment_ratios"] = ratios
+        out["white_ratio"] = min(1.0, white)
+        return out
+    for key in ("pigment_ratio", "pigment1_ratio", "pigment2_ratio"):
+        if key not in out:
+            continue
+        pid_key = key.replace("_ratio", "_id")
+        pid = out.get(pid_key) or out.get("pigment_id")
+        if not pid:
+            continue
+        cal = _load_calibration_cached(str(pid), library_group)
+        cap = _value_paint_ratio_cap(str(pid), cal, target_lab, library_group)
+        if cap is not None and float(out[key]) > cap:
+            freed = float(out[key]) - cap
+            out[key] = cap
+            out["white_ratio"] = min(1.0, float(out.get("white_ratio", 0.0)) + freed)
+    return out
 
 
 def slugify(text: str) -> str:
@@ -444,6 +545,121 @@ def get_library_info(group: str) -> Dict:
     }
 
 
+def _merge_calibration_data_from_files(group: str, library: Dict) -> Dict[str, Dict]:
+    """Return calibration_data with any on-disk scoped files merged in."""
+    cal_map = library.get("calibration_data")
+    if not isinstance(cal_map, dict):
+        cal_map = {}
+    merged = dict(cal_map)
+    for paint in library.get("paints", []):
+        if not isinstance(paint, dict):
+            continue
+        pid = str(paint.get("id", "")).strip()
+        if not pid:
+            continue
+        if isinstance(merged.get(pid), dict):
+            continue
+        file_cal = _load_calibration_cached(pid, group)
+        if isinstance(file_cal, dict):
+            merged[pid] = file_cal
+    return merged
+
+
+def _clear_group_calibration_files(group: str) -> None:
+    prefix = f"{(group or 'default').strip() or 'default'}__"
+    if not CALIBRATION_DIR.exists():
+        return
+    for path in CALIBRATION_DIR.glob(f"{prefix}*.json"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _write_group_calibration_files(group: str, cal_map: Dict[str, Dict]) -> None:
+    if not isinstance(cal_map, dict):
+        return
+    CALIBRATION_DIR.mkdir(parents=True, exist_ok=True)
+    for paint_id, calibration in cal_map.items():
+        pid = str(paint_id or "").strip()
+        if not pid or not isinstance(calibration, dict):
+            continue
+        atomic_write(calibration_file_for(group, pid), calibration)
+
+
+def build_library_export(group: str) -> Dict[str, Any]:
+    """Build a portable JSON export of a paint library group."""
+    library = load_library(group)
+    library = dict(library)
+    library["calibration_data"] = _merge_calibration_data_from_files(group, library)
+    library["recipes"] = load_recipe_cache(group)
+    library["group"] = group
+    return {
+        "export_format": "layerpainter-paint-library",
+        "export_version": 1,
+        "exported_at": datetime.now().isoformat(),
+        "library": library,
+        "feedback_bias": load_feedback_bias(group),
+    }
+
+
+def _parse_library_import_payload(payload: Any) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    if not isinstance(payload, dict):
+        raise ValueError("Import file must be a JSON object")
+    feedback_bias = payload.get("feedback_bias")
+    if payload.get("export_format") == "layerpainter-paint-library":
+        library = payload.get("library")
+        if not isinstance(library, dict):
+            raise ValueError("Export file is missing the library object")
+        return library, feedback_bias if isinstance(feedback_bias, dict) else None
+    if isinstance(payload.get("paints"), list):
+        return payload, feedback_bias if isinstance(feedback_bias, dict) else None
+    raise ValueError("Unrecognized paint library JSON format")
+
+
+def import_library_data(
+    payload: Any,
+    *,
+    target_group: Optional[str] = None,
+    create_new: bool = False,
+) -> Dict[str, Any]:
+    """Import paints, calibrations, recipes, and settings from a JSON export."""
+    library, feedback_bias = _parse_library_import_payload(payload)
+    coerced = _coerce_library_shape(library, target_group or str(library.get("group") or "default"))
+
+    if create_new:
+        name = str(library.get("name") or library.get("group") or "Imported Library").strip()
+        group_id = slugify(name) or "imported-library"
+        base_id = group_id
+        suffix = 2
+        existing = set(list_library_groups())
+        while group_id in existing:
+            group_id = f"{base_id}-{suffix}"
+            suffix += 1
+        coerced["name"] = name
+    else:
+        group_id = (target_group or "").strip()
+        if not group_id:
+            raise ValueError("target_group is required when not creating a new library")
+        if group_id not in list_library_groups():
+            raise ValueError(f"Library group '{group_id}' not found")
+        if library.get("name"):
+            coerced["name"] = library.get("name")
+
+    coerced["group"] = group_id
+    _clear_group_calibration_files(group_id)
+    cal_map = coerced.get("calibration_data")
+    if isinstance(cal_map, dict):
+        _write_group_calibration_files(group_id, cal_map)
+    save_library(coerced, group_id)
+    if isinstance(feedback_bias, dict) and feedback_bias:
+        save_feedback_bias(group_id, {
+            pid: v for pid, v in feedback_bias.items()
+            if isinstance(v, (list, tuple)) and len(v) >= 3
+        })
+    return get_library_info(group_id)
+
+
 def rgb_to_lab(rgb: List[float]) -> List[float]:
     """Convert RGB (0..255) to CIELAB (L* 0..100, a*/b* approx -128..127)."""
     rgb_clamped = [max(0.0, min(255.0, float(c))) for c in rgb]
@@ -719,6 +935,281 @@ def normalize_calibration_samples(
     return out
 
 
+def _lab_L_to_Y(L: float) -> float:
+    """CIELAB L* to relative luminance Y (0..1)."""
+    L = float(L)
+    if L > 8.0:
+        fy = (L + 16.0) / 116.0
+        return float(fy ** 3)
+    return L / 903.3
+
+
+def _lab_L_to_Y_batch(L: np.ndarray) -> np.ndarray:
+    L = np.asarray(L, dtype=np.float64)
+    out = np.empty_like(L)
+    hi = L > 8.0
+    out[hi] = ((L[hi] + 16.0) / 116.0) ** 3
+    out[~hi] = L[~hi] / 903.3
+    return np.clip(out, 1e-6, 1.0)
+
+
+def _lab_Y_to_L(Y: float) -> float:
+    Y = max(1e-6, min(1.0 - 1e-9, float(Y)))
+    if Y > 0.008856:
+        return 116.0 * (Y ** (1.0 / 3.0)) - 16.0
+    return 903.3 * Y
+
+
+def _lab_Y_to_L_batch(Y: np.ndarray) -> np.ndarray:
+    Y = np.clip(np.asarray(Y, dtype=np.float64), 1e-6, 1.0 - 1e-9)
+    out = np.empty_like(Y)
+    hi = Y > 0.008856
+    out[hi] = 116.0 * np.power(Y[hi], 1.0 / 3.0) - 16.0
+    out[~hi] = 903.3 * Y[~hi]
+    return np.clip(out, 0.0, 100.0)
+
+
+def _monotonic_calibration_labs(calibration: Dict) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (ratios asc, labs) with L* non-increasing as pigment ratio increases."""
+    samples = calibration.get("samples", [])
+    if not samples:
+        return np.array([], dtype=np.float64), np.zeros((0, 3), dtype=np.float64)
+    sorted_samples = sorted(samples, key=lambda x: float(x["ratio"]))
+    ratios = np.array([float(s["ratio"]) for s in sorted_samples], dtype=np.float64)
+    labs = np.array([_coerce_lab_to_cielab(s["lab"]) for s in sorted_samples], dtype=np.float64)
+    # Higher pigment ratio must not be lighter than a lower ratio (fix bad swatches).
+    for i in range(1, len(labs)):
+        if labs[i, 0] > labs[i - 1, 0]:
+            labs[i, 0] = labs[i - 1, 0]
+    return ratios, labs
+
+
+def _interpolate_lab_from_monotonic_arrays(
+    ratios: np.ndarray,
+    labs: np.ndarray,
+    ratio: float,
+) -> Optional[List[float]]:
+    if ratios.size == 0:
+        return None
+    ratio = float(ratio)
+    if ratio <= ratios[0]:
+        return list(labs[0])
+    if ratio >= ratios[-1]:
+        return list(labs[-1])
+    idx = int(np.searchsorted(ratios, ratio, side="right") - 1)
+    idx = max(0, min(idx, len(ratios) - 2))
+    r0, r1 = ratios[idx], ratios[idx + 1]
+    t = (ratio - r0) / (r1 - r0 + 1e-12)
+    t = max(0.0, min(1.0, t))
+    lab = (1.0 - t) * labs[idx] + t * labs[idx + 1]
+    return [float(lab[0]), float(lab[1]), float(lab[2])]
+
+
+def invert_calibration_ratio_for_L(
+    calibration: Dict,
+    target_L: float,
+    group: Optional[str] = None,
+    paint_id: Optional[str] = None,
+) -> Optional[float]:
+    """Invert monotonic L*(ratio) curve to find pigment/(pigment+white) for target lightness."""
+    ratios, labs = _monotonic_calibration_labs(calibration)
+    if ratios.size == 0:
+        return None
+    target_L = float(target_L)
+    Ls = labs[:, 0]
+    if target_L >= Ls[0]:
+        return float(ratios[0])
+    if target_L <= Ls[-1]:
+        return float(ratios[-1])
+    for i in range(len(ratios) - 1):
+        L_hi, L_lo = Ls[i], Ls[i + 1]
+        if L_lo <= target_L <= L_hi:
+            span = L_hi - L_lo
+            if abs(span) < 1e-6:
+                return float(ratios[i + 1])
+            t = (target_L - L_hi) / (L_lo - L_hi + 1e-12)
+            t = max(0.0, min(1.0, t))
+            return float(ratios[i] + t * (ratios[i + 1] - ratios[i]))
+    return None
+
+
+def _uncalibrated_tint_lab(hex_rgb: List[int], eff_ratio: float) -> List[float]:
+    """Subtractive tint of a full-strength paint swatch toward white at eff_ratio."""
+    eff_ratio = max(0.0, min(1.0, float(eff_ratio)))
+    paint_lab = np.array(rgb_to_lab([float(c) for c in hex_rgb]), dtype=np.float64)
+    white_lab = np.array([100.0, 0.0, 0.0], dtype=np.float64)
+    if eff_ratio <= 1e-9:
+        return [100.0, 0.0, 0.0]
+    if eff_ratio >= 1.0 - 1e-9:
+        return paint_lab.tolist()
+    labs = np.stack([paint_lab, white_lab], axis=0)
+    weights = np.array([eff_ratio, 1.0 - eff_ratio], dtype=np.float64)
+    return _combine_labs_subtractive(labs, weights)
+
+
+def _combine_labs_subtractive(labs: np.ndarray, weights: np.ndarray) -> List[float]:
+    """Mix calibrated swatch Labs by mass fraction using subtractive Y (1/sum w/Y)."""
+    weights = np.asarray(weights, dtype=np.float64)
+    labs = np.asarray(labs, dtype=np.float64)
+    total = float(weights.sum())
+    if total <= 1e-12 or labs.shape[0] == 0:
+        return [100.0, 0.0, 0.0]
+    w = weights / total
+    Y = _lab_L_to_Y_batch(labs[:, 0])
+    Y_mix = 1.0 / np.sum(w / Y)
+    L_mix = float(_lab_Y_to_L_batch(np.array([Y_mix]))[0])
+    a_mix = float(np.sum(w * labs[:, 1]))
+    b_mix = float(np.sum(w * labs[:, 2]))
+    return [L_mix, a_mix, b_mix]
+
+
+def _combine_labs_subtractive_batch(labs_stack: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """labs_stack (N, K, 3), weights (N, K) -> (N, 3) CIELAB."""
+    N, K, _ = labs_stack.shape
+    out = np.zeros((N, 3), dtype=np.float64)
+    w = weights / np.maximum(weights.sum(axis=1, keepdims=True), 1e-12)
+    Y = _lab_L_to_Y_batch(labs_stack[:, :, 0].reshape(-1)).reshape(N, K)
+    inv = np.sum(w / np.maximum(Y, 1e-6), axis=1)
+    Y_mix = 1.0 / np.maximum(inv, 1e-6)
+    out[:, 0] = _lab_Y_to_L_batch(Y_mix)
+    out[:, 1] = np.sum(w * labs_stack[:, :, 1], axis=1)
+    out[:, 2] = np.sum(w * labs_stack[:, :, 2], axis=1)
+    return out
+
+
+_VALUE_PAINT_IDS = frozenset({
+    "burnt-umber",
+    "australian-olive-green",
+    "black",
+    "carbon-black",
+})
+
+
+def _is_green_value_paint(paint_id: str) -> bool:
+    pid = (paint_id or "").strip().lower()
+    return "olive" in pid and "green" in pid
+
+
+def _is_warm_hue_target(lab: List[float]) -> bool:
+    """True for orange/brown/red-yellow targets (not green/blue neutrals)."""
+    a, b = float(lab[1]), float(lab[2])
+    chroma = (a * a + b * b) ** 0.5
+    if chroma < 12.0:
+        return False
+    hue_deg = float(np.degrees(np.arctan2(b, a)) % 360.0)
+    return 15.0 <= hue_deg <= 85.0
+
+
+def _combo_allowed_for_target(target_lab: List[float], paint_ids: List[str]) -> bool:
+    """Reject pigment sets that fight the target hue (e.g. olive in a brown)."""
+    ids = [(pid or "").strip().lower() for pid in paint_ids]
+    if _is_warm_hue_target(target_lab) and any(_is_green_value_paint(pid) for pid in ids):
+        return False
+    n_value = sum(1 for pid in ids if pid in _VALUE_PAINT_IDS)
+    if n_value > 1:
+        return False
+    return True
+
+
+def _hue_penalty_coeffs_per_paint(
+    target_lab: List[float],
+    paint_ids: List[str],
+    library_group: str,
+) -> np.ndarray:
+    """Per-paint penalty weight per unit mass fraction (computed once per combo)."""
+    n = len(paint_ids)
+    coeffs = np.zeros(n, dtype=np.float64)
+    target = _coerce_lab_to_cielab(target_lab)
+    ta, tb = float(target[1]), float(target[2])
+    target_chroma = (ta * ta + tb * tb) ** 0.5
+    if target_chroma < 8.0:
+        return coeffs
+    target_h = float(np.arctan2(tb, ta))
+    warm = _is_warm_hue_target(target)
+    for i, pid in enumerate(paint_ids):
+        if warm and _is_green_value_paint(pid):
+            coeffs[i] = 18.0
+            continue
+        cal = _load_calibration_cached(pid, library_group)
+        if cal is None:
+            continue
+        lab_full = interpolate_lab_from_calibration(
+            cal, 1.0, group=library_group, paint_id=pid
+        )
+        if lab_full is None:
+            continue
+        pa, pb = float(lab_full[1]), float(lab_full[2])
+        paint_chroma = (pa * pa + pb * pb) ** 0.5
+        if paint_chroma < 6.0:
+            continue
+        paint_h = float(np.arctan2(pb, pa))
+        dh = abs(target_h - paint_h)
+        dh = min(dh, 2.0 * np.pi - dh)
+        if dh > np.radians(55.0):
+            coeffs[i] = (dh - np.radians(55.0)) * 40.0
+    return coeffs
+
+
+def _hue_mismatch_penalty_from_coeffs(
+    pigment_ratios: List[float],
+    coeffs: np.ndarray,
+    min_ratio: float = 0.06,
+) -> float:
+    """Fast hue penalty using precomputed per-paint coeffs."""
+    if coeffs.size == 0:
+        return 0.0
+    r = np.asarray(pigment_ratios, dtype=np.float64)
+    mask = r >= min_ratio
+    if not np.any(mask):
+        return 0.0
+    return float(np.dot(coeffs[mask], r[mask]))
+
+
+def _l_star_seed_ratios(
+    target_lab: List[float],
+    paint_calibrations: List[Optional[Dict]],
+    n_pigments: int,
+    min_ratio: float,
+    max_total_pigment: float,
+    max_ratio_per_pigment: float,
+    library_group: str,
+    paint_ids: List[str],
+) -> Optional[List[float]]:
+    """Seed multi-pigment search from L* inversion on the darkest calibrated paint in the set."""
+    target_L = float(_coerce_lab_to_cielab(target_lab)[0])
+    dark_idx: Optional[int] = None
+    dark_L_full = 101.0
+    for i, cal in enumerate(paint_calibrations):
+        if cal is None:
+            continue
+        pid = paint_ids[i] if i < len(paint_ids) else ""
+        if _is_warm_hue_target(target_lab) and _is_green_value_paint(pid):
+            continue
+        _, labs = _monotonic_calibration_labs(cal)
+        if labs.shape[0] == 0:
+            continue
+        L_full = float(labs[-1, 0])
+        if L_full < dark_L_full:
+            dark_L_full = L_full
+            dark_idx = i
+    if dark_idx is None:
+        return None
+    cal = paint_calibrations[dark_idx]
+    if cal is None:
+        return None
+    pid = paint_ids[dark_idx] if dark_idx < len(paint_ids) else None
+    ratio_dark = invert_calibration_ratio_for_L(cal, target_L, group=library_group, paint_id=pid)
+    if ratio_dark is None:
+        return None
+    seed = [float(min_ratio)] * n_pigments
+    seed[dark_idx] = float(np.clip(ratio_dark, min_ratio, max_ratio_per_pigment))
+    total = sum(seed)
+    if total > max_total_pigment:
+        scale = max_total_pigment / total
+        seed = [max(min_ratio, r * scale) for r in seed]
+    return seed
+
+
 def interpolate_lab_from_calibration(
     calibration: Dict,
     ratio: float,
@@ -727,35 +1218,14 @@ def interpolate_lab_from_calibration(
 ) -> Optional[List[float]]:
     """Interpolate Lab color for a given ratio from calibration samples.
     If group and paint_id are provided, adds feedback bias (learned from spot tests).
+    Uses monotonic L* vs ratio so bad swatches do not invert the curve.
     """
-    samples = calibration.get('samples', [])
-    if not samples:
+    ratios, labs = _monotonic_calibration_labs(calibration)
+    if ratios.size == 0:
         return None
-
-    # Sort by ratio
-    sorted_samples = sorted(samples, key=lambda x: x['ratio'])
-    ratios = [s['ratio'] for s in sorted_samples]
-    labs = [_coerce_lab_to_cielab(s['lab']) for s in sorted_samples]
-
-    # Find bounding ratios
-    if ratio <= ratios[0]:
-        lab = list(labs[0])
-    elif ratio >= ratios[-1]:
-        lab = list(labs[-1])
-    else:
-        for i in range(len(ratios) - 1):
-            if ratios[i] <= ratio <= ratios[i + 1]:
-                t = (ratio - ratios[i]) / (ratios[i + 1] - ratios[i])
-                lab = [
-                    labs[i][0] + t * (labs[i + 1][0] - labs[i][0]),
-                    labs[i][1] + t * (labs[i + 1][1] - labs[i][1]),
-                    labs[i][2] + t * (labs[i + 1][2] - labs[i][2]),
-                ]
-                break
-        else:
-            return None
-
-    # Apply feedback bias so solver learns from spot-test corrections (e.g. "too dark" -> negative L bias).
+    lab = _interpolate_lab_from_monotonic_arrays(ratios, labs, ratio)
+    if lab is None:
+        return None
     if group and paint_id:
         bias = get_paint_bias(group, paint_id)
         if bias:
@@ -779,21 +1249,23 @@ def get_calibration_max_ratio(calibration: Dict) -> float:
     return max(ratios)
 
 
-def _interpolate_lab_from_calibration_batch(calibration: Optional[Dict], ratios: np.ndarray) -> Optional[np.ndarray]:
+def _interpolate_lab_from_calibration_batch(
+    calibration: Optional[Dict],
+    ratios: np.ndarray,
+    group: Optional[str] = None,
+    paint_id: Optional[str] = None,
+) -> Optional[np.ndarray]:
     """(N,) ratios -> (N, 3) Lab in CIELAB. Returns None if calibration is None or empty."""
     if calibration is None:
         return None
-    samples = calibration.get('samples', [])
-    if not samples:
+    ratios_sorted, labs_sorted = _monotonic_calibration_labs(calibration)
+    if ratios_sorted.size == 0:
         return None
-    sorted_samples = sorted(samples, key=lambda x: x['ratio'])
-    ratios_sorted = np.array([s['ratio'] for s in sorted_samples], dtype=np.float64)
-    labs_sorted = np.array([_coerce_lab_to_cielab(s['lab']) for s in sorted_samples], dtype=np.float64)
-    n = ratios.size
+    ratios_flat = np.asarray(ratios, dtype=np.float64).ravel()
+    n = ratios_flat.size
     if n == 0:
         return np.zeros((0, 3), dtype=np.float64)
-    ratios_flat = np.asarray(ratios, dtype=np.float64).ravel()
-    idx_low = np.searchsorted(ratios_sorted, ratios_flat, side='right') - 1
+    idx_low = np.searchsorted(ratios_sorted, ratios_flat, side="right") - 1
     idx_low = np.clip(idx_low, 0, len(ratios_sorted) - 2)
     idx_high = idx_low + 1
     r_low = ratios_sorted[idx_low]
@@ -801,6 +1273,10 @@ def _interpolate_lab_from_calibration_batch(calibration: Optional[Dict], ratios:
     t = (ratios_flat - r_low) / (r_high - r_low + 1e-12)
     t = np.clip(t, 0.0, 1.0)
     lab = (1.0 - t)[:, None] * labs_sorted[idx_low] + t[:, None] * labs_sorted[idx_high]
+    if group and paint_id:
+        bias = get_paint_bias(group, paint_id)
+        if bias:
+            lab = lab + np.array(bias, dtype=np.float64)
     return lab
 
 
@@ -867,56 +1343,139 @@ def _lab_to_rgb_batch(lab_cielab: np.ndarray) -> np.ndarray:
     return rgb.reshape((n, 3)).astype(np.float64)
 
 
+def get_substrate_compensation(library_group: Optional[str] = None) -> Dict[str, float]:
+    """Return substrate (paper) compensation params for a library.
+
+    Reads ``library["substrate_compensation"]`` if present and merges over module defaults.
+    Cached on library file mtime so per-recipe lookups are cheap.
+    """
+    group = (library_group or "default").strip() or "default"
+    library_file = LIBRARIES_DIR / f"{group}.json"
+    if not library_file.exists() and group == "default" and LIBRARY_FILE.exists():
+        library_file = LIBRARY_FILE
+    try:
+        mtime_ns = library_file.stat().st_mtime_ns if library_file.exists() else 0
+    except OSError:
+        mtime_ns = 0
+    cached = _SUBSTRATE_PARAMS_CACHE.get(group)
+    if cached and cached[0] == mtime_ns:
+        return cached[1]
+
+    merged = dict(_SUBSTRATE_DEFAULTS)
+    try:
+        if library_file.exists():
+            with open(library_file, "r") as f:
+                data = json.load(f)
+            sc = data.get("substrate_compensation") if isinstance(data, dict) else None
+            if isinstance(sc, dict):
+                if "enabled" in sc:
+                    merged["enabled"] = bool(sc.get("enabled"))
+                for key in ("L_paper_min", "L_break", "alpha_dark"):
+                    if key in sc:
+                        try:
+                            merged[key] = float(sc.get(key))
+                        except (TypeError, ValueError):
+                            pass
+    except (json.JSONDecodeError, OSError, ValueError):
+        pass
+    # Clamp to safe ranges so a bad config can't break the solver.
+    merged["L_paper_min"] = max(0.0, min(40.0, float(merged["L_paper_min"])))
+    merged["L_break"] = max(merged["L_paper_min"] + 1.0, min(80.0, float(merged["L_break"])))
+    merged["alpha_dark"] = max(0.5, min(3.0, float(merged["alpha_dark"])))
+    _SUBSTRATE_PARAMS_CACHE[group] = (mtime_ns, merged)
+    return merged
+
+
+def _apply_substrate_l_compensation(L: float, params: Dict[str, float]) -> float:
+    """Apply paper black-point compensation to a single L* value (CIELAB).
+
+    For L >= L_break the value is unchanged. For L < L_break, L is mapped from [0, L_break]
+    onto [L_paper_min, L_break] using a power curve t**(1/alpha_dark); with alpha_dark>1
+    the curve is concave so the deepest darks are lifted toward L_paper_min.
+    """
+    if not params.get("enabled", True):
+        return L
+    L_break = float(params["L_break"])
+    L_paper_min = float(params["L_paper_min"])
+    if L >= L_break:
+        return L
+    L = max(0.0, float(L))
+    t = L / L_break  # in [0, 1]
+    alpha = float(params["alpha_dark"])
+    t_lifted = t ** (1.0 / alpha) if alpha > 0 else t
+    return L_paper_min + (L_break - L_paper_min) * t_lifted
+
+
+def _apply_substrate_l_compensation_batch(L_arr: np.ndarray, params: Dict[str, float]) -> np.ndarray:
+    """Vectorized version of :func:`_apply_substrate_l_compensation` over an array of L* values."""
+    if not params.get("enabled", True):
+        return L_arr
+    L_break = float(params["L_break"])
+    L_paper_min = float(params["L_paper_min"])
+    alpha = float(params["alpha_dark"])
+    L = np.asarray(L_arr, dtype=np.float64)
+    out = L.copy()
+    finite = np.isfinite(L)
+    mask = finite & (L < L_break)
+    if not np.any(mask):
+        return out
+    t = np.clip(L[mask] / L_break, 0.0, 1.0)
+    t_lifted = np.power(t, 1.0 / alpha) if alpha > 0 else t
+    out[mask] = L_paper_min + (L_break - L_paper_min) * t_lifted
+    return out
+
+
 def _predict_mix_lab_from_components(
     components: List[Tuple[Optional[Dict], Optional[List[int]], float]],
     white_ratio: float,
+    library_group: Optional[str] = None,
+    paint_ids: Optional[List[str]] = None,
 ) -> Optional[List[float]]:
-    """Predict mixed Lab from components using calibration curves + white-aware effective ratios.
+    """Predict mixed Lab from calibration curves using total dilution and subtractive Y mixing.
 
-    Each pigment is first converted to its calibrated tint shade at ratio:
-      eff = pigment_ratio / (pigment_ratio + white_ratio)
-    then blended with other pigments by pigment share in linear RGB.
+    Each pigment is evaluated at eff = p_i / (sum_j p_j + white_ratio). Calibration swatches
+    are already pigment-in-white at that ratio, so we do not add a separate white component.
     """
     white_ratio = max(0.0, min(1.0, float(white_ratio)))
     total_pigment = sum(max(0.0, float(r)) for _, _, r in components)
-    if total_pigment <= 0:
+    denom = total_pigment + white_ratio
+    if denom <= 1e-12:
         return [100.0, 0.0, 0.0]
 
-    mixed_linear = np.zeros(3, dtype=np.float64)
-    used = 0.0
+    labs_list: List[List[float]] = []
+    weights: List[float] = []
 
-    for calibration, hex_rgb, pigment_ratio in components:
+    for idx, (calibration, hex_rgb, pigment_ratio) in enumerate(components):
         p = max(0.0, float(pigment_ratio))
-        if p <= 0:
+        if p <= 1e-12:
             continue
-        share = p / total_pigment
-        eff_ratio = p / (p + white_ratio) if (p + white_ratio) > 0 else 0.0
-        eff_ratio = max(0.0, min(1.0, eff_ratio))
-
-        rgb: Optional[List[float]] = None
+        eff_ratio = max(0.0, min(1.0, p / denom))
+        pid = paint_ids[idx] if paint_ids and idx < len(paint_ids) else None
+        lab: Optional[List[float]] = None
         if calibration is not None:
-            lab = interpolate_lab_from_calibration(calibration, eff_ratio)
-            if lab is not None:
-                rgb = lab_to_rgb(lab)
+            lab = interpolate_lab_from_calibration(
+                calibration, eff_ratio, group=library_group, paint_id=pid
+            )
         elif hex_rgb is not None:
-            # Uncalibrated fallback: tint paint hex toward white by effective ratio.
-            paint_lin = _rgb_to_linear([float(c) for c in hex_rgb])
-            white_lin = np.array([1.0, 1.0, 1.0], dtype=np.float64)
-            tint_lin = (paint_lin * eff_ratio) + (white_lin * (1.0 - eff_ratio))
-            rgb = _linear_to_rgb(tint_lin)
-
-        if rgb is None:
+            lab = _uncalibrated_tint_lab(hex_rgb, eff_ratio)
+        if lab is None:
             continue
+        labs_list.append(lab)
+        weights.append(p)
 
-        mixed_linear += _rgb_to_linear(rgb) * share
-        used += share
-
-    if used <= 0.0:
+    if not labs_list:
+        if white_ratio > 1e-9:
+            return [100.0, 0.0, 0.0]
         return None
-    if used < 0.999:
-        mixed_linear /= used
-    mixed_rgb = _linear_to_rgb(mixed_linear)
-    return rgb_to_lab(mixed_rgb)
+
+    mixed_lab = _combine_labs_subtractive(
+        np.array(labs_list, dtype=np.float64),
+        np.array(weights, dtype=np.float64),
+    )
+    if library_group is not None:
+        params = get_substrate_compensation(library_group)
+        mixed_lab[0] = _apply_substrate_l_compensation(mixed_lab[0], params)
+    return mixed_lab
 
 
 def _predict_mix_lab_batch(
@@ -946,39 +1505,41 @@ def _predict_mix_lab_batch(
     max_ratios_arr = np.array(paint_max_ratios, dtype=np.float64)
     valid &= (ratios_batch <= max_ratios_arr + 1e-9).all(axis=1)
 
-    mixed_linear = np.zeros((n, 3), dtype=np.float64)
-    used = np.zeros((n,), dtype=np.float64)
+    denom = total_pigment + white_ratio + 1e-12
+    labs_stack = np.zeros((n, n_pigments, 3), dtype=np.float64)
+    weights = np.zeros((n, n_pigments), dtype=np.float64)
 
+    slot = 0
     for i in range(n_pigments):
         p = ratios_batch[:, i]
-        share = p / (total_pigment + 1e-12)
-        eff_ratio = np.clip(p / (p + white_ratio + 1e-12), 0.0, 1.0)
+        eff_ratio = np.clip(p / denom, 0.0, 1.0)
         calibration = paint_calibrations[i] if i < len(paint_calibrations) else None
         hex_rgb = paint_hex_colors[i] if i < len(paint_hex_colors) else None
-        rgb_i = None
+        pid = paint_ids[i] if paint_ids and i < len(paint_ids) else None
+        lab_i: Optional[np.ndarray] = None
         if calibration is not None:
-            lab_i = _interpolate_lab_from_calibration_batch(calibration, eff_ratio)
-            if lab_i is not None:
-                if library_group and paint_ids and i < len(paint_ids):
-                    bias = get_paint_bias(library_group, paint_ids[i])
-                    if bias:
-                        lab_i = lab_i + np.array(bias, dtype=np.float64)
-                rgb_i = _lab_to_rgb_batch(lab_i)
+            lab_i = _interpolate_lab_from_calibration_batch(
+                calibration, eff_ratio, group=library_group, paint_id=pid
+            )
         elif hex_rgb is not None:
-            paint_lin = _rgb_to_linear([float(c) for c in hex_rgb])
-            white_lin = np.array([1.0, 1.0, 1.0], dtype=np.float64)
-            tint_lin = paint_lin * eff_ratio[:, None] + white_lin * (1.0 - eff_ratio[:, None])
-            rgb_i = _linear_to_rgb_batch(tint_lin)
-        if rgb_i is None:
+            lab_i = np.array(
+                [_uncalibrated_tint_lab(hex_rgb, float(e)) for e in eff_ratio],
+                dtype=np.float64,
+            )
+        if lab_i is None:
             continue
-        linear_i = _rgb_to_linear_batch(rgb_i)
-        mixed_linear += linear_i * share[:, None]
-        used += share
+        labs_stack[:, slot, :] = lab_i
+        weights[:, slot] = p
+        slot += 1
 
-    used = np.maximum(used, 1e-12)
-    mixed_linear /= used[:, None]
-    mixed_rgb = _linear_to_rgb_batch(mixed_linear)
-    mixed_lab = _rgb_to_lab_batch(mixed_rgb)
+    if slot == 0:
+        mixed_lab = np.full((n, 3), np.nan, dtype=np.float64)
+    else:
+        mixed_lab = _combine_labs_subtractive_batch(labs_stack[:, :slot, :], weights[:, :slot])
+    if library_group is not None:
+        params = get_substrate_compensation(library_group)
+        if params.get("enabled", True):
+            mixed_lab[:, 0] = _apply_substrate_l_compensation_batch(mixed_lab[:, 0], params)
     mixed_lab[~valid] = np.nan
     return mixed_lab
 
@@ -1008,7 +1569,7 @@ def find_best_one_pigment_recipe(
     Returns:
         Recipe dict with pigment_id, pigment_ratio, white_ratio, and error
     """
-    min_white_ratio, max_total_pigment = get_white_mix_limits(target_lab)
+    min_white_ratio, max_total_pigment = get_white_mix_limits(target_lab, library_group)
 
     # If calibration exists, use it (more accurate)
     calibration = _load_calibration_cached(paint_id, library_group)
@@ -1025,8 +1586,9 @@ def find_best_one_pigment_recipe(
             # Test pigment ratios across target-appropriate range.
             upper_ratio = min(max_total_pigment, cal_max_ratio)
             for test_ratio in np.arange(0.0, upper_ratio + 0.001, 0.01):
-                predicted_lab = interpolate_lab_from_calibration(
-                    calibration, test_ratio, group=library_group, paint_id=paint_id
+                white_r = 1.0 - test_ratio
+                predicted_lab = predict_mix_lab_for_paint_ratios(
+                    library_group, [paint_id], [test_ratio], white_r
                 )
                 if predicted_lab:
                     error = delta_e_lab(target_lab, predicted_lab)
@@ -1035,12 +1597,13 @@ def find_best_one_pigment_recipe(
                         best_ratio = test_ratio
             
             if best_ratio is not None:
-                return {
+                result = {
                     'pigment_id': paint_id,
                     'pigment_ratio': best_ratio,
                     'white_ratio': 1.0 - best_ratio,
                     'error': best_error
                 }
+                return _apply_physical_value_caps_to_recipe(result, target_lab, library_group)
 
     # Fallback: Use approximate color if no calibration (less accurate but better than nothing)
     if paint_hex:
@@ -1114,7 +1677,7 @@ def find_best_two_pigment_recipe(
     Returns:
         Recipe dict with pigment IDs, ratios, white_ratio, and error
     """
-    min_white_ratio, max_total_pigment = get_white_mix_limits(target_lab)
+    min_white_ratio, max_total_pigment = get_white_mix_limits(target_lab, library_group)
     min_ratio = 0.02
     max_ratio_per_pigment = max_total_pigment - min_ratio
     
@@ -1127,8 +1690,12 @@ def find_best_two_pigment_recipe(
         if cal1_max <= 0.0 or cal2_max <= 0.0:
             return None
 
-        p1_axis = np.arange(min_ratio, min(max_ratio_per_pigment, cal1_max) + 0.001, 0.02)
-        p2_axis = np.arange(min_ratio, min(max_ratio_per_pigment, cal2_max) + 0.001, 0.02)
+        cap1 = _value_paint_ratio_cap(paint_id1, cal1, target_lab, library_group)
+        cap2 = _value_paint_ratio_cap(paint_id2, cal2, target_lab, library_group)
+        p1_hi = min(max_ratio_per_pigment, cal1_max, cap1 if cap1 is not None else 1.0)
+        p2_hi = min(max_ratio_per_pigment, cal2_max, cap2 if cap2 is not None else 1.0)
+        p1_axis = np.arange(min_ratio, p1_hi + 0.001, 0.02)
+        p2_axis = np.arange(min_ratio, p2_hi + 0.001, 0.02)
         p1_grid, p2_grid = np.meshgrid(p1_axis, p2_axis, indexing='ij')
         p1_flat = p1_grid.ravel()
         p2_flat = p2_grid.ravel()
@@ -1149,13 +1716,18 @@ def find_best_two_pigment_recipe(
             paint_ids=[paint_id1, paint_id2],
         )
         errors = _delta_e_batch(lab_batch, target_lab)
+        hue2 = _hue_penalty_coeffs_per_paint(
+            target_lab, [paint_id1, paint_id2], library_group
+        )
+        if np.any(hue2 > 0):
+            errors += p1_flat * hue2[0] + p2_flat * hue2[1]
         idx = np.argmin(errors)
         best_error = float(errors[idx])
         if not np.isfinite(best_error):
             return None
         p1_best = float(p1_flat[idx])
         p2_best = float(p2_flat[idx])
-        return {
+        result = {
             'pigment1_id': paint_id1,
             'pigment1_ratio': p1_best,
             'pigment2_id': paint_id2,
@@ -1164,6 +1736,7 @@ def find_best_two_pigment_recipe(
             'error': best_error,
             'type': 'two_pigment'
         }
+        return _apply_physical_value_caps_to_recipe(result, target_lab, library_group)
     
     # Fallback: Use approximate colors if available (batched)
     if paint1_hex and paint2_hex:
@@ -1270,10 +1843,15 @@ def find_best_multi_pigment_recipe(
     
     # Two-stage search with unbiased ratio enumeration.
     min_ratio = 0.02
-    min_white_ratio, max_total_pigment = get_white_mix_limits(target_lab)
+    min_white_ratio, max_total_pigment = get_white_mix_limits(target_lab, library_group)
     max_ratio_per_pigment = max_total_pigment - (n_pigments - 1) * min_ratio
     if max_ratio_per_pigment < min_ratio:
         return None
+
+    value_caps = [
+        _value_paint_ratio_cap(paint_ids[i], paint_calibrations[i], target_lab, library_group)
+        for i in range(n_pigments)
+    ]
 
     ratio_type = {
         3: 'three_pigment',
@@ -1282,6 +1860,14 @@ def find_best_multi_pigment_recipe(
 
     uncalibrated_penalty = (n_pigments - calibrated_count) * (3.0 if n_pigments == 3 else 4.0)
     _RECIPE_BATCH_SIZE = 2048
+    hue_coeffs = _hue_penalty_coeffs_per_paint(target_lab, paint_ids, library_group)
+    umber_cap = None
+    umber_idx = None
+    for i, pid in enumerate(paint_ids):
+        if (pid or "").strip().lower() == "burnt-umber":
+            umber_idx = i
+            umber_cap = value_caps[i]
+            break
 
     def evaluate_batch(ratios_list: List[List[float]]) -> np.ndarray:
         """List of N ratio vectors -> (N,) errors; inf for invalid."""
@@ -1300,6 +1886,12 @@ def find_best_multi_pigment_recipe(
         )
         errors = _delta_e_batch(lab_batch, target_lab)
         errors += uncalibrated_penalty
+        if hue_coeffs.size == ratios_arr.shape[1] and np.any(hue_coeffs > 0):
+            with np.errstate(over="ignore", invalid="ignore"):
+                errors += np.nan_to_num(ratios_arr @ hue_coeffs, nan=0.0, posinf=0.0, neginf=0.0)
+        if umber_idx is not None and umber_cap is not None:
+            excess = np.maximum(0.0, ratios_arr[:, umber_idx] - float(umber_cap))
+            errors += excess * 25.0
         return errors
 
     def search(step: float, center: Optional[List[float]] = None, radius: float = 0.0) -> Tuple[Optional[List[float]], float]:
@@ -1307,9 +1899,13 @@ def find_best_multi_pigment_recipe(
         for i in range(n_pigments):
             low = min_ratio
             high = max_ratio_per_pigment
+            if value_caps[i] is not None:
+                high = min(high, value_caps[i])
             if center is not None:
                 low = max(min_ratio, center[i] - radius)
                 high = min(max_ratio_per_pigment, center[i] + radius)
+                if value_caps[i] is not None:
+                    high = min(high, value_caps[i])
             axis = np.arange(low, high + (step * 0.5), step)
             if len(axis) == 0:
                 return None, float('inf')
@@ -1376,7 +1972,24 @@ def find_best_multi_pigment_recipe(
         fine_step = 0.01
         fine_radius = 0.03
 
-    coarse_ratios, coarse_error = search(coarse_step)
+    seed = _l_star_seed_ratios(
+        target_lab,
+        paint_calibrations,
+        n_pigments,
+        min_ratio,
+        max_total_pigment,
+        max_ratio_per_pigment,
+        library_group,
+        paint_ids,
+    )
+    coarse_ratios: Optional[List[float]] = None
+    coarse_error = float("inf")
+    if seed is not None:
+        coarse_ratios, coarse_error = search(coarse_step, center=seed, radius=0.14)
+    if coarse_ratios is None or coarse_error > 0.35:
+        full_ratios, full_error = search(coarse_step)
+        if full_ratios is not None and full_error < coarse_error:
+            coarse_ratios, coarse_error = full_ratios, full_error
     if coarse_ratios is None:
         return None
 
@@ -1386,7 +1999,7 @@ def find_best_multi_pigment_recipe(
     best_error = fine_error if fine_ratios is not None and fine_error <= coarse_error else coarse_error
     white_ratio = 1.0 - sum(best_ratios)
 
-    return {
+    result = {
         'pigment_ids': paint_ids,
         'pigment_ratios': best_ratios,
         'white_ratio': white_ratio,
@@ -1394,6 +2007,39 @@ def find_best_multi_pigment_recipe(
         'type': ratio_type,
         'uncalibrated': calibrated_count < n_pigments
     }
+    return _apply_physical_value_caps_to_recipe(result, target_lab, library_group)
+
+
+def predict_mix_lab_for_paint_ratios(
+    library_group: str,
+    pigment_ids: List[str],
+    pigment_ratios: List[float],
+    white_ratio: float,
+) -> Optional[List[float]]:
+    """Predict CIELAB for a recipe from paint ids and mass fractions (sums to ~1)."""
+    if len(pigment_ids) != len(pigment_ratios):
+        return None
+    components: List[Tuple[Optional[Dict], Optional[List[int]], float]] = []
+    for pid, ratio in zip(pigment_ids, pigment_ratios):
+        if ratio <= 1e-12:
+            continue
+        cal = _load_calibration_cached(pid, library_group)
+        hex_rgb: Optional[List[int]] = None
+        if cal is None:
+            lib = load_library(library_group)
+            for p in lib.get("paints", []):
+                if p.get("id") == pid:
+                    hx = str(p.get("hex_approx", "")).lstrip("#")
+                    if len(hx) == 6:
+                        hex_rgb = [int(hx[i : i + 2], 16) for i in (0, 2, 4)]
+                    break
+        components.append((cal, hex_rgb, float(ratio)))
+    return _predict_mix_lab_from_components(
+        components,
+        float(white_ratio),
+        library_group=library_group,
+        paint_ids=[pid for pid, r in zip(pigment_ids, pigment_ratios) if r > 1e-12],
+    )
 
 
 def generate_recipes_for_palette(
@@ -1548,6 +2194,7 @@ def generate_recipes_for_palette(
             except Exception:
                 pass
         palette_index = color.get('index')
+        color_t0 = time.perf_counter()
         try:
             target_rgb = color.get('rgb')
             if not isinstance(target_rgb, (list, tuple)) or len(target_rgb) < 3:
@@ -1632,6 +2279,8 @@ def generate_recipes_for_palette(
                                 pass
                         return recipes
                     paint_ids = [p['id'] for p in combo]
+                    if not _combo_allowed_for_target(target_lab, paint_ids):
+                        continue
                     paint_hexes = [p.get('hex_approx', '') for p in combo]
 
                     if pigment_count == 2:
@@ -1693,6 +2342,21 @@ def generate_recipes_for_palette(
                 'error': f'Recipe generation failed for this color: {e}'
             })
         finally:
+            elapsed_ms = (time.perf_counter() - color_t0) * 1000.0
+            chosen = recipes[-1] if recipes else {}
+            err = None
+            if isinstance(chosen, dict):
+                r = chosen.get("recipe")
+                if isinstance(r, dict):
+                    err = r.get("error")
+            logger.info(
+                "Recipe color %s/%s index=%s done in %.0f ms (best dE=%s)",
+                i + 1,
+                total_colors,
+                palette_index,
+                elapsed_ms,
+                f"{err:.2f}" if isinstance(err, (int, float)) else err,
+            )
             if progress_cb:
                 try:
                     progress_cb(i + 1, total_colors, "running")

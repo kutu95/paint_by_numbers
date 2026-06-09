@@ -1,0 +1,2832 @@
+{
+  "timestamp": "2026-05-05T14:44:14Z",
+  "duration_sec": 24.25,
+  "n_targets": 256,
+  "targets": [
+    {
+      "index": 0,
+      "hex": "#1CCB06",
+      "rgb": [
+        28,
+        203,
+        6
+      ],
+      "is_green": true,
+      "baseline_delta_e": 44.925955580990745
+    },
+    {
+      "index": 1,
+      "hex": "#46E53E",
+      "rgb": [
+        70,
+        229,
+        62
+      ],
+      "is_green": true,
+      "baseline_delta_e": 40.324471448392934
+    },
+    {
+      "index": 2,
+      "hex": "#11615E",
+      "rgb": [
+        17,
+        97,
+        94
+      ],
+      "is_green": true,
+      "baseline_delta_e": 28.470069064725152
+    },
+    {
+      "index": 3,
+      "hex": "#0B4236",
+      "rgb": [
+        11,
+        66,
+        54
+      ],
+      "is_green": true,
+      "baseline_delta_e": 24.578394052514202
+    },
+    {
+      "index": 4,
+      "hex": "#013005",
+      "rgb": [
+        1,
+        48,
+        5
+      ],
+      "is_green": true,
+      "baseline_delta_e": 34.554658215695824
+    },
+    {
+      "index": 5,
+      "hex": "#1D5F40",
+      "rgb": [
+        29,
+        95,
+        64
+      ],
+      "is_green": true,
+      "baseline_delta_e": 31.770598945870542
+    },
+    {
+      "index": 6,
+      "hex": "#06C28F",
+      "rgb": [
+        6,
+        194,
+        143
+      ],
+      "is_green": true,
+      "baseline_delta_e": 47.39960723794852
+    },
+    {
+      "index": 7,
+      "hex": "#535A59",
+      "rgb": [
+        83,
+        90,
+        89
+      ],
+      "is_green": true,
+      "baseline_delta_e": 8.01146013443228
+    },
+    {
+      "index": 8,
+      "hex": "#6BB338",
+      "rgb": [
+        107,
+        179,
+        56
+      ],
+      "is_green": true,
+      "baseline_delta_e": 40.01947302746389
+    },
+    {
+      "index": 9,
+      "hex": "#969A47",
+      "rgb": [
+        150,
+        154,
+        71
+      ],
+      "is_green": true,
+      "baseline_delta_e": 20.691764964841774
+    },
+    {
+      "index": 10,
+      "hex": "#DEF701",
+      "rgb": [
+        222,
+        247,
+        1
+      ],
+      "is_green": true,
+      "baseline_delta_e": 20.61661593322151
+    },
+    {
+      "index": 11,
+      "hex": "#CEEA28",
+      "rgb": [
+        206,
+        234,
+        40
+      ],
+      "is_green": true,
+      "baseline_delta_e": 17.864576323007153
+    },
+    {
+      "index": 12,
+      "hex": "#6CDA57",
+      "rgb": [
+        108,
+        218,
+        87
+      ],
+      "is_green": true,
+      "baseline_delta_e": 36.969792519404805
+    },
+    {
+      "index": 13,
+      "hex": "#136F1B",
+      "rgb": [
+        19,
+        111,
+        27
+      ],
+      "is_green": true,
+      "baseline_delta_e": 47.976311778663906
+    },
+    {
+      "index": 14,
+      "hex": "#56EB1A",
+      "rgb": [
+        86,
+        235,
+        26
+      ],
+      "is_green": true,
+      "baseline_delta_e": 41.27392266703792
+    },
+    {
+      "index": 15,
+      "hex": "#303F0C",
+      "rgb": [
+        48,
+        63,
+        12
+      ],
+      "is_green": true,
+      "baseline_delta_e": 23.58562932303052
+    },
+    {
+      "index": 16,
+      "hex": "#588343",
+      "rgb": [
+        88,
+        131,
+        67
+      ],
+      "is_green": true,
+      "baseline_delta_e": 28.98186331930513
+    },
+    {
+      "index": 17,
+      "hex": "#0BF6BA",
+      "rgb": [
+        11,
+        246,
+        186
+      ],
+      "is_green": true,
+      "baseline_delta_e": 31.738955674066155
+    },
+    {
+      "index": 18,
+      "hex": "#899D1F",
+      "rgb": [
+        137,
+        157,
+        31
+      ],
+      "is_green": true,
+      "baseline_delta_e": 32.26941464200796
+    },
+    {
+      "index": 19,
+      "hex": "#14884B",
+      "rgb": [
+        20,
+        136,
+        75
+      ],
+      "is_green": true,
+      "baseline_delta_e": 45.69504521482246
+    },
+    {
+      "index": 20,
+      "hex": "#A0FC9E",
+      "rgb": [
+        160,
+        252,
+        158
+      ],
+      "is_green": true,
+      "baseline_delta_e": 29.340141193465648
+    },
+    {
+      "index": 21,
+      "hex": "#318411",
+      "rgb": [
+        49,
+        132,
+        17
+      ],
+      "is_green": true,
+      "baseline_delta_e": 49.492952217679175
+    },
+    {
+      "index": 22,
+      "hex": "#2A330E",
+      "rgb": [
+        42,
+        51,
+        14
+      ],
+      "is_green": true,
+      "baseline_delta_e": 22.12495665778825
+    },
+    {
+      "index": 23,
+      "hex": "#4AED14",
+      "rgb": [
+        74,
+        237,
+        20
+      ],
+      "is_green": true,
+      "baseline_delta_e": 41.765653908083365
+    },
+    {
+      "index": 24,
+      "hex": "#0C6330",
+      "rgb": [
+        12,
+        99,
+        48
+      ],
+      "is_green": true,
+      "baseline_delta_e": 39.10216322752399
+    },
+    {
+      "index": 25,
+      "hex": "#3A6F51",
+      "rgb": [
+        58,
+        111,
+        81
+      ],
+      "is_green": true,
+      "baseline_delta_e": 28.43289036843366
+    },
+    {
+      "index": 26,
+      "hex": "#5DFD29",
+      "rgb": [
+        93,
+        253,
+        41
+      ],
+      "is_green": true,
+      "baseline_delta_e": 39.24705556659186
+    },
+    {
+      "index": 27,
+      "hex": "#5A8635",
+      "rgb": [
+        90,
+        134,
+        53
+      ],
+      "is_green": true,
+      "baseline_delta_e": 32.32494177938984
+    },
+    {
+      "index": 28,
+      "hex": "#44D3B3",
+      "rgb": [
+        68,
+        211,
+        179
+      ],
+      "is_green": true,
+      "baseline_delta_e": 31.247759215469873
+    },
+    {
+      "index": 29,
+      "hex": "#A5D612",
+      "rgb": [
+        165,
+        214,
+        18
+      ],
+      "is_green": true,
+      "baseline_delta_e": 27.099161881706223
+    },
+    {
+      "index": 30,
+      "hex": "#A2C32B",
+      "rgb": [
+        162,
+        195,
+        43
+      ],
+      "is_green": true,
+      "baseline_delta_e": 24.011274580063468
+    },
+    {
+      "index": 31,
+      "hex": "#3EB029",
+      "rgb": [
+        62,
+        176,
+        41
+      ],
+      "is_green": true,
+      "baseline_delta_e": 50.663938484090664
+    },
+    {
+      "index": 32,
+      "hex": "#619E45",
+      "rgb": [
+        97,
+        158,
+        69
+      ],
+      "is_green": true,
+      "baseline_delta_e": 38.798275793109944
+    },
+    {
+      "index": 33,
+      "hex": "#B0CB8E",
+      "rgb": [
+        176,
+        203,
+        142
+      ],
+      "is_green": true,
+      "baseline_delta_e": 18.863210086793977
+    },
+    {
+      "index": 34,
+      "hex": "#576029",
+      "rgb": [
+        87,
+        96,
+        41
+      ],
+      "is_green": true,
+      "baseline_delta_e": 17.233871181358218
+    },
+    {
+      "index": 35,
+      "hex": "#1CFF75",
+      "rgb": [
+        28,
+        255,
+        117
+      ],
+      "is_green": true,
+      "baseline_delta_e": 36.10160122579293
+    },
+    {
+      "index": 36,
+      "hex": "#08FACE",
+      "rgb": [
+        8,
+        250,
+        206
+      ],
+      "is_green": true,
+      "baseline_delta_e": 30.522278620855126
+    },
+    {
+      "index": 37,
+      "hex": "#337822",
+      "rgb": [
+        51,
+        120,
+        34
+      ],
+      "is_green": true,
+      "baseline_delta_e": 42.82289512521671
+    },
+    {
+      "index": 38,
+      "hex": "#0D3824",
+      "rgb": [
+        13,
+        56,
+        36
+      ],
+      "is_green": true,
+      "baseline_delta_e": 25.117003530131434
+    },
+    {
+      "index": 39,
+      "hex": "#50DF36",
+      "rgb": [
+        80,
+        223,
+        54
+      ],
+      "is_green": true,
+      "baseline_delta_e": 40.657757874966016
+    },
+    {
+      "index": 40,
+      "hex": "#7FCF65",
+      "rgb": [
+        127,
+        207,
+        101
+      ],
+      "is_green": true,
+      "baseline_delta_e": 34.54871415052567
+    },
+    {
+      "index": 41,
+      "hex": "#75CC24",
+      "rgb": [
+        117,
+        204,
+        36
+      ],
+      "is_green": true,
+      "baseline_delta_e": 39.79623093621087
+    },
+    {
+      "index": 42,
+      "hex": "#116B1F",
+      "rgb": [
+        17,
+        107,
+        31
+      ],
+      "is_green": true,
+      "baseline_delta_e": 43.477802355063375
+    },
+    {
+      "index": 43,
+      "hex": "#8FE689",
+      "rgb": [
+        143,
+        230,
+        137
+      ],
+      "is_green": true,
+      "baseline_delta_e": 31.525781514274037
+    },
+    {
+      "index": 44,
+      "hex": "#5F6B4A",
+      "rgb": [
+        95,
+        107,
+        74
+      ],
+      "is_green": true,
+      "baseline_delta_e": 15.741584579250675
+    },
+    {
+      "index": 45,
+      "hex": "#959566",
+      "rgb": [
+        149,
+        149,
+        102
+      ],
+      "is_green": true,
+      "baseline_delta_e": 11.526624686845459
+    },
+    {
+      "index": 46,
+      "hex": "#388423",
+      "rgb": [
+        56,
+        132,
+        35
+      ],
+      "is_green": true,
+      "baseline_delta_e": 45.29040285865103
+    },
+    {
+      "index": 47,
+      "hex": "#7EAA17",
+      "rgb": [
+        126,
+        170,
+        23
+      ],
+      "is_green": true,
+      "baseline_delta_e": 34.439041572313926
+    },
+    {
+      "index": 48,
+      "hex": "#0CE9DC",
+      "rgb": [
+        12,
+        233,
+        220
+      ],
+      "is_green": true,
+      "baseline_delta_e": 30.294623532391782
+    },
+    {
+      "index": 49,
+      "hex": "#134414",
+      "rgb": [
+        19,
+        68,
+        20
+      ],
+      "is_green": true,
+      "baseline_delta_e": 32.14939302990589
+    },
+    {
+      "index": 50,
+      "hex": "#AEF26C",
+      "rgb": [
+        174,
+        242,
+        108
+      ],
+      "is_green": true,
+      "baseline_delta_e": 27.124961470616242
+    },
+    {
+      "index": 51,
+      "hex": "#10C062",
+      "rgb": [
+        16,
+        192,
+        98
+      ],
+      "is_green": true,
+      "baseline_delta_e": 52.98832902601306
+    },
+    {
+      "index": 52,
+      "hex": "#778987",
+      "rgb": [
+        119,
+        137,
+        135
+      ],
+      "is_green": true,
+      "baseline_delta_e": 11.844815357031067
+    },
+    {
+      "index": 53,
+      "hex": "#466801",
+      "rgb": [
+        70,
+        104,
+        1
+      ],
+      "is_green": true,
+      "baseline_delta_e": 32.82831938660439
+    },
+    {
+      "index": 54,
+      "hex": "#B8D61D",
+      "rgb": [
+        184,
+        214,
+        29
+      ],
+      "is_green": true,
+      "baseline_delta_e": 19.79616094733153
+    },
+    {
+      "index": 55,
+      "hex": "#89D6C0",
+      "rgb": [
+        137,
+        214,
+        192
+      ],
+      "is_green": true,
+      "baseline_delta_e": 28.475648713867997
+    },
+    {
+      "index": 56,
+      "hex": "#626C52",
+      "rgb": [
+        98,
+        108,
+        82
+      ],
+      "is_green": true,
+      "baseline_delta_e": 12.681125961002994
+    },
+    {
+      "index": 57,
+      "hex": "#1C7F4B",
+      "rgb": [
+        28,
+        127,
+        75
+      ],
+      "is_green": true,
+      "baseline_delta_e": 41.83182109386109
+    },
+    {
+      "index": 58,
+      "hex": "#289774",
+      "rgb": [
+        40,
+        151,
+        116
+      ],
+      "is_green": true,
+      "baseline_delta_e": 41.71624860654899
+    },
+    {
+      "index": 59,
+      "hex": "#102820",
+      "rgb": [
+        16,
+        40,
+        32
+      ],
+      "is_green": true,
+      "baseline_delta_e": 19.74651089816446
+    },
+    {
+      "index": 60,
+      "hex": "#2DEB81",
+      "rgb": [
+        45,
+        235,
+        129
+      ],
+      "is_green": true,
+      "baseline_delta_e": 35.60581108585952
+    },
+    {
+      "index": 61,
+      "hex": "#264340",
+      "rgb": [
+        38,
+        67,
+        64
+      ],
+      "is_green": true,
+      "baseline_delta_e": 16.96496760529745
+    },
+    {
+      "index": 62,
+      "hex": "#32C327",
+      "rgb": [
+        50,
+        195,
+        39
+      ],
+      "is_green": true,
+      "baseline_delta_e": 53.924449448175935
+    },
+    {
+      "index": 63,
+      "hex": "#298787",
+      "rgb": [
+        41,
+        135,
+        135
+      ],
+      "is_green": true,
+      "baseline_delta_e": 32.0961200362444
+    },
+    {
+      "index": 64,
+      "hex": "#262814",
+      "rgb": [
+        38,
+        40,
+        20
+      ],
+      "is_green": true,
+      "baseline_delta_e": 18.51241385318987
+    },
+    {
+      "index": 65,
+      "hex": "#04A51C",
+      "rgb": [
+        4,
+        165,
+        28
+      ],
+      "is_green": true,
+      "baseline_delta_e": 57.26611290410094
+    },
+    {
+      "index": 66,
+      "hex": "#4E843D",
+      "rgb": [
+        78,
+        132,
+        61
+      ],
+      "is_green": true,
+      "baseline_delta_e": 33.973910832457754
+    },
+    {
+      "index": 67,
+      "hex": "#0F3624",
+      "rgb": [
+        15,
+        54,
+        36
+      ],
+      "is_green": true,
+      "baseline_delta_e": 23.799932533372623
+    },
+    {
+      "index": 68,
+      "hex": "#053C2E",
+      "rgb": [
+        5,
+        60,
+        46
+      ],
+      "is_green": true,
+      "baseline_delta_e": 25.092364645022187
+    },
+    {
+      "index": 69,
+      "hex": "#11A488",
+      "rgb": [
+        17,
+        164,
+        136
+      ],
+      "is_green": true,
+      "baseline_delta_e": 43.349688425825434
+    },
+    {
+      "index": 70,
+      "hex": "#20EC20",
+      "rgb": [
+        32,
+        236,
+        32
+      ],
+      "is_green": true,
+      "baseline_delta_e": 42.51942675779356
+    },
+    {
+      "index": 71,
+      "hex": "#79D08C",
+      "rgb": [
+        121,
+        208,
+        140
+      ],
+      "is_green": true,
+      "baseline_delta_e": 31.668186206447494
+    },
+    {
+      "index": 72,
+      "hex": "#215243",
+      "rgb": [
+        33,
+        82,
+        67
+      ],
+      "is_green": true,
+      "baseline_delta_e": 24.732559693703983
+    },
+    {
+      "index": 73,
+      "hex": "#6CC336",
+      "rgb": [
+        108,
+        195,
+        54
+      ],
+      "is_green": true,
+      "baseline_delta_e": 39.18617847123987
+    },
+    {
+      "index": 74,
+      "hex": "#B0B233",
+      "rgb": [
+        176,
+        178,
+        51
+      ],
+      "is_green": true,
+      "baseline_delta_e": 24.149389232378837
+    },
+    {
+      "index": 75,
+      "hex": "#4FDE66",
+      "rgb": [
+        79,
+        222,
+        102
+      ],
+      "is_green": true,
+      "baseline_delta_e": 36.976950031076576
+    },
+    {
+      "index": 76,
+      "hex": "#A6D35F",
+      "rgb": [
+        166,
+        211,
+        95
+      ],
+      "is_green": true,
+      "baseline_delta_e": 23.727060833603698
+    },
+    {
+      "index": 77,
+      "hex": "#849873",
+      "rgb": [
+        132,
+        152,
+        115
+      ],
+      "is_green": true,
+      "baseline_delta_e": 15.547127836081563
+    },
+    {
+      "index": 78,
+      "hex": "#1F461C",
+      "rgb": [
+        31,
+        70,
+        28
+      ],
+      "is_green": true,
+      "baseline_delta_e": 30.661944185742925
+    },
+    {
+      "index": 79,
+      "hex": "#153801",
+      "rgb": [
+        21,
+        56,
+        1
+      ],
+      "is_green": true,
+      "baseline_delta_e": 32.55416486373397
+    },
+    {
+      "index": 80,
+      "hex": "#8DBE3A",
+      "rgb": [
+        141,
+        190,
+        58
+      ],
+      "is_green": true,
+      "baseline_delta_e": 30.18329482038205
+    },
+    {
+      "index": 81,
+      "hex": "#38BE01",
+      "rgb": [
+        56,
+        190,
+        1
+      ],
+      "is_green": true,
+      "baseline_delta_e": 53.38477484035541
+    },
+    {
+      "index": 82,
+      "hex": "#2D3A28",
+      "rgb": [
+        45,
+        58,
+        40
+      ],
+      "is_green": true,
+      "baseline_delta_e": 14.623952664794688
+    },
+    {
+      "index": 83,
+      "hex": "#0E3704",
+      "rgb": [
+        14,
+        55,
+        4
+      ],
+      "is_green": true,
+      "baseline_delta_e": 33.34672922864972
+    },
+    {
+      "index": 84,
+      "hex": "#153004",
+      "rgb": [
+        21,
+        48,
+        4
+      ],
+      "is_green": true,
+      "baseline_delta_e": 30.26929467914217
+    },
+    {
+      "index": 85,
+      "hex": "#3CAB47",
+      "rgb": [
+        60,
+        171,
+        71
+      ],
+      "is_green": true,
+      "baseline_delta_e": 50.70474862185683
+    },
+    {
+      "index": 86,
+      "hex": "#7CD336",
+      "rgb": [
+        124,
+        211,
+        54
+      ],
+      "is_green": true,
+      "baseline_delta_e": 38.25004169868805
+    },
+    {
+      "index": 87,
+      "hex": "#21B292",
+      "rgb": [
+        33,
+        178,
+        146
+      ],
+      "is_green": true,
+      "baseline_delta_e": 44.317671531928916
+    },
+    {
+      "index": 88,
+      "hex": "#79BB3E",
+      "rgb": [
+        121,
+        187,
+        62
+      ],
+      "is_green": true,
+      "baseline_delta_e": 36.28168396171393
+    },
+    {
+      "index": 89,
+      "hex": "#79F0CE",
+      "rgb": [
+        121,
+        240,
+        206
+      ],
+      "is_green": true,
+      "baseline_delta_e": 28.54071939690345
+    },
+    {
+      "index": 90,
+      "hex": "#309018",
+      "rgb": [
+        48,
+        144,
+        24
+      ],
+      "is_green": true,
+      "baseline_delta_e": 51.616532488871805
+    },
+    {
+      "index": 91,
+      "hex": "#37402D",
+      "rgb": [
+        55,
+        64,
+        45
+      ],
+      "is_green": true,
+      "baseline_delta_e": 16.338868189120625
+    },
+    {
+      "index": 92,
+      "hex": "#699477",
+      "rgb": [
+        105,
+        148,
+        119
+      ],
+      "is_green": true,
+      "baseline_delta_e": 23.502552020248668
+    },
+    {
+      "index": 93,
+      "hex": "#0DE2AC",
+      "rgb": [
+        13,
+        226,
+        172
+      ],
+      "is_green": true,
+      "baseline_delta_e": 32.81189961465291
+    },
+    {
+      "index": 94,
+      "hex": "#A5CF19",
+      "rgb": [
+        165,
+        207,
+        25
+      ],
+      "is_green": true,
+      "baseline_delta_e": 25.11820163665046
+    },
+    {
+      "index": 95,
+      "hex": "#19372E",
+      "rgb": [
+        25,
+        55,
+        46
+      ],
+      "is_green": true,
+      "baseline_delta_e": 18.254840674503214
+    },
+    {
+      "index": 96,
+      "hex": "#667E6E",
+      "rgb": [
+        102,
+        126,
+        110
+      ],
+      "is_green": true,
+      "baseline_delta_e": 15.398369973666522
+    },
+    {
+      "index": 97,
+      "hex": "#1F4318",
+      "rgb": [
+        31,
+        67,
+        24
+      ],
+      "is_green": true,
+      "baseline_delta_e": 27.881243056562106
+    },
+    {
+      "index": 98,
+      "hex": "#445839",
+      "rgb": [
+        68,
+        88,
+        57
+      ],
+      "is_green": true,
+      "baseline_delta_e": 17.59339644274437
+    },
+    {
+      "index": 99,
+      "hex": "#364B17",
+      "rgb": [
+        54,
+        75,
+        23
+      ],
+      "is_green": true,
+      "baseline_delta_e": 25.934682361812765
+    },
+    {
+      "index": 100,
+      "hex": "#3B6F1F",
+      "rgb": [
+        59,
+        111,
+        31
+      ],
+      "is_green": true,
+      "baseline_delta_e": 38.42551314655471
+    },
+    {
+      "index": 101,
+      "hex": "#1C3B33",
+      "rgb": [
+        28,
+        59,
+        51
+      ],
+      "is_green": true,
+      "baseline_delta_e": 17.908578396659912
+    },
+    {
+      "index": 102,
+      "hex": "#19B40C",
+      "rgb": [
+        25,
+        180,
+        12
+      ],
+      "is_green": true,
+      "baseline_delta_e": 56.290095985619175
+    },
+    {
+      "index": 103,
+      "hex": "#8ACE03",
+      "rgb": [
+        138,
+        206,
+        3
+      ],
+      "is_green": true,
+      "baseline_delta_e": 34.744265590385574
+    },
+    {
+      "index": 104,
+      "hex": "#1E3F15",
+      "rgb": [
+        30,
+        63,
+        21
+      ],
+      "is_green": true,
+      "baseline_delta_e": 27.578377157882215
+    },
+    {
+      "index": 105,
+      "hex": "#7C907B",
+      "rgb": [
+        124,
+        144,
+        123
+      ],
+      "is_green": true,
+      "baseline_delta_e": 14.593816429966202
+    },
+    {
+      "index": 106,
+      "hex": "#335E07",
+      "rgb": [
+        51,
+        94,
+        7
+      ],
+      "is_green": true,
+      "baseline_delta_e": 34.872304331376235
+    },
+    {
+      "index": 107,
+      "hex": "#305200",
+      "rgb": [
+        48,
+        82,
+        0
+      ],
+      "is_green": true,
+      "baseline_delta_e": 33.331811541866294
+    },
+    {
+      "index": 108,
+      "hex": "#438B74",
+      "rgb": [
+        67,
+        139,
+        116
+      ],
+      "is_green": true,
+      "baseline_delta_e": 31.62971006143766
+    },
+    {
+      "index": 109,
+      "hex": "#367159",
+      "rgb": [
+        54,
+        113,
+        89
+      ],
+      "is_green": true,
+      "baseline_delta_e": 28.669142270419083
+    },
+    {
+      "index": 110,
+      "hex": "#C8E38E",
+      "rgb": [
+        200,
+        227,
+        142
+      ],
+      "is_green": true,
+      "baseline_delta_e": 13.459480466668706
+    },
+    {
+      "index": 111,
+      "hex": "#B7D17C",
+      "rgb": [
+        183,
+        209,
+        124
+      ],
+      "is_green": true,
+      "baseline_delta_e": 18.108486618225353
+    },
+    {
+      "index": 112,
+      "hex": "#184F25",
+      "rgb": [
+        24,
+        79,
+        37
+      ],
+      "is_green": true,
+      "baseline_delta_e": 33.24487318438834
+    },
+    {
+      "index": 113,
+      "hex": "#075F4A",
+      "rgb": [
+        7,
+        95,
+        74
+      ],
+      "is_green": true,
+      "baseline_delta_e": 32.407690039701976
+    },
+    {
+      "index": 114,
+      "hex": "#8AE40F",
+      "rgb": [
+        138,
+        228,
+        15
+      ],
+      "is_green": true,
+      "baseline_delta_e": 39.42803420447057
+    },
+    {
+      "index": 115,
+      "hex": "#50E70E",
+      "rgb": [
+        80,
+        231,
+        14
+      ],
+      "is_green": true,
+      "baseline_delta_e": 42.05898972359353
+    },
+    {
+      "index": 116,
+      "hex": "#25341E",
+      "rgb": [
+        37,
+        52,
+        30
+      ],
+      "is_green": true,
+      "baseline_delta_e": 18.356817932286717
+    },
+    {
+      "index": 117,
+      "hex": "#87A828",
+      "rgb": [
+        135,
+        168,
+        40
+      ],
+      "is_green": true,
+      "baseline_delta_e": 32.80394970241948
+    },
+    {
+      "index": 118,
+      "hex": "#203605",
+      "rgb": [
+        32,
+        54,
+        5
+      ],
+      "is_green": true,
+      "baseline_delta_e": 28.035958935281773
+    },
+    {
+      "index": 119,
+      "hex": "#08574C",
+      "rgb": [
+        8,
+        87,
+        76
+      ],
+      "is_green": true,
+      "baseline_delta_e": 28.9244092564354
+    },
+    {
+      "index": 120,
+      "hex": "#2B3937",
+      "rgb": [
+        43,
+        57,
+        55
+      ],
+      "is_green": true,
+      "baseline_delta_e": 11.447333362507834
+    },
+    {
+      "index": 121,
+      "hex": "#33640F",
+      "rgb": [
+        51,
+        100,
+        15
+      ],
+      "is_green": true,
+      "baseline_delta_e": 35.800857380303285
+    },
+    {
+      "index": 122,
+      "hex": "#3FB994",
+      "rgb": [
+        63,
+        185,
+        148
+      ],
+      "is_green": true,
+      "baseline_delta_e": 44.14591552238359
+    },
+    {
+      "index": 123,
+      "hex": "#0AC09E",
+      "rgb": [
+        10,
+        192,
+        158
+      ],
+      "is_green": true,
+      "baseline_delta_e": 45.55658689404384
+    },
+    {
+      "index": 124,
+      "hex": "#1A3C2A",
+      "rgb": [
+        26,
+        60,
+        42
+      ],
+      "is_green": true,
+      "baseline_delta_e": 21.586243375317704
+    },
+    {
+      "index": 125,
+      "hex": "#90BD85",
+      "rgb": [
+        144,
+        189,
+        133
+      ],
+      "is_green": true,
+      "baseline_delta_e": 26.239657487074858
+    },
+    {
+      "index": 126,
+      "hex": "#777821",
+      "rgb": [
+        119,
+        120,
+        33
+      ],
+      "is_green": true,
+      "baseline_delta_e": 25.299168485801285
+    },
+    {
+      "index": 127,
+      "hex": "#555C5B",
+      "rgb": [
+        85,
+        92,
+        91
+      ],
+      "is_green": true,
+      "baseline_delta_e": 7.941613212038648
+    },
+    {
+      "index": 128,
+      "hex": "#1E7821",
+      "rgb": [
+        30,
+        120,
+        33
+      ],
+      "is_green": true,
+      "baseline_delta_e": 47.50855056751474
+    },
+    {
+      "index": 129,
+      "hex": "#218D4C",
+      "rgb": [
+        33,
+        141,
+        76
+      ],
+      "is_green": true,
+      "baseline_delta_e": 45.425281379461026
+    },
+    {
+      "index": 130,
+      "hex": "#509D12",
+      "rgb": [
+        80,
+        157,
+        18
+      ],
+      "is_green": true,
+      "baseline_delta_e": 46.92888732228475
+    },
+    {
+      "index": 131,
+      "hex": "#1D2A27",
+      "rgb": [
+        29,
+        42,
+        39
+      ],
+      "is_green": true,
+      "baseline_delta_e": 15.095561973677455
+    },
+    {
+      "index": 132,
+      "hex": "#19B812",
+      "rgb": [
+        25,
+        184,
+        18
+      ],
+      "is_green": true,
+      "baseline_delta_e": 56.419769808160275
+    },
+    {
+      "index": 133,
+      "hex": "#36B181",
+      "rgb": [
+        54,
+        177,
+        129
+      ],
+      "is_green": true,
+      "baseline_delta_e": 45.22894859973939
+    },
+    {
+      "index": 134,
+      "hex": "#106B2C",
+      "rgb": [
+        16,
+        107,
+        44
+      ],
+      "is_green": true,
+      "baseline_delta_e": 41.513261882686976
+    },
+    {
+      "index": 135,
+      "hex": "#38390F",
+      "rgb": [
+        56,
+        57,
+        15
+      ],
+      "is_green": true,
+      "baseline_delta_e": 19.207013864447866
+    },
+    {
+      "index": 136,
+      "hex": "#488628",
+      "rgb": [
+        72,
+        134,
+        40
+      ],
+      "is_green": true,
+      "baseline_delta_e": 40.66357755605491
+    },
+    {
+      "index": 137,
+      "hex": "#8B984D",
+      "rgb": [
+        139,
+        152,
+        77
+      ],
+      "is_green": true,
+      "baseline_delta_e": 21.282517627968996
+    },
+    {
+      "index": 138,
+      "hex": "#A7C487",
+      "rgb": [
+        167,
+        196,
+        135
+      ],
+      "is_green": true,
+      "baseline_delta_e": 20.415066199144007
+    },
+    {
+      "index": 139,
+      "hex": "#2A2A23",
+      "rgb": [
+        42,
+        42,
+        35
+      ],
+      "is_green": true,
+      "baseline_delta_e": 12.322767652931887
+    },
+    {
+      "index": 140,
+      "hex": "#54740D",
+      "rgb": [
+        84,
+        116,
+        13
+      ],
+      "is_green": true,
+      "baseline_delta_e": 36.11500523746618
+    },
+    {
+      "index": 141,
+      "hex": "#214A0E",
+      "rgb": [
+        33,
+        74,
+        14
+      ],
+      "is_green": true,
+      "baseline_delta_e": 34.26902484068094
+    },
+    {
+      "index": 142,
+      "hex": "#134322",
+      "rgb": [
+        19,
+        67,
+        34
+      ],
+      "is_green": true,
+      "baseline_delta_e": 29.07534270162977
+    },
+    {
+      "index": 143,
+      "hex": "#4D701A",
+      "rgb": [
+        77,
+        112,
+        26
+      ],
+      "is_green": true,
+      "baseline_delta_e": 34.347648209527144
+    },
+    {
+      "index": 144,
+      "hex": "#57DF34",
+      "rgb": [
+        87,
+        223,
+        52
+      ],
+      "is_green": true,
+      "baseline_delta_e": 40.496629410199155
+    },
+    {
+      "index": 145,
+      "hex": "#A2D743",
+      "rgb": [
+        162,
+        215,
+        67
+      ],
+      "is_green": true,
+      "baseline_delta_e": 25.676228682839636
+    },
+    {
+      "index": 146,
+      "hex": "#7DA940",
+      "rgb": [
+        125,
+        169,
+        64
+      ],
+      "is_green": true,
+      "baseline_delta_e": 33.7147921255107
+    },
+    {
+      "index": 147,
+      "hex": "#053528",
+      "rgb": [
+        5,
+        53,
+        40
+      ],
+      "is_green": true,
+      "baseline_delta_e": 23.973349599297833
+    },
+    {
+      "index": 148,
+      "hex": "#46940B",
+      "rgb": [
+        70,
+        148,
+        11
+      ],
+      "is_green": true,
+      "baseline_delta_e": 48.42500817083595
+    },
+    {
+      "index": 149,
+      "hex": "#152808",
+      "rgb": [
+        21,
+        40,
+        8
+      ],
+      "is_green": true,
+      "baseline_delta_e": 26.432806787243475
+    },
+    {
+      "index": 150,
+      "hex": "#43CB29",
+      "rgb": [
+        67,
+        203,
+        41
+      ],
+      "is_green": true,
+      "baseline_delta_e": 42.26164436986294
+    },
+    {
+      "index": 151,
+      "hex": "#71E58D",
+      "rgb": [
+        113,
+        229,
+        141
+      ],
+      "is_green": true,
+      "baseline_delta_e": 32.522683618528056
+    },
+    {
+      "index": 152,
+      "hex": "#6DDC8F",
+      "rgb": [
+        109,
+        220,
+        143
+      ],
+      "is_green": true,
+      "baseline_delta_e": 32.37794729541317
+    },
+    {
+      "index": 153,
+      "hex": "#072A04",
+      "rgb": [
+        7,
+        42,
+        4
+      ],
+      "is_green": true,
+      "baseline_delta_e": 31.52696602477667
+    },
+    {
+      "index": 154,
+      "hex": "#26D88B",
+      "rgb": [
+        38,
+        216,
+        139
+      ],
+      "is_green": true,
+      "baseline_delta_e": 34.85270567153111
+    },
+    {
+      "index": 155,
+      "hex": "#173125",
+      "rgb": [
+        23,
+        49,
+        37
+      ],
+      "is_green": true,
+      "baseline_delta_e": 18.8630625670515
+    },
+    {
+      "index": 156,
+      "hex": "#25B56E",
+      "rgb": [
+        37,
+        181,
+        110
+      ],
+      "is_green": true,
+      "baseline_delta_e": 49.093489901734806
+    },
+    {
+      "index": 157,
+      "hex": "#054827",
+      "rgb": [
+        5,
+        72,
+        39
+      ],
+      "is_green": true,
+      "baseline_delta_e": 33.210696613818726
+    },
+    {
+      "index": 158,
+      "hex": "#0A855B",
+      "rgb": [
+        10,
+        133,
+        91
+      ],
+      "is_green": true,
+      "baseline_delta_e": 42.649447027624994
+    },
+    {
+      "index": 159,
+      "hex": "#575D1F",
+      "rgb": [
+        87,
+        93,
+        31
+      ],
+      "is_green": true,
+      "baseline_delta_e": 19.004199169595935
+    },
+    {
+      "index": 160,
+      "hex": "#1AD25A",
+      "rgb": [
+        26,
+        210,
+        90
+      ],
+      "is_green": true,
+      "baseline_delta_e": 39.3915585540075
+    },
+    {
+      "index": 161,
+      "hex": "#8FEFE2",
+      "rgb": [
+        143,
+        239,
+        226
+      ],
+      "is_green": true,
+      "baseline_delta_e": 27.214177456475294
+    },
+    {
+      "index": 162,
+      "hex": "#27903C",
+      "rgb": [
+        39,
+        144,
+        60
+      ],
+      "is_green": true,
+      "baseline_delta_e": 48.369924845108514
+    },
+    {
+      "index": 163,
+      "hex": "#165134",
+      "rgb": [
+        22,
+        81,
+        52
+      ],
+      "is_green": true,
+      "baseline_delta_e": 30.02998012721152
+    },
+    {
+      "index": 164,
+      "hex": "#0B2E15",
+      "rgb": [
+        11,
+        46,
+        21
+      ],
+      "is_green": true,
+      "baseline_delta_e": 26.90292452663564
+    },
+    {
+      "index": 165,
+      "hex": "#EEF069",
+      "rgb": [
+        238,
+        240,
+        105
+      ],
+      "is_green": true,
+      "baseline_delta_e": 2.3006888672782217
+    },
+    {
+      "index": 166,
+      "hex": "#ABF5DD",
+      "rgb": [
+        171,
+        245,
+        221
+      ],
+      "is_green": true,
+      "baseline_delta_e": 26.284123581480628
+    },
+    {
+      "index": 167,
+      "hex": "#CFE43F",
+      "rgb": [
+        207,
+        228,
+        63
+      ],
+      "is_green": true,
+      "baseline_delta_e": 13.15446394391811
+    },
+    {
+      "index": 168,
+      "hex": "#146C64",
+      "rgb": [
+        20,
+        108,
+        100
+      ],
+      "is_green": true,
+      "baseline_delta_e": 31.377983748137584
+    },
+    {
+      "index": 169,
+      "hex": "#1BDB61",
+      "rgb": [
+        27,
+        219,
+        97
+      ],
+      "is_green": true,
+      "baseline_delta_e": 38.78329218563349
+    },
+    {
+      "index": 170,
+      "hex": "#1E310E",
+      "rgb": [
+        30,
+        49,
+        14
+      ],
+      "is_green": true,
+      "baseline_delta_e": 25.2578893815702
+    },
+    {
+      "index": 171,
+      "hex": "#3A5B2C",
+      "rgb": [
+        58,
+        91,
+        44
+      ],
+      "is_green": true,
+      "baseline_delta_e": 25.38760775461156
+    },
+    {
+      "index": 172,
+      "hex": "#697665",
+      "rgb": [
+        105,
+        118,
+        101
+      ],
+      "is_green": true,
+      "baseline_delta_e": 11.483993628853312
+    },
+    {
+      "index": 173,
+      "hex": "#1C6203",
+      "rgb": [
+        28,
+        98,
+        3
+      ],
+      "is_green": true,
+      "baseline_delta_e": 42.700373965212094
+    },
+    {
+      "index": 174,
+      "hex": "#31D066",
+      "rgb": [
+        49,
+        208,
+        102
+      ],
+      "is_green": true,
+      "baseline_delta_e": 37.75020233804143
+    },
+    {
+      "index": 175,
+      "hex": "#237C6E",
+      "rgb": [
+        35,
+        124,
+        110
+      ],
+      "is_green": true,
+      "baseline_delta_e": 33.31819497563181
+    },
+    {
+      "index": 176,
+      "hex": "#313911",
+      "rgb": [
+        49,
+        57,
+        17
+      ],
+      "is_green": true,
+      "baseline_delta_e": 20.931549387060443
+    },
+    {
+      "index": 177,
+      "hex": "#668154",
+      "rgb": [
+        102,
+        129,
+        84
+      ],
+      "is_green": true,
+      "baseline_delta_e": 19.838239841413966
+    },
+    {
+      "index": 178,
+      "hex": "#072F10",
+      "rgb": [
+        7,
+        47,
+        16
+      ],
+      "is_green": true,
+      "baseline_delta_e": 29.760838427550894
+    },
+    {
+      "index": 179,
+      "hex": "#4A5521",
+      "rgb": [
+        74,
+        85,
+        33
+      ],
+      "is_green": true,
+      "baseline_delta_e": 19.87467071342089
+    },
+    {
+      "index": 180,
+      "hex": "#063126",
+      "rgb": [
+        6,
+        49,
+        38
+      ],
+      "is_green": true,
+      "baseline_delta_e": 22.86416398205286
+    },
+    {
+      "index": 181,
+      "hex": "#589750",
+      "rgb": [
+        88,
+        151,
+        80
+      ],
+      "is_green": true,
+      "baseline_delta_e": 37.106827012643805
+    },
+    {
+      "index": 182,
+      "hex": "#82971D",
+      "rgb": [
+        130,
+        151,
+        29
+      ],
+      "is_green": true,
+      "baseline_delta_e": 33.30079153927678
+    },
+    {
+      "index": 183,
+      "hex": "#308A41",
+      "rgb": [
+        48,
+        138,
+        65
+      ],
+      "is_green": true,
+      "baseline_delta_e": 43.77646154483241
+    },
+    {
+      "index": 184,
+      "hex": "#2D331B",
+      "rgb": [
+        45,
+        51,
+        27
+      ],
+      "is_green": true,
+      "baseline_delta_e": 16.950530076483666
+    },
+    {
+      "index": 185,
+      "hex": "#212822",
+      "rgb": [
+        33,
+        40,
+        34
+      ],
+      "is_green": true,
+      "baseline_delta_e": 14.423505348619905
+    },
+    {
+      "index": 186,
+      "hex": "#B8D7BD",
+      "rgb": [
+        184,
+        215,
+        189
+      ],
+      "is_green": true,
+      "baseline_delta_e": 16.78413459847618
+    },
+    {
+      "index": 187,
+      "hex": "#ABE432",
+      "rgb": [
+        171,
+        228,
+        50
+      ],
+      "is_green": true,
+      "baseline_delta_e": 27.493784398647932
+    },
+    {
+      "index": 188,
+      "hex": "#6E8511",
+      "rgb": [
+        110,
+        133,
+        17
+      ],
+      "is_green": true,
+      "baseline_delta_e": 32.05195063304767
+    },
+    {
+      "index": 189,
+      "hex": "#54D29F",
+      "rgb": [
+        84,
+        210,
+        159
+      ],
+      "is_green": true,
+      "baseline_delta_e": 31.906911055237387
+    },
+    {
+      "index": 190,
+      "hex": "#54786C",
+      "rgb": [
+        84,
+        120,
+        108
+      ],
+      "is_green": true,
+      "baseline_delta_e": 19.492422777741215
+    },
+    {
+      "index": 191,
+      "hex": "#264740",
+      "rgb": [
+        38,
+        71,
+        64
+      ],
+      "is_green": true,
+      "baseline_delta_e": 18.366274082172538
+    },
+    {
+      "index": 192,
+      "hex": "#557734",
+      "rgb": [
+        85,
+        119,
+        52
+      ],
+      "is_green": true,
+      "baseline_delta_e": 28.441418810342174
+    },
+    {
+      "index": 193,
+      "hex": "#337B59",
+      "rgb": [
+        51,
+        123,
+        89
+      ],
+      "is_green": true,
+      "baseline_delta_e": 33.47069718969591
+    },
+    {
+      "index": 194,
+      "hex": "#467310",
+      "rgb": [
+        70,
+        115,
+        16
+      ],
+      "is_green": true,
+      "baseline_delta_e": 38.96002077169593
+    },
+    {
+      "index": 195,
+      "hex": "#355955",
+      "rgb": [
+        53,
+        89,
+        85
+      ],
+      "is_green": true,
+      "baseline_delta_e": 18.95043475928977
+    },
+    {
+      "index": 196,
+      "hex": "#2C894D",
+      "rgb": [
+        44,
+        137,
+        77
+      ],
+      "is_green": true,
+      "baseline_delta_e": 42.02338305297995
+    },
+    {
+      "index": 197,
+      "hex": "#8C8F00",
+      "rgb": [
+        140,
+        143,
+        0
+      ],
+      "is_green": true,
+      "baseline_delta_e": 33.65063118263101
+    },
+    {
+      "index": 198,
+      "hex": "#24751A",
+      "rgb": [
+        36,
+        117,
+        26
+      ],
+      "is_green": true,
+      "baseline_delta_e": 46.77141341211854
+    },
+    {
+      "index": 199,
+      "hex": "#949652",
+      "rgb": [
+        148,
+        150,
+        82
+      ],
+      "is_green": true,
+      "baseline_delta_e": 17.522828095824142
+    },
+    {
+      "index": 200,
+      "hex": "#EEE2E2",
+      "rgb": [
+        238,
+        226,
+        226
+      ],
+      "is_green": false,
+      "baseline_delta_e": 5.465354325566502
+    },
+    {
+      "index": 201,
+      "hex": "#6DF256",
+      "rgb": [
+        109,
+        242,
+        86
+      ],
+      "is_green": true,
+      "baseline_delta_e": 36.71518258706765
+    },
+    {
+      "index": 202,
+      "hex": "#2B91AB",
+      "rgb": [
+        43,
+        145,
+        171
+      ],
+      "is_green": false,
+      "baseline_delta_e": 31.239355230746934
+    },
+    {
+      "index": 203,
+      "hex": "#2F789E",
+      "rgb": [
+        47,
+        120,
+        158
+      ],
+      "is_green": false,
+      "baseline_delta_e": 24.242395536735085
+    },
+    {
+      "index": 204,
+      "hex": "#73654B",
+      "rgb": [
+        115,
+        101,
+        75
+      ],
+      "is_green": false,
+      "baseline_delta_e": 12.214232178238147
+    },
+    {
+      "index": 205,
+      "hex": "#0C177D",
+      "rgb": [
+        12,
+        23,
+        125
+      ],
+      "is_green": false,
+      "baseline_delta_e": 20.225395568867242
+    },
+    {
+      "index": 206,
+      "hex": "#F325E9",
+      "rgb": [
+        243,
+        37,
+        233
+      ],
+      "is_green": false,
+      "baseline_delta_e": 48.07552417240591
+    },
+    {
+      "index": 207,
+      "hex": "#D463C4",
+      "rgb": [
+        212,
+        99,
+        196
+      ],
+      "is_green": false,
+      "baseline_delta_e": 28.405876069459346
+    },
+    {
+      "index": 208,
+      "hex": "#FDCC7C",
+      "rgb": [
+        253,
+        204,
+        124
+      ],
+      "is_green": false,
+      "baseline_delta_e": 13.126630206656412
+    },
+    {
+      "index": 209,
+      "hex": "#4B0236",
+      "rgb": [
+        75,
+        2,
+        54
+      ],
+      "is_green": false,
+      "baseline_delta_e": 29.663313103347964
+    },
+    {
+      "index": 210,
+      "hex": "#D9705A",
+      "rgb": [
+        217,
+        112,
+        90
+      ],
+      "is_green": false,
+      "baseline_delta_e": 17.23359315553726
+    },
+    {
+      "index": 211,
+      "hex": "#ED197F",
+      "rgb": [
+        237,
+        25,
+        127
+      ],
+      "is_green": false,
+      "baseline_delta_e": 30.1921578834887
+    },
+    {
+      "index": 212,
+      "hex": "#3EE944",
+      "rgb": [
+        62,
+        233,
+        68
+      ],
+      "is_green": true,
+      "baseline_delta_e": 40.02868311241087
+    },
+    {
+      "index": 213,
+      "hex": "#EDA2E2",
+      "rgb": [
+        237,
+        162,
+        226
+      ],
+      "is_green": false,
+      "baseline_delta_e": 20.83117044308844
+    },
+    {
+      "index": 214,
+      "hex": "#DAE451",
+      "rgb": [
+        218,
+        228,
+        81
+      ],
+      "is_green": true,
+      "baseline_delta_e": 7.985012881652155
+    },
+    {
+      "index": 215,
+      "hex": "#F3E684",
+      "rgb": [
+        243,
+        230,
+        132
+      ],
+      "is_green": false,
+      "baseline_delta_e": 6.450072438772635
+    },
+    {
+      "index": 216,
+      "hex": "#7E8DF8",
+      "rgb": [
+        126,
+        141,
+        248
+      ],
+      "is_green": false,
+      "baseline_delta_e": 8.767304349663059
+    },
+    {
+      "index": 217,
+      "hex": "#7A8CE1",
+      "rgb": [
+        122,
+        140,
+        225
+      ],
+      "is_green": false,
+      "baseline_delta_e": 9.90240840143488
+    },
+    {
+      "index": 218,
+      "hex": "#279278",
+      "rgb": [
+        39,
+        146,
+        120
+      ],
+      "is_green": true,
+      "baseline_delta_e": 39.20711099284999
+    },
+    {
+      "index": 219,
+      "hex": "#8BABA3",
+      "rgb": [
+        139,
+        171,
+        163
+      ],
+      "is_green": true,
+      "baseline_delta_e": 16.7038942497435
+    },
+    {
+      "index": 220,
+      "hex": "#29464D",
+      "rgb": [
+        41,
+        70,
+        77
+      ],
+      "is_green": false,
+      "baseline_delta_e": 16.201396276048367
+    },
+    {
+      "index": 221,
+      "hex": "#76C44E",
+      "rgb": [
+        118,
+        196,
+        78
+      ],
+      "is_green": true,
+      "baseline_delta_e": 36.59623583831496
+    },
+    {
+      "index": 222,
+      "hex": "#6D20D4",
+      "rgb": [
+        109,
+        32,
+        212
+      ],
+      "is_green": false,
+      "baseline_delta_e": 19.624512637726774
+    },
+    {
+      "index": 223,
+      "hex": "#D0A9EE",
+      "rgb": [
+        208,
+        169,
+        238
+      ],
+      "is_green": false,
+      "baseline_delta_e": 11.85442004664565
+    },
+    {
+      "index": 224,
+      "hex": "#D41F69",
+      "rgb": [
+        212,
+        31,
+        105
+      ],
+      "is_green": false,
+      "baseline_delta_e": 25.99621898664436
+    },
+    {
+      "index": 225,
+      "hex": "#D7C70A",
+      "rgb": [
+        215,
+        199,
+        10
+      ],
+      "is_green": false,
+      "baseline_delta_e": 10.857066403717049
+    },
+    {
+      "index": 226,
+      "hex": "#C2F403",
+      "rgb": [
+        194,
+        244,
+        3
+      ],
+      "is_green": true,
+      "baseline_delta_e": 28.680685377364785
+    },
+    {
+      "index": 227,
+      "hex": "#B498C7",
+      "rgb": [
+        180,
+        152,
+        199
+      ],
+      "is_green": false,
+      "baseline_delta_e": 11.083042045700116
+    },
+    {
+      "index": 228,
+      "hex": "#D670F9",
+      "rgb": [
+        214,
+        112,
+        249
+      ],
+      "is_green": false,
+      "baseline_delta_e": 33.16313564020197
+    },
+    {
+      "index": 229,
+      "hex": "#708BDF",
+      "rgb": [
+        112,
+        139,
+        223
+      ],
+      "is_green": false,
+      "baseline_delta_e": 12.283472994541366
+    },
+    {
+      "index": 230,
+      "hex": "#F80EC7",
+      "rgb": [
+        248,
+        14,
+        199
+      ],
+      "is_green": false,
+      "baseline_delta_e": 59.155302015986116
+    },
+    {
+      "index": 231,
+      "hex": "#ACCF54",
+      "rgb": [
+        172,
+        207,
+        84
+      ],
+      "is_green": true,
+      "baseline_delta_e": 21.53312092229044
+    },
+    {
+      "index": 232,
+      "hex": "#EF410D",
+      "rgb": [
+        239,
+        65,
+        13
+      ],
+      "is_green": false,
+      "baseline_delta_e": 18.09286137220399
+    },
+    {
+      "index": 233,
+      "hex": "#C90D2A",
+      "rgb": [
+        201,
+        13,
+        42
+      ],
+      "is_green": false,
+      "baseline_delta_e": 26.06237687694213
+    },
+    {
+      "index": 234,
+      "hex": "#DB45EC",
+      "rgb": [
+        219,
+        69,
+        236
+      ],
+      "is_green": false,
+      "baseline_delta_e": 45.344595718616546
+    },
+    {
+      "index": 235,
+      "hex": "#5D1985",
+      "rgb": [
+        93,
+        25,
+        133
+      ],
+      "is_green": false,
+      "baseline_delta_e": 28.495729654879653
+    },
+    {
+      "index": 236,
+      "hex": "#C2A76C",
+      "rgb": [
+        194,
+        167,
+        108
+      ],
+      "is_green": false,
+      "baseline_delta_e": 13.537968304826506
+    },
+    {
+      "index": 237,
+      "hex": "#E8A7AC",
+      "rgb": [
+        232,
+        167,
+        172
+      ],
+      "is_green": false,
+      "baseline_delta_e": 9.29563046294626
+    },
+    {
+      "index": 238,
+      "hex": "#C28ED7",
+      "rgb": [
+        194,
+        142,
+        215
+      ],
+      "is_green": false,
+      "baseline_delta_e": 6.656100814226333
+    },
+    {
+      "index": 239,
+      "hex": "#8129F0",
+      "rgb": [
+        129,
+        41,
+        240
+      ],
+      "is_green": false,
+      "baseline_delta_e": 27.180041041412647
+    },
+    {
+      "index": 240,
+      "hex": "#091AB3",
+      "rgb": [
+        9,
+        26,
+        179
+      ],
+      "is_green": false,
+      "baseline_delta_e": 17.18316236302789
+    },
+    {
+      "index": 241,
+      "hex": "#722314",
+      "rgb": [
+        114,
+        35,
+        20
+      ],
+      "is_green": false,
+      "baseline_delta_e": 24.63181625136276
+    },
+    {
+      "index": 242,
+      "hex": "#0F7E66",
+      "rgb": [
+        15,
+        126,
+        102
+      ],
+      "is_green": true,
+      "baseline_delta_e": 38.23359074353861
+    },
+    {
+      "index": 243,
+      "hex": "#0A4E7A",
+      "rgb": [
+        10,
+        78,
+        122
+      ],
+      "is_green": false,
+      "baseline_delta_e": 19.82114947850939
+    },
+    {
+      "index": 244,
+      "hex": "#40F23A",
+      "rgb": [
+        64,
+        242,
+        58
+      ],
+      "is_green": true,
+      "baseline_delta_e": 40.16034050748051
+    },
+    {
+      "index": 245,
+      "hex": "#6FEE83",
+      "rgb": [
+        111,
+        238,
+        131
+      ],
+      "is_green": true,
+      "baseline_delta_e": 33.361206713985126
+    },
+    {
+      "index": 246,
+      "hex": "#BC553A",
+      "rgb": [
+        188,
+        85,
+        58
+      ],
+      "is_green": false,
+      "baseline_delta_e": 22.323744488656303
+    },
+    {
+      "index": 247,
+      "hex": "#539F37",
+      "rgb": [
+        83,
+        159,
+        55
+      ],
+      "is_green": true,
+      "baseline_delta_e": 45.27561391669361
+    },
+    {
+      "index": 248,
+      "hex": "#0D9FC0",
+      "rgb": [
+        13,
+        159,
+        192
+      ],
+      "is_green": false,
+      "baseline_delta_e": 35.32967918835985
+    },
+    {
+      "index": 249,
+      "hex": "#CB6526",
+      "rgb": [
+        203,
+        101,
+        38
+      ],
+      "is_green": false,
+      "baseline_delta_e": 22.48341413706704
+    },
+    {
+      "index": 250,
+      "hex": "#7C349A",
+      "rgb": [
+        124,
+        52,
+        154
+      ],
+      "is_green": false,
+      "baseline_delta_e": 20.52259807575066
+    },
+    {
+      "index": 251,
+      "hex": "#3D15B1",
+      "rgb": [
+        61,
+        21,
+        177
+      ],
+      "is_green": false,
+      "baseline_delta_e": 24.732385282287517
+    },
+    {
+      "index": 252,
+      "hex": "#DBBD23",
+      "rgb": [
+        219,
+        189,
+        35
+      ],
+      "is_green": false,
+      "baseline_delta_e": 17.702879785283898
+    },
+    {
+      "index": 253,
+      "hex": "#AE06D7",
+      "rgb": [
+        174,
+        6,
+        215
+      ],
+      "is_green": false,
+      "baseline_delta_e": 40.424142464372345
+    },
+    {
+      "index": 254,
+      "hex": "#FA36DD",
+      "rgb": [
+        250,
+        54,
+        221
+      ],
+      "is_green": false,
+      "baseline_delta_e": 53.871566285464475
+    },
+    {
+      "index": 255,
+      "hex": "#B9EB4E",
+      "rgb": [
+        185,
+        235,
+        78
+      ],
+      "is_green": true,
+      "baseline_delta_e": 22.143915842301833
+    }
+  ],
+  "summary": {
+    "n_total": 256,
+    "n_failed": 0,
+    "n_greens": 213,
+    "mean_delta_e": 29.656075672724803,
+    "max_delta_e": 59.155302015986116,
+    "green_mean_delta_e": 31.042301314836305,
+    "green_max_delta_e": 57.26611290410094
+  }
+}

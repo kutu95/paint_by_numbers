@@ -295,3 +295,11 @@ Prioritize:
 	2.	A clean, fullscreen projection UI with crosshairs, grid, invert, outlines, and registration mode
 Do NOT implement exports, authentication, or databases.
 Keep the code simple, readable, and local-dev friendly. Provide clear run instructions.
+
+⸻
+
+Related documents
+
+- `Docs/commercialisation.md` — subscription pricing, go-to-market, paint library marketplace (planning; not implemented)
+- `Docs/auth-plan.md` — user accounts + project ownership (commercialisation prerequisite)
+- `Docs/founding-member-brief.md` — founding member outreach, survey questions, beta cohort criteria

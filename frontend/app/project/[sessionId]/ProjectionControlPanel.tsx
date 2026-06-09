@@ -8,9 +8,9 @@ import { getProjectBySessionId, removeProject, saveProject, syncProjectsFromServ
 import { SessionResultsContent } from './SessionResultsContent'
 import { ProjectionHUDControls } from './ProjectionHUDControls'
 import { ProjectionToolsPanel } from './ProjectionToolsPanel'
-import { API_BASE_URL } from '@/lib/config'
-
-const PROJECTION_LAYER_KEY = (id: string) => `projection_current_layer_${id}`
+import { projectAssetUrl } from '@/lib/projectAssets'
+import { projectionPopupOpenFeatures } from '@/lib/projectionWindowBounds'
+import { fetchProjectSession, fetchProjectState, saveProjectState } from '@/lib/projectSession'
 
 export type PanelMode = 'layers' | 'projection' | 'all'
 
@@ -20,6 +20,8 @@ export interface ProjectionControlPanelProps {
   embedMode?: boolean
   /** When 'layers': only layers content (no Projection window). When 'projection': only Projection window + HUD. When 'all' or undefined: everything. */
   panelMode?: PanelMode
+  /** Bump after generate in Image tab so this panel reloads session from server. */
+  sessionRevision?: number
   /** When provided (e.g. in embed mode), called after project is deleted instead of navigating */
   onProjectDeleted?: () => void
 }
@@ -28,6 +30,7 @@ export function ProjectionControlPanel({
   sessionId,
   embedMode = false,
   panelMode = 'all',
+  sessionRevision = 0,
   onProjectDeleted,
 }: ProjectionControlPanelProps) {
   const router = useRouter()
@@ -36,8 +39,6 @@ export function ProjectionControlPanel({
   const [currentLayer, setCurrentLayer] = useState(0)
   const [projectName, setProjectName] = useState<string | null>(null)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const [regenerating, setRegenerating] = useState(false)
-
   useEffect(() => {
     if (typeof window === 'undefined' || !sessionId) return
     void (async () => {
@@ -70,47 +71,60 @@ export function ProjectionControlPanel({
   }, [sessionId, sessionData])
 
   useEffect(() => {
-    const stored = localStorage.getItem(`session_${sessionId}`)
-    if (stored) {
-      try {
-        setSessionData(JSON.parse(stored) as SessionData)
-        const layerStored = localStorage.getItem(PROJECTION_LAYER_KEY(sessionId))
-        if (layerStored !== null) {
-          const n = parseInt(layerStored, 10)
-          if (!Number.isNaN(n) && n >= 0) setCurrentLayer(n)
-        }
-      } catch (e) {
-        console.error('Failed to load session data')
+    if (!sessionId) return
+    let cancelled = false
+    setSessionLoaded(false)
+    setSessionData(null)
+    void (async () => {
+      const [session, ui] = await Promise.all([
+        fetchProjectSession(sessionId),
+        fetchProjectState(sessionId),
+      ])
+      if (cancelled) return
+      if (session) {
+        setSessionData(session)
+        const maxIdx = Math.max(0, session.layers.length - 1)
+        const layer = typeof ui.currentLayer === 'number' ? ui.currentLayer : 0
+        setCurrentLayer(Math.min(Math.max(0, layer), maxIdx))
+      } else {
+        setSessionData(null)
+        setCurrentLayer(0)
       }
+      setSessionLoaded(true)
+    })()
+    return () => {
+      cancelled = true
     }
-    setSessionLoaded(true)
-  }, [sessionId])
+  }, [sessionId, sessionRevision])
 
   useEffect(() => {
-    const key = PROJECTION_LAYER_KEY(sessionId)
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === key && e.newValue !== null) {
-        const n = parseInt(e.newValue, 10)
-        if (!Number.isNaN(n)) setCurrentLayer(n)
-      }
-    }
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
-  }, [sessionId])
+    if (!sessionId || !sessionLoaded) return
+    const id = window.setInterval(() => {
+      void fetchProjectState(sessionId).then((ui) => {
+        if (typeof ui.currentLayer === 'number' && ui.currentLayer >= 0) {
+          setCurrentLayer((prev) => (prev === ui.currentLayer ? prev : ui.currentLayer!))
+        }
+      })
+    }, 5000)
+    return () => clearInterval(id)
+  }, [sessionId, sessionLoaded])
+
+  useEffect(() => {
+    if (!sessionId || !sessionLoaded) return
+    void saveProjectState(sessionId, { currentLayer })
+  }, [sessionId, sessionLoaded, currentLayer])
 
   const openProjectionWindow = useCallback(() => {
     if (!sessionId || typeof window === 'undefined') return
     const url = `${window.location.origin}/project/${sessionId}/viewer`
-    window.open(url, 'projection', 'width=1920,height=1080,menubar=no,toolbar=no,location=no,status=no')
+    window.open(url, 'projection', projectionPopupOpenFeatures())
   }, [sessionId])
 
   const handleDeleteProject = useCallback(() => {
     if (!sessionId || typeof window === 'undefined') return
     removeProject(sessionId)
-    localStorage.removeItem(`session_${sessionId}`)
-    localStorage.removeItem(PROJECTION_LAYER_KEY(sessionId))
-    if (localStorage.getItem('current_session_id') === sessionId) {
-      localStorage.removeItem('current_session_id')
+    if (localStorage.getItem('layerpainter_current_session_id') === sessionId) {
+      localStorage.removeItem('layerpainter_current_session_id')
     }
     setShowDeleteConfirm(false)
     if (onProjectDeleted) {
@@ -120,59 +134,14 @@ export function ProjectionControlPanel({
     }
   }, [sessionId, router, onProjectDeleted])
 
-  const handleGenerateOrRegenerate = useCallback(async () => {
+  const openImageTab = useCallback(() => {
     if (!sessionId || typeof window === 'undefined') return
-    const proj = getProjectBySessionId(sessionId)
-    if (!proj) return
-    if (sessionData) {
-      setRegenerating(true)
-      try {
-        const nColors = proj.nColors ?? 16
-        const overpaintMm = proj.overpaintMm ?? 5
-        const orderMode = proj.orderMode ?? 'largest'
-        const maxSide = proj.maxSide ?? 1920
-        const formData = new FormData()
-        formData.append('n_colors', String(nColors))
-        formData.append('overpaint_mm', String(overpaintMm))
-        formData.append('order_mode', orderMode)
-        formData.append('max_side', String(maxSide))
-        formData.append('canvas_width_cm', String(proj.canvasWidthCm))
-        formData.append('canvas_height_cm', String(proj.canvasHeightCm))
-        formData.append('saturation_boost', String(proj.saturationBoost))
-        formData.append('detail_level', String(proj.detailLevel))
-        const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/reprocess`, { method: 'POST', body: formData })
-        if (!response.ok) {
-          const err = await response.json().catch(() => ({}))
-          throw new Error((err as { detail?: string }).detail || `Server error: ${response.status}`)
-        }
-        const data = await response.json() as SessionData & { session_id: string }
-        localStorage.setItem(`session_${sessionId}`, JSON.stringify(data))
-        setSessionData(data)
-        saveProject({
-          ...proj,
-          canvasWidthCm:
-            typeof data.canvas_width_cm === 'number' && data.canvas_width_cm > 0
-              ? data.canvas_width_cm
-              : proj.canvasWidthCm,
-          canvasHeightCm:
-            typeof data.canvas_height_cm === 'number' && data.canvas_height_cm > 0
-              ? data.canvas_height_cm
-              : proj.canvasHeightCm,
-        })
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : 'Regenerate failed'
-        alert(msg)
-      } finally {
-        setRegenerating(false)
-      }
+    if (embedMode && window.top !== window.self) {
+      window.top!.location.href = `/?tab=image&session=${sessionId}`
     } else {
-      if (embedMode && typeof window !== 'undefined' && window.top !== window.self) {
-        window.top!.location.href = `/?tab=image&session=${sessionId}`
-      } else {
-        router.push(`/upload?edit=${sessionId}&returnTo=home`)
-      }
+      router.push(`/upload?edit=${sessionId}&returnTo=home`)
     }
-  }, [sessionId, sessionData, embedMode, router])
+  }, [sessionId, embedMode, router])
 
   if (!sessionLoaded) {
     return (
@@ -198,7 +167,7 @@ export function ProjectionControlPanel({
           </p>
           <button
             type="button"
-            onClick={handleGenerateOrRegenerate}
+            onClick={openImageTab}
             className="px-6 py-3 bg-blue-600 hover:bg-blue-500 rounded font-medium"
           >
             Open Image tab to generate
@@ -271,24 +240,7 @@ export function ProjectionControlPanel({
       )}
 
       {showLayersContent && (
-        <>
-          <div className="bg-gray-800 rounded-lg p-6">
-            <h2 className="text-lg font-semibold mb-4">Generate / Regenerate Layers</h2>
-            <p className="text-gray-400 text-sm mb-4">
-              Regenerate layers with the current project settings (image is stored on the server). To change image or options, use Edit image &amp; settings.
-            </p>
-            <button
-              type="button"
-              onClick={handleGenerateOrRegenerate}
-              disabled={regenerating}
-              className="px-6 py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded font-medium"
-            >
-              {regenerating ? 'Regenerating…' : 'Regenerate Layers'}
-            </button>
-          </div>
-
-          <SessionResultsContent sessionId={sessionId} sessionData={sessionData} />
-        </>
+        <SessionResultsContent sessionId={sessionId} sessionData={sessionData} />
       )}
 
       {showProjectionContent && (
@@ -310,6 +262,47 @@ export function ProjectionControlPanel({
           <ProjectionToolsPanel sessionId={sessionId} />
 
           <ProjectionHUDControls sessionId={sessionId} sessionData={sessionData} />
+
+          {sessionData?.layers && (() => {
+            const layer = sessionData.layers[currentLayer]
+            if (!layer) return null
+            const isGradient = layer.is_gradient ?? false
+            let colorHex = '#000000'
+            let paletteLabel = ''
+            if (isGradient) {
+              colorHex = layer.hex ?? '#808080'
+              const stepNum = ((layer.gradient_step_index ?? 0) >= 0 ? (layer.gradient_step_index ?? 0) + 1 : 0)
+              const src = (layer as { source_palette_indices?: number[] }).source_palette_indices
+              paletteLabel = src?.length === 1 ? `Gradient ${stepNum} (→ Palette ${src[0]})` : src?.length ? `Gradient ${stepNum} (→ ${src.join(', ')})` : `Gradient ${stepNum}`
+            } else {
+              const color = sessionData.palette.find((p) => p.index === layer.palette_index)
+              if (!color) return null
+              colorHex = color.hex
+              paletteLabel = `Palette ${layer.palette_index}`
+            }
+            return (
+              <div className="mt-6 bg-gray-800 rounded-lg p-6">
+                <h2 className="text-xl font-bold mb-3">Current layer</h2>
+                <div className={`flex items-center gap-4 p-3 rounded ${isGradient ? 'bg-purple-900/30 border border-purple-700' : 'bg-gray-700'}`}>
+                  <div className="text-lg font-mono font-semibold w-8">{layer.layer_index + 1}</div>
+                  <div
+                    className="w-12 h-12 rounded border border-gray-600 flex-shrink-0"
+                    style={{ backgroundColor: colorHex }}
+                    title={colorHex}
+                  />
+                  <img
+                    src={projectAssetUrl(
+                      layer.mask_pure_url ?? `/api/projects/${sessionId}/artifacts/layer_${layer.layer_index}_pure_mask.png`,
+                      sessionData.artifacts_version
+                    )}
+                    alt={`Layer ${layer.layer_index + 1}`}
+                    className="w-12 h-12 object-contain bg-gray-600 rounded flex-shrink-0"
+                  />
+                  <div className="text-sm text-gray-300 font-medium">{paletteLabel}</div>
+                </div>
+              </div>
+            )
+          })()}
         </>
       )}
     </div>

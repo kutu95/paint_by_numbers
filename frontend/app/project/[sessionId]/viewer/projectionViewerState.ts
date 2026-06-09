@@ -5,6 +5,8 @@
 
 export type OutlineMode = 'off' | 'thin' | 'thick' | 'glow'
 
+export type MaskDisplayMode = 'white' | 'color' | 'detail'
+
 export interface ProjectionViewerHudState {
   maskOpacity: number
   usePureMask: boolean
@@ -16,9 +18,14 @@ export interface ProjectionViewerHudState {
   showFinalPreview: boolean
   showOriginalImage: boolean
   inverted: boolean
-  showColor: boolean
+  /** K cycles: white on black → palette color → white/grey/black detail map. */
+  maskDisplayMode: MaskDisplayMode
+  /** @deprecated Use maskDisplayMode === 'color' */
+  showColor?: boolean
   blackScreen: boolean
   whiteScreen: boolean
+  /** Layer / palette readout overlay on the projection window (toggle with H). */
+  showHudOverlay: boolean
 }
 
 export const DEFAULT_HUD_STATE: ProjectionViewerHudState = {
@@ -32,9 +39,10 @@ export const DEFAULT_HUD_STATE: ProjectionViewerHudState = {
   showFinalPreview: false,
   showOriginalImage: false,
   inverted: false,
-  showColor: false,
+  maskDisplayMode: 'white',
   blackScreen: false,
   whiteScreen: false,
+  showHudOverlay: false,
 }
 
 const KEY_PREFIX = 'projection_viewer_hud_'
@@ -49,7 +57,11 @@ export function loadViewerHudState(sessionId: string): ProjectionViewerHudState 
     const raw = localStorage.getItem(getViewerHudKey(sessionId))
     if (!raw) return DEFAULT_HUD_STATE
     const parsed = JSON.parse(raw) as Partial<ProjectionViewerHudState>
-    return { ...DEFAULT_HUD_STATE, ...parsed }
+    const merged = { ...DEFAULT_HUD_STATE, ...parsed }
+    if (!parsed.maskDisplayMode && parsed.showColor === true) {
+      merged.maskDisplayMode = 'color'
+    }
+    return merged
   } catch {
     return DEFAULT_HUD_STATE
   }

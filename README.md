@@ -126,15 +126,15 @@ Paint by Numbers/
 │   │           └── page.tsx # Projection viewer
 │   └── components/
 ├── data/
-│   ├── sessions/            # Generated session files
-│   └── paint/               # Paint library & calibrations
+│   ├── projects/            # Project bundles (manifest, source image, artifacts, state)
+│   └── paint/               # Paint library & calibrations (shared across projects)
 └── README.md
 ```
 
 ## Notes
 
-- Sessions are stored in `./data/sessions/{session_id}/`
-- Sessions older than 24 hours are automatically cleaned up
+- Each project is stored in `./data/projects/{project_id}/` (settings, source image, generated layers, UI state)
+- Paint libraries remain in `./data/paint/` and are shared across projects
 - No authentication or database required
 - All processing is done server-side
 - Layers are served as PNG images from the backend

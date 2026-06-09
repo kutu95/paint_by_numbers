@@ -1,15 +1,158 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import Link from 'next/link'
 import { API_BASE_URL } from '@/lib/config'
-import { saveProject, getProjectBySessionId, removeProject, syncProjectsFromServer } from '@/lib/projects'
+import { projectAssetUrl } from '@/lib/projectAssets'
+import { fetchProjectInfo, fetchProjectSession } from '@/lib/projectSession'
+import {
+  saveProject,
+  getProjectBySessionId,
+  removeProject,
+  syncProjectsFromServer,
+  resolveProjectLibraryGroup,
+  type Project,
+} from '@/lib/projects'
+import { canvasCmForImageOrientation } from '@/lib/canvasOrientation'
+import {
+  IMAGE_STYLE_PRESETS,
+  normalizeStylePreset,
+  presetShowsSimplifyControls,
+  presetShowsFigureDetailControls,
+  presetUsesLegacyEasyPainting,
+  presetForcesFigureDetail,
+  type ImageStylePreset,
+} from '@/lib/imageStylePresets'
+import { PriorityRegionEditor } from '@/components/PriorityRegionEditor'
 
 interface PaletteColor {
   index: number
   hex: string
   coverage: number
+  skin?: boolean
+  must_include?: boolean
+  rgb?: number[]
+}
+
+function normalizeMustIncludeHexList(colors: unknown): string[] {
+  if (!Array.isArray(colors)) return []
+  return colors
+    .map((c) => {
+      const s = String(c).trim().toUpperCase()
+      return s.startsWith('#') ? s : `#${s}`
+    })
+    .filter((h) => /^#[0-9A-F]{6}$/.test(h))
+}
+
+function mustIncludeColorsFromPalette(
+  palette: Array<{ hex?: string; must_include?: boolean }> | undefined
+): string[] {
+  if (!Array.isArray(palette)) return []
+  return normalizeMustIncludeHexList(
+    palette.filter((c) => c.must_include && c.hex).map((c) => c.hex as string)
+  )
+}
+
+function isMustIncludeSwatch(color: PaletteColor, mustIncludeSet: ReadonlySet<string>): boolean {
+  if (color.must_include) return true
+  const hex = color.hex.trim().toUpperCase()
+  return mustIncludeSet.has(hex.startsWith('#') ? hex : `#${hex}`)
+}
+
+function hexToRgbTuple(hex: string): [number, number, number] {
+  const h = hex.replace('#', '')
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]
+}
+
+/** Force must-include picks to appear as exact swatches in the palette strip. */
+function mergeMustIncludeIntoPalette(
+  palette: PaletteColor[],
+  mustIncludeColors: string[]
+): PaletteColor[] {
+  const mustList = normalizeMustIncludeHexList(mustIncludeColors)
+  if (mustList.length === 0) return palette
+  const result = palette.map((c) => ({ ...c }))
+  for (let i = 0; i < mustList.length; i++) {
+    const hex = mustList[i]
+    const matchIdx = result.findIndex((c) => c.hex.trim().toUpperCase() === hex)
+    const slotIdx = matchIdx >= 0 ? matchIdx : i < result.length ? i : -1
+    if (slotIdx < 0) continue
+    const rgb = hexToRgbTuple(hex)
+    result[slotIdx] = {
+      ...result[slotIdx],
+      hex,
+      must_include: true,
+      rgb,
+    }
+  }
+  return result
+}
+
+function PreviewPaletteSwatch({
+  color,
+  mustIncludeSet,
+}: {
+  color: PaletteColor
+  mustIncludeSet: ReadonlySet<string>
+}) {
+  const isMustInclude = isMustIncludeSwatch(color, mustIncludeSet)
+  const ring = isMustInclude
+    ? 'ring-2 ring-violet-400 rounded'
+    : color.skin
+      ? 'ring-2 ring-amber-400 rounded'
+      : ''
+  const hex = color.hex.toUpperCase()
+  const label = isMustInclude
+    ? `Must include ${color.index}, ${hex}, ${color.coverage.toFixed(1)}% coverage`
+    : color.skin
+      ? `Skin tone ${color.index}, ${hex}, ${color.coverage.toFixed(1)}% coverage`
+      : `Colour ${color.index}, ${hex}, ${color.coverage.toFixed(1)}% coverage`
+
+  return (
+    <div className={`relative min-w-0 group ${ring}`}>
+      <div
+        className="w-full aspect-square rounded border border-gray-600 cursor-default"
+        style={{ backgroundColor: color.hex }}
+        aria-label={label}
+      />
+      <div
+        className="absolute bottom-[calc(100%+8px)] left-1/2 -translate-x-1/2 z-50 pointer-events-none opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 transition-[opacity,transform] duration-150"
+        role="tooltip"
+      >
+        <div className="rounded-lg border border-gray-500 bg-gray-900 shadow-xl p-2.5 flex flex-col items-center gap-2">
+          <div
+            className="w-16 h-16 rounded-md border-2 border-gray-500 shadow-inner"
+            style={{ backgroundColor: color.hex }}
+          />
+          <p className="font-mono text-sm text-gray-100 whitespace-nowrap">{hex}</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function PreviewPaletteSwatches({
+  palette,
+  mustIncludeColors = [],
+}: {
+  palette: PaletteColor[]
+  mustIncludeColors?: string[]
+}) {
+  const mustIncludeSet = useMemo(
+    () => new Set(normalizeMustIncludeHexList(mustIncludeColors)),
+    [mustIncludeColors]
+  )
+  const sorted = useMemo(
+    () => [...palette].sort((a, b) => a.index - b.index),
+    [palette]
+  )
+  return (
+    <div className="grid w-full gap-1.5 grid-cols-[repeat(auto-fill,minmax(1.75rem,1fr))] overflow-visible">
+      {sorted.map((color) => (
+        <PreviewPaletteSwatch key={color.index} color={color} mustIncludeSet={mustIncludeSet} />
+      ))}
+    </div>
+  )
 }
 
 interface Layer {
@@ -51,8 +194,11 @@ interface SessionResponse {
   order: number[]
   quantized_preview_url: string
   original_url?: string
+  artifacts_version?: number
   layers: Layer[]
   gradient_regions?: GradientRegion[]
+  canvas_width_cm?: number
+  canvas_height_cm?: number
 }
 
 interface OptimizedPaletteRecipe {
@@ -94,6 +240,7 @@ interface PaletteOptimizationResult {
 export default function Home() {
   const [image, setImage] = useState<File | null>(null)
   const [preview, setPreview] = useState<string | null>(null)
+  const [uploadObjectUrl, setUploadObjectUrl] = useState<string | null>(null)
   
   // Always use default values for initial state to prevent hydration mismatches
   // Load from localStorage in useEffect after mount
@@ -105,13 +252,32 @@ export default function Home() {
   const [canvasHeightCm, setCanvasHeightCm] = useState(40)
   const [saturationBoost, setSaturationBoost] = useState(1.0)
   const [detailLevel, setDetailLevel] = useState(0.5)
-  const [enableGradients, setEnableGradients] = useState(false)
-  const [gradientStepsN, setGradientStepsN] = useState(9)
-  const [gradientTransitionMode, setGradientTransitionMode] = useState<'off' | 'dither' | 'feather-preview'>('dither')
-  const [gradientTransitionWidth, setGradientTransitionWidth] = useState(25)
-  const [enableGlaze, setEnableGlaze] = useState(false)
+  const [favorSkinTones, setFavorSkinTones] = useState(true)
+  const [skinToneStrength, setSkinToneStrength] = useState(0.65)
+  const [stylePreset, setStylePreset] = useState<ImageStylePreset>('none')
+  const [easyPainting, setEasyPainting] = useState(false)
+  const [easySimplify, setEasySimplify] = useState(0.65)
+  const [easyFaceDetail, setEasyFaceDetail] = useState(false)
+  const [detailEyes, setDetailEyes] = useState(true)
+  const [detailFace, setDetailFace] = useState(true)
+  const [detailBodyOutline, setDetailBodyOutline] = useState(false)
+  const [priorityRegionMaskBlob, setPriorityRegionMaskBlob] = useState<Blob | null>(null)
+  const [priorityRegionMaskVersion, setPriorityRegionMaskVersion] = useState(0)
+  const [priorityRegionCleared, setPriorityRegionCleared] = useState(false)
+  const [priorityRegionStrength, setPriorityRegionStrength] = useState(0.7)
+  const [priorityBrushSize, setPriorityBrushSize] = useState(28)
+  const [mustIncludeColors, setMustIncludeColors] = useState<string[]>([])
+  const mustIncludeKey = mustIncludeColors.join('|')
+  const [editPriorityRegionUrl, setEditPriorityRegionUrl] = useState<string | null>(null)
+  const [stylePreviewUrl, setStylePreviewUrl] = useState<string | null>(null)
+  const [stylePreviewPalette, setStylePreviewPalette] = useState<PaletteColor[] | null>(null)
+  const [stylePreviewLoading, setStylePreviewLoading] = useState(false)
+  const [stylePreviewError, setStylePreviewError] = useState<string | null>(null)
+  const stylePreviewObjectUrlRef = useRef<string | null>(null)
   const [processing, setProcessing] = useState(false)
   const [optimizingPalette, setOptimizingPalette] = useState(false)
+  const [paletteOptimizeStatus, setPaletteOptimizeStatus] = useState<string | null>(null)
+  const paletteOptimizeAbortRef = useRef<AbortController | null>(null)
   const [targetErrorDeltaE, setTargetErrorDeltaE] = useState(5)
   const [maxPaletteSize, setMaxPaletteSize] = useState(16)
   const [preferSimplerMixes, setPreferSimplerMixes] = useState(false)
@@ -132,12 +298,87 @@ export default function Home() {
   const [mounted, setMounted] = useState(false)
   const [projectName, setProjectName] = useState('')
   const [editSessionOriginalUrl, setEditSessionOriginalUrl] = useState<string | null>(null)
+
+  const appendPriorityRegionToForm = (formData: FormData) => {
+    formData.append('priority_region_strength', priorityRegionStrength.toString())
+    if (priorityRegionMaskBlob) {
+      formData.append('priority_region_mask', priorityRegionMaskBlob, 'priority_region.png')
+      formData.append('clear_priority_region', 'false')
+    } else if (priorityRegionCleared) {
+      formData.append('clear_priority_region', 'true')
+    }
+    formData.append('must_include_colors', JSON.stringify(mustIncludeColors))
+  }
+  const [editArtifactsVersion, setEditArtifactsVersion] = useState<number | null>(null)
+  /** Server still has input.jpg (etc.) — can reprocess without picking a new file. */
+  const [editSessionCanReprocess, setEditSessionCanReprocess] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const settingsHydratedRef = useRef(false)
+  const favorSkinTonesTouchedRef = useRef(false)
+  const [projectSettingsHydrated, setProjectSettingsHydrated] = useState(false)
   const router = useRouter()
   const searchParams = useSearchParams()
   const isNewProject = searchParams.get('new') === '1'
   const editSessionId = searchParams.get('edit')
+
+  const persistProjectImageSettings = useCallback(
+    async (
+      patch: Partial<Pick<Project, 'favorSkinTones' | 'skinToneStrength' | 'mustIncludeColors'>>
+    ) => {
+      if (!editSessionId) return
+      const existing = getProjectBySessionId(editSessionId)
+      if (!existing) return
+      await saveProject({ ...existing, ...patch }, { awaitServer: true })
+    },
+    [editSessionId]
+  )
+
+  const updateMustIncludeColors = useCallback(
+    (colors: string[]) => {
+      const normalized = normalizeMustIncludeHexList(colors)
+      setMustIncludeColors(normalized)
+      if (editSessionId) {
+        void persistProjectImageSettings({
+          mustIncludeColors: normalized,
+          favorSkinTones,
+          skinToneStrength,
+        })
+      }
+    },
+    [editSessionId, favorSkinTones, skinToneStrength, persistProjectImageSettings]
+  )
+
+  useEffect(() => {
+    if (!image) {
+      setUploadObjectUrl(null)
+      return
+    }
+    const url = URL.createObjectURL(image)
+    setUploadObjectUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [image])
+
+  const originalImageSrc = useMemo(() => {
+    if (preview) return preview
+    if (uploadObjectUrl) return uploadObjectUrl
+    if (editSessionOriginalUrl) {
+      return projectAssetUrl(
+        editSessionOriginalUrl,
+        sessionData?.artifacts_version ?? editArtifactsVersion
+      )
+    }
+    return null
+  }, [preview, uploadObjectUrl, editSessionOriginalUrl, sessionData?.artifacts_version, editArtifactsVersion])
+
+  const canShowImageComparison = Boolean(
+    originalImageSrc || image || (editSessionId && editSessionCanReprocess)
+  )
   const returnToHome = searchParams.get('returnTo') === 'home'
+
+  useEffect(() => {
+    const max = Math.max(0, nColors - 1)
+    setMustIncludeColors((prev) => (prev.length > max ? prev.slice(0, max) : prev))
+  }, [nColors])
 
   // Helper function to convert hex to RGB object for modal display
   const hexToRgbObject = (hex: string) => {
@@ -155,81 +396,80 @@ export default function Home() {
     const file = e.target.files?.[0]
     if (file) {
       setImage(file)
-      const reader = new FileReader()
-      reader.onload = (event) => {
-        const originalDataUrl = event.target?.result as string
-        
-        // Compress image before saving to localStorage to avoid quota errors,
-        // and always rotate portrait images to landscape for preview.
-        const img = new Image()
-        img.onload = () => {
-          const maxWidth = 800 // Max width for compressed preview
-          const maxHeight = 600 // Max height for compressed preview
-          const isPortrait = img.height > img.width
-          
-          // Determine canvas size based on orientation, ensuring final preview is landscape
-          let canvasWidth: number
-          let canvasHeight: number
-          if (isPortrait) {
-            const ratio = Math.min(maxWidth / img.height, maxHeight / img.width, 1)
-            canvasWidth = img.height * ratio
-            canvasHeight = img.width * ratio
-          } else {
-            const ratio = Math.min(maxWidth / img.width, maxHeight / img.height, 1)
-            canvasWidth = img.width * ratio
-            canvasHeight = img.height * ratio
-          }
-          
-          const canvas = document.createElement('canvas')
-          canvas.width = canvasWidth
-          canvas.height = canvasHeight
-          const ctx = canvas.getContext('2d')
-          
-          if (ctx) {
-            if (isPortrait) {
-              // Rotate 90 degrees counter-clockwise around canvas center
-              ctx.save()
-              ctx.translate(canvasWidth / 2, canvasHeight / 2)
-              ctx.rotate(-Math.PI / 2)
-              const scale = Math.min(canvasWidth / img.height, canvasHeight / img.width)
-              const drawWidth = img.width * scale
-              const drawHeight = img.height * scale
-              ctx.drawImage(img, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight)
-              ctx.restore()
-            } else {
-              ctx.drawImage(img, 0, 0, canvasWidth, canvasHeight)
-            }
-            
-            // Convert to compressed JPEG (quality 0.7)
-            const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.7)
-            setPreview(compressedDataUrl)
-            
-            // Try to save compressed preview to localStorage
+      setMustIncludeColors([])
+
+      const finishImageLoad = (imgW: number, imgH: number, drawToPreview: (ctx: CanvasRenderingContext2D, cw: number, ch: number) => void) => {
+        const nextCanvas = canvasCmForImageOrientation(imgW, imgH, canvasWidthCm, canvasHeightCm)
+        if (nextCanvas.widthCm !== canvasWidthCm || nextCanvas.heightCm !== canvasHeightCm) {
+          setCanvasWidthCm(nextCanvas.widthCm)
+          setCanvasHeightCm(nextCanvas.heightCm)
+        }
+
+        const maxWidth = 800
+        const maxHeight = 600
+        const ratio = Math.min(maxWidth / imgW, maxHeight / imgH, 1)
+        const canvasWidth = imgW * ratio
+        const canvasHeight = imgH * ratio
+
+        const canvas = document.createElement('canvas')
+        canvas.width = canvasWidth
+        canvas.height = canvasHeight
+        const ctx = canvas.getContext('2d')
+        if (ctx) {
+          drawToPreview(ctx, canvasWidth, canvasHeight)
+          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.7)
+          setPreview(compressedDataUrl)
+          try {
+            localStorage.setItem('current_image_preview', compressedDataUrl)
+            localStorage.setItem('current_image_name', file.name)
+          } catch {
+            console.warn('Image too large for localStorage, preview will not persist across navigation')
             try {
-              localStorage.setItem('current_image_preview', compressedDataUrl)
-              localStorage.setItem('current_image_name', file.name)
-            } catch (err) {
-              // If still too large, just don't save it
-              console.warn('Image too large for localStorage, preview will not persist across navigation')
-              // Remove any existing preview to free up space
-              try {
-                localStorage.removeItem('current_image_preview')
-                localStorage.removeItem('current_image_name')
-              } catch (removeErr) {
-                // Ignore removal errors
-              }
+              localStorage.removeItem('current_image_preview')
+              localStorage.removeItem('current_image_name')
+            } catch {
+              /* ignore */
             }
           }
         }
-        img.src = originalDataUrl
       }
-      reader.readAsDataURL(file)
+
+      if (typeof createImageBitmap !== 'undefined') {
+        void createImageBitmap(file, { imageOrientation: 'from-image' as ImageOrientation })
+          .then((bitmap) => {
+            finishImageLoad(bitmap.width, bitmap.height, (ctx, cw, ch) => {
+              ctx.drawImage(bitmap, 0, 0, cw, ch)
+              bitmap.close()
+            })
+          })
+          .catch(() => {
+            loadViaDataUrl()
+          })
+      } else {
+        loadViaDataUrl()
+      }
+
+      function loadViaDataUrl() {
+        const reader = new FileReader()
+        reader.onload = (event) => {
+          const originalDataUrl = event.target?.result as string
+          const img = new Image()
+          img.onload = () => {
+            finishImageLoad(img.width, img.height, (ctx, cw, ch) => {
+              ctx.drawImage(img, 0, 0, cw, ch)
+            })
+          }
+          img.src = originalDataUrl
+        }
+        reader.readAsDataURL(file)
+      }
     }
   }
 
-  // Save settings to localStorage whenever they change
+  // Save settings to localStorage whenever they change (not while editing a project — project manifest is source of truth).
   useEffect(() => {
-    if (typeof window === 'undefined') return
+    if (typeof window === 'undefined' || !settingsHydratedRef.current) return
+    if (editSessionId) return
     try {
       const settings = {
         nColors,
@@ -240,23 +480,33 @@ export default function Home() {
         canvasHeightCm,
         saturationBoost,
         detailLevel,
-        enableGradients,
-        gradientStepsN,
-        gradientTransitionMode,
-        gradientTransitionWidth,
-        enableGlaze,
+        favorSkinTones,
+        skinToneStrength,
+        stylePreset,
+        easyPainting,
+        easySimplify,
+        easyFaceDetail,
+        detailEyes,
+        detailFace,
+        detailBodyOutline,
+        mustIncludeColors,
       }
       localStorage.setItem('layerpainter_settings', JSON.stringify(settings))
     } catch (e) {
       console.error('Failed to save settings to localStorage:', e)
     }
-  }, [nColors, overpaintMm, orderMode, maxSide, canvasWidthCm, canvasHeightCm, saturationBoost, detailLevel, enableGradients, gradientStepsN, gradientTransitionMode, gradientTransitionWidth, enableGlaze])
+  }, [nColors, overpaintMm, orderMode, maxSide, canvasWidthCm, canvasHeightCm, saturationBoost, detailLevel, favorSkinTones, skinToneStrength, stylePreset, easyPainting, easySimplify, easyFaceDetail, detailEyes, detailFace, detailBodyOutline, mustIncludeKey, editSessionId])
 
   // Set mounted flag and load settings from localStorage after component mounts (client-side only)
   useEffect(() => {
     setMounted(true)
-    
-    // Load settings from localStorage after mount to prevent hydration mismatches
+
+    // When editing a project, image settings come from the project manifest (see edit effect below).
+    if (searchParams.get('edit')) {
+      settingsHydratedRef.current = true
+      return
+    }
+
     if (typeof window !== 'undefined') {
       try {
         const saved = localStorage.getItem('layerpainter_settings')
@@ -270,17 +520,29 @@ export default function Home() {
           if (typeof parsed.canvasHeightCm === 'number' && parsed.canvasHeightCm >= 0) setCanvasHeightCm(parsed.canvasHeightCm)
           if (parsed.saturationBoost !== undefined) setSaturationBoost(parsed.saturationBoost)
           if (parsed.detailLevel !== undefined) setDetailLevel(parsed.detailLevel)
-          if (parsed.enableGradients !== undefined) setEnableGradients(parsed.enableGradients)
-          if (parsed.gradientStepsN !== undefined) setGradientStepsN(parsed.gradientStepsN)
-          if (parsed.gradientTransitionMode !== undefined) setGradientTransitionMode(parsed.gradientTransitionMode)
-          if (parsed.gradientTransitionWidth !== undefined) setGradientTransitionWidth(parsed.gradientTransitionWidth)
-          if (parsed.enableGlaze !== undefined) setEnableGlaze(parsed.enableGlaze)
+          if (parsed.favorSkinTones !== undefined) setFavorSkinTones(!!parsed.favorSkinTones)
+          if (typeof parsed.skinToneStrength === 'number') setSkinToneStrength(parsed.skinToneStrength)
+          if (typeof parsed.stylePreset === 'string') {
+            setStylePreset(normalizeStylePreset(parsed.stylePreset))
+          } else if (parsed.easyPainting) {
+            setStylePreset('none')
+          }
+          if (parsed.easyPainting !== undefined) setEasyPainting(!!parsed.easyPainting)
+          if (typeof parsed.easySimplify === 'number') setEasySimplify(parsed.easySimplify)
+          if (parsed.easyFaceDetail !== undefined) setEasyFaceDetail(parsed.easyFaceDetail)
+          if (parsed.detailEyes !== undefined) setDetailEyes(parsed.detailEyes)
+          if (parsed.detailFace !== undefined) setDetailFace(parsed.detailFace)
+          if (parsed.detailBodyOutline !== undefined) setDetailBodyOutline(parsed.detailBodyOutline)
+          if (Array.isArray(parsed.mustIncludeColors)) {
+            setMustIncludeColors(normalizeMustIncludeHexList(parsed.mustIncludeColors))
+          }
         }
       } catch (e) {
         console.error('Failed to load settings from localStorage:', e)
       }
     }
-  }, [])
+    settingsHydratedRef.current = true
+  }, [searchParams])
 
   // Handle ESC key to close modals
   useEffect(() => {
@@ -341,39 +603,273 @@ export default function Home() {
   }, [searchParams])
 
   // When editing a project (?edit=sessionId), pre-fill form from stored project and session.
-  // Also restore sessionData from localStorage so that after generating and switching tabs, returning shows results + original image.
+  // Restore saved layers from localStorage (iframe remount / switching back to Image tab skips the generic restore effect when ?edit= is set).
+  // Hydrate original_url from localStorage and/or server so Image tab + projection G key always have a full-colour original when the file exists.
   useEffect(() => {
     if (!editSessionId || typeof window === 'undefined') return
+    favorSkinTonesTouchedRef.current = false
+    setProjectSettingsHydrated(false)
+    let cancelled = false
     void (async () => {
-      await syncProjectsFromServer()
+      const [_, info, session] = await Promise.all([
+        syncProjectsFromServer(),
+        fetchProjectInfo(editSessionId),
+        fetchProjectSession(editSessionId),
+      ])
+      if (cancelled) return
       const p = getProjectBySessionId(editSessionId)
+      if (!favorSkinTonesTouchedRef.current) {
+        if (typeof info?.favor_skin_tones === 'boolean') {
+          setFavorSkinTones(info.favor_skin_tones)
+        } else if (p?.favorSkinTones !== undefined) {
+          setFavorSkinTones(!!p.favorSkinTones)
+        }
+      }
+      if (typeof info?.skin_tone_strength === 'number') {
+        setSkinToneStrength(info.skin_tone_strength)
+      } else if (typeof p?.skinToneStrength === 'number') {
+        setSkinToneStrength(p.skinToneStrength)
+      }
       if (p) {
         setProjectName(p.name)
         setCanvasWidthCm(p.canvasWidthCm)
         setCanvasHeightCm(p.canvasHeightCm)
         setSaturationBoost(p.saturationBoost)
         setDetailLevel(p.detailLevel)
-        setSelectedLibraryGroup(p.libraryGroup)
+        if (typeof p.stylePreset === 'string') {
+          setStylePreset(normalizeStylePreset(p.stylePreset))
+        } else if (p.easyPainting) {
+          setStylePreset('none')
+        }
+        if (p.easyPainting !== undefined) setEasyPainting(!!p.easyPainting)
+        if (typeof p.easySimplify === 'number') setEasySimplify(p.easySimplify)
+        if (p.easyFaceDetail !== undefined) setEasyFaceDetail(p.easyFaceDetail)
+        if (p.detailEyes !== undefined) setDetailEyes(p.detailEyes)
+        if (p.detailFace !== undefined) setDetailFace(p.detailFace)
+        if (p.detailBodyOutline !== undefined) setDetailBodyOutline(p.detailBodyOutline)
+        if (typeof p.priorityRegionStrength === 'number') setPriorityRegionStrength(p.priorityRegionStrength)
+      }
+      const mustIncludeFromManifest = Array.isArray(info?.must_include_colors)
+        ? normalizeMustIncludeHexList(info.must_include_colors)
+        : normalizeMustIncludeHexList(p?.mustIncludeColors)
+      let mustInclude = mustIncludeFromManifest
+      if (mustInclude.length === 0) {
+        mustInclude = mustIncludeColorsFromPalette(session?.palette)
+      }
+      setMustIncludeColors(mustInclude)
+      if (mustInclude.length > 0 && mustIncludeFromManifest.length === 0) {
+        const existing = getProjectBySessionId(editSessionId)
+        if (existing) {
+          void saveProject({ ...existing, mustIncludeColors: mustInclude }, { awaitServer: true })
+        }
+      }
+      if (!cancelled) {
+        setProjectSettingsHydrated(true)
       }
     })()
-    const savedSession = localStorage.getItem(`session_${editSessionId}`)
-    if (savedSession) {
-      try {
-        const parsed = JSON.parse(savedSession) as { original_url?: string }
-        setEditSessionOriginalUrl(parsed.original_url ?? null)
-      } catch {
-        setEditSessionOriginalUrl(null)
+
+    setEditSessionCanReprocess(false)
+    void (async () => {
+      const [info, session] = await Promise.all([
+        fetchProjectInfo(editSessionId),
+        fetchProjectSession(editSessionId),
+      ])
+      if (cancelled) return
+      const p = getProjectBySessionId(editSessionId)
+      if (info) {
+        setEditSessionCanReprocess(Boolean(info.has_stored_image))
+        if (info.original_url) setEditSessionOriginalUrl(info.original_url)
+        if (info.priority_region_url) {
+          setEditPriorityRegionUrl(projectAssetUrl(info.priority_region_url))
+        } else {
+          setEditPriorityRegionUrl(null)
+        }
       }
-    } else {
-      setEditSessionOriginalUrl(null)
-      fetch(`${API_BASE_URL}/api/sessions/${editSessionId}/info`)
-        .then((res) => (res.ok ? res.json() : null))
-        .then((info: { original_url?: string; has_stored_image?: boolean } | null) => {
-          if (info?.original_url && info?.has_stored_image) setEditSessionOriginalUrl(info.original_url)
-        })
-        .catch(() => {})
+      if (session && Array.isArray(session.layers) && session.layers.length > 0) {
+        setSessionData(session as SessionResponse)
+        if (session.original_url) setEditSessionOriginalUrl(session.original_url)
+        if (typeof session.artifacts_version === 'number') {
+          setEditArtifactsVersion(session.artifacts_version)
+        }
+        if (typeof session.width === 'number' && typeof session.height === 'number') {
+          const next = canvasCmForImageOrientation(
+            session.width,
+            session.height,
+            p?.canvasWidthCm ?? canvasWidthCm,
+            p?.canvasHeightCm ?? canvasHeightCm
+          )
+          setCanvasWidthCm(next.widthCm)
+          setCanvasHeightCm(next.heightCm)
+        }
+      } else if (info?.original_url) {
+        const img = new Image()
+        img.onload = () => {
+          const next = canvasCmForImageOrientation(
+            img.width,
+            img.height,
+            p?.canvasWidthCm ?? canvasWidthCm,
+            p?.canvasHeightCm ?? canvasHeightCm
+          )
+          setCanvasWidthCm(next.widthCm)
+          setCanvasHeightCm(next.heightCm)
+        }
+        img.src = `${API_BASE_URL}${info.original_url}`
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      setProjectSettingsHydrated(false)
     }
   }, [editSessionId])
+
+  // Persist slider / must-include changes after hydration (checkbox saves immediately on change).
+  useEffect(() => {
+    if (!editSessionId || !projectSettingsHydrated) return
+    const timer = window.setTimeout(() => {
+      void persistProjectImageSettings({ skinToneStrength })
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [editSessionId, projectSettingsHydrated, skinToneStrength, persistProjectImageSettings])
+
+  // Reflect must-include picks in the palette strip immediately (preview request may still be in flight).
+  useEffect(() => {
+    setStylePreviewPalette((prev) =>
+      prev && mustIncludeColors.length > 0
+        ? mergeMustIncludeIntoPalette(prev, mustIncludeColors)
+        : prev
+    )
+  }, [mustIncludeKey, mustIncludeColors.length])
+
+  useEffect(() => {
+    const canPreview = Boolean(image) || Boolean(editSessionId && editSessionCanReprocess)
+    if (!canPreview) {
+      if (stylePreviewObjectUrlRef.current) {
+        URL.revokeObjectURL(stylePreviewObjectUrlRef.current)
+        stylePreviewObjectUrlRef.current = null
+      }
+      setStylePreviewUrl(null)
+      setStylePreviewPalette(null)
+      setStylePreviewError('Upload an image (or use a project with a stored image) to preview.')
+      setStylePreviewLoading(false)
+      return
+    }
+
+    const controller = new AbortController()
+    const debounceMs = mustIncludeColors.length > 0 ? 180 : 650
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setStylePreviewLoading(true)
+        setStylePreviewError(null)
+        try {
+          const formData = new FormData()
+          if (image) {
+            formData.append('image', image)
+          } else if (editSessionId) {
+            formData.append('project_id', editSessionId)
+          }
+          formData.append('n_colors', nColors.toString())
+          formData.append('max_side', maxSide.toString())
+          formData.append('saturation_boost', saturationBoost.toString())
+          formData.append('style_preset', stylePreset)
+          formData.append('easy_painting', easyPainting ? 'true' : 'false')
+          formData.append('easy_simplify', easySimplify.toString())
+          formData.append('easy_face_detail', easyFaceDetail ? 'true' : 'false')
+          formData.append('detail_eyes', detailEyes ? 'true' : 'false')
+          formData.append('detail_face', detailFace ? 'true' : 'false')
+          formData.append('detail_body_outline', detailBodyOutline ? 'true' : 'false')
+          formData.append('favor_skin_tones', favorSkinTones ? 'true' : 'false')
+          formData.append('skin_tone_strength', skinToneStrength.toString())
+          formData.append('include_palette', 'true')
+          formData.append('detail_level', detailLevel.toString())
+          formData.append('priority_region_strength', priorityRegionStrength.toString())
+          if (priorityRegionMaskBlob) {
+            formData.append('priority_region_mask', priorityRegionMaskBlob, 'priority_region.png')
+            formData.append('clear_priority_region', 'false')
+          } else if (priorityRegionCleared) {
+            formData.append('clear_priority_region', 'true')
+          }
+          formData.append('must_include_colors', JSON.stringify(mustIncludeColors))
+          const response = await fetch(`${API_BASE_URL}/api/preview/quantize`, {
+            method: 'POST',
+            body: formData,
+            signal: controller.signal,
+          })
+          if (!response.ok) {
+            let detail = `HTTP ${response.status}`
+            try {
+              const err = await response.json()
+              detail = (err as { detail?: string }).detail || detail
+            } catch {
+              detail = (await response.text()) || detail
+            }
+            throw new Error(detail)
+          }
+          const data = (await response.json()) as {
+            jpeg_base64: string
+            palette: PaletteColor[]
+          }
+          const binary = atob(data.jpeg_base64)
+          const bytes = new Uint8Array(binary.length)
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+          const blob = new Blob([bytes], { type: 'image/jpeg' })
+          const url = URL.createObjectURL(blob)
+          if (stylePreviewObjectUrlRef.current) {
+            URL.revokeObjectURL(stylePreviewObjectUrlRef.current)
+          }
+          stylePreviewObjectUrlRef.current = url
+          setStylePreviewUrl(url)
+          setStylePreviewPalette(
+            Array.isArray(data.palette)
+              ? mergeMustIncludeIntoPalette(data.palette, mustIncludeColors)
+              : null
+          )
+        } catch (e) {
+          if (controller.signal.aborted) return
+          setStylePreviewUrl(null)
+          setStylePreviewPalette(null)
+          setStylePreviewError(e instanceof Error ? e.message : 'Preview failed')
+        } finally {
+          if (!controller.signal.aborted) setStylePreviewLoading(false)
+        }
+      })()
+    }, debounceMs)
+
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [
+    stylePreset,
+    easyPainting,
+    easySimplify,
+    easyFaceDetail,
+    detailEyes,
+    detailFace,
+    detailBodyOutline,
+    image,
+    editSessionId,
+    editSessionCanReprocess,
+    nColors,
+    maxSide,
+    saturationBoost,
+    favorSkinTones,
+    skinToneStrength,
+    priorityRegionMaskVersion,
+    priorityRegionStrength,
+    priorityRegionCleared,
+    priorityRegionMaskBlob,
+    mustIncludeKey,
+    detailLevel,
+  ])
+
+  useEffect(() => {
+    return () => {
+      if (stylePreviewObjectUrlRef.current) {
+        URL.revokeObjectURL(stylePreviewObjectUrlRef.current)
+      }
+    }
+  }, [])
 
   // Restore manual order when sessionData is restored and orderMode is manual
   useEffect(() => {
@@ -383,49 +879,54 @@ export default function Home() {
   }, [sessionData, orderMode])
 
   const handleGenerate = async () => {
-    const useStoredImage = editSessionId && !image && editSessionOriginalUrl
+    const useStoredImage = Boolean(editSessionId && !image && editSessionCanReprocess)
     if (!image && !useStoredImage) {
       if (preview) {
         alert('Please re-select the image file to generate layers. The preview is shown but the file needs to be selected again.')
       } else if (editSessionId) {
-        alert('No image selected and no stored image found for this project. Upload a new image or open the project from the same browser where it was created.')
+        alert('No image selected and no stored upload found for this project on the server. Upload a new image or open the project from the same browser where it was created.')
       }
       return
     }
 
     setProcessing(true)
+    const libraryGroup = resolveProjectLibraryGroup(editSessionId)
     try {
+      const formData = new FormData()
+      if (image) formData.append('image', image)
+      formData.append('n_colors', nColors.toString())
+      formData.append('overpaint_mm', overpaintMm.toString())
+      formData.append('order_mode', orderMode)
+      formData.append('max_side', maxSide.toString())
+      formData.append('canvas_width_cm', canvasWidthCm.toString())
+      formData.append('canvas_height_cm', canvasHeightCm.toString())
+      formData.append('saturation_boost', saturationBoost.toString())
+      formData.append('detail_level', detailLevel.toString())
+      formData.append('style_preset', stylePreset)
+      formData.append('easy_painting', easyPainting ? 'true' : 'false')
+      formData.append('easy_simplify', easySimplify.toString())
+      formData.append('easy_face_detail', easyFaceDetail ? 'true' : 'false')
+      formData.append('detail_eyes', detailEyes ? 'true' : 'false')
+      formData.append('detail_face', detailFace ? 'true' : 'false')
+      formData.append('detail_body_outline', detailBodyOutline ? 'true' : 'false')
+      formData.append('favor_skin_tones', favorSkinTones ? 'true' : 'false')
+      formData.append('skin_tone_strength', skinToneStrength.toString())
+      appendPriorityRegionToForm(formData)
+      formData.append('name', projectName.trim() || 'Untitled')
+      formData.append('library_group', libraryGroup)
+
       let response: Response
-      if (useStoredImage) {
-        const formData = new FormData()
-        formData.append('n_colors', nColors.toString())
-        formData.append('overpaint_mm', overpaintMm.toString())
-        formData.append('order_mode', orderMode)
-        formData.append('max_side', maxSide.toString())
-        formData.append('canvas_width_cm', canvasWidthCm.toString())
-        formData.append('canvas_height_cm', canvasHeightCm.toString())
-        formData.append('saturation_boost', saturationBoost.toString())
-        formData.append('detail_level', detailLevel.toString())
-        response = await fetch(`${API_BASE_URL}/api/sessions/${editSessionId}/reprocess`, {
+      if (editSessionId) {
+        // Existing project: single generate endpoint (optional image replaces stored source).
+        response = await fetch(`${API_BASE_URL}/api/projects/${editSessionId}/generate`, {
           method: 'POST',
           body: formData,
         })
       } else {
-        const formData = new FormData()
-        formData.append('image', image!)
-        formData.append('n_colors', nColors.toString())
-        formData.append('overpaint_mm', overpaintMm.toString())
-        formData.append('order_mode', orderMode)
-        formData.append('max_side', maxSide.toString())
-        formData.append('canvas_width_cm', canvasWidthCm.toString())
-        formData.append('canvas_height_cm', canvasHeightCm.toString())
-        formData.append('saturation_boost', saturationBoost.toString())
-        formData.append('detail_level', detailLevel.toString())
-        formData.append('enable_gradients', enableGradients.toString())
-        formData.append('gradient_steps_n', gradientStepsN.toString())
-        formData.append('gradient_transition_mode', gradientTransitionMode)
-        formData.append('gradient_transition_width', gradientTransitionWidth.toString())
-        formData.append('enable_glaze', enableGlaze.toString())
+        if (!image) {
+          alert('Please select an image to create a new project.')
+          return
+        }
         response = await fetch(`${API_BASE_URL}/api/sessions`, {
           method: 'POST',
           body: formData,
@@ -446,35 +947,65 @@ export default function Home() {
 
       const data: SessionResponse = await response.json()
       setSessionData(data)
-      // Save to localStorage for projection viewer
-      localStorage.setItem(`session_${data.session_id}`, JSON.stringify(data))
+      if (Array.isArray(data.palette) && data.palette.length > 0) {
+        setStylePreviewPalette(mergeMustIncludeIntoPalette(data.palette, mustIncludeColors))
+      }
+      if (data.quantized_preview_url) {
+        if (stylePreviewObjectUrlRef.current?.startsWith('blob:')) {
+          URL.revokeObjectURL(stylePreviewObjectUrlRef.current)
+        }
+        stylePreviewObjectUrlRef.current = null
+        setStylePreviewUrl(
+          projectAssetUrl(data.quantized_preview_url, data.artifacts_version)
+        )
+      }
+      if (typeof window !== 'undefined' && window.parent !== window) {
+        window.parent.postMessage(
+          { type: 'layerpainter-session-updated', sessionId: data.session_id },
+          window.location.origin
+        )
+      }
+      try {
+        localStorage.setItem('layerpainter_current_session_id', data.session_id)
+      } catch {
+        /* ignore */
+      }
+      if (data.original_url) setEditSessionOriginalUrl(data.original_url)
+      if (typeof data.artifacts_version === 'number') setEditArtifactsVersion(data.artifacts_version)
+      setEditSessionCanReprocess(true)
       if (orderMode === 'manual') {
         setManualOrder([...data.order])
       }
       // Persist as a named project when created via New project or when editing
       if (editSessionId) {
         const existingProject = getProjectBySessionId(editSessionId)
-        if (!useStoredImage) removeProject(editSessionId)
         saveProject({
           sessionId: data.session_id,
           name: projectName.trim() || existingProject?.name || 'Untitled',
           imageFileName: useStoredImage ? (existingProject?.imageFileName ?? 'image') : (image?.name || 'image'),
-          libraryGroup: selectedLibraryGroup,
+          libraryGroup: existingProject?.libraryGroup ?? libraryGroup,
           canvasWidthCm,
           canvasHeightCm,
           saturationBoost,
           detailLevel,
+          favorSkinTones,
+          skinToneStrength,
+          easyPainting,
+          easySimplify,
+          easyFaceDetail,
+          stylePreset,
+          detailEyes,
+          detailFace,
+          detailBodyOutline,
+          priorityRegionStrength,
+          hasPriorityRegion: Boolean(priorityRegionMaskBlob) || Boolean(editPriorityRegionUrl),
+          mustIncludeColors,
           createdAt: existingProject?.createdAt ?? Date.now(),
           nColors,
           overpaintMm,
           orderMode,
           maxSide,
         })
-        if (returnToHome && typeof window !== 'undefined' && window.top !== window) {
-          window.top!.location.href = `/?tab=projection&session=${data.session_id}`
-        } else {
-          router.push(returnToHome ? `/?tab=projection&session=${data.session_id}` : `/project/${data.session_id}`)
-        }
         return
       }
       if (isNewProject && projectName.trim()) {
@@ -482,11 +1013,23 @@ export default function Home() {
           sessionId: data.session_id,
           name: projectName.trim(),
           imageFileName: image?.name || 'image',
-          libraryGroup: selectedLibraryGroup,
+          libraryGroup: 'default',
           canvasWidthCm,
           canvasHeightCm,
           saturationBoost,
           detailLevel,
+          favorSkinTones,
+          skinToneStrength,
+          easyPainting,
+          easySimplify,
+          easyFaceDetail,
+          stylePreset,
+          detailEyes,
+          detailFace,
+          detailBodyOutline,
+          priorityRegionStrength,
+          hasPriorityRegion: Boolean(priorityRegionMaskBlob),
+          mustIncludeColors,
           createdAt: Date.now(),
           nColors,
           overpaintMm,
@@ -511,19 +1054,31 @@ export default function Home() {
     }
   }
 
+  useEffect(() => {
+    return () => {
+      paletteOptimizeAbortRef.current?.abort()
+    }
+  }, [])
+
   const handleComputeOptimalPalette = async () => {
-    const useStoredImage = editSessionId && !image && editSessionOriginalUrl
+    const useStoredImage = Boolean(editSessionId && !image && editSessionCanReprocess)
     if (!image && !useStoredImage) {
       alert('Please select an image first (or open an editable project with a stored image).')
       return
     }
 
+    paletteOptimizeAbortRef.current?.abort()
+    const controller = new AbortController()
+    paletteOptimizeAbortRef.current = controller
+    const timeoutId = window.setTimeout(() => controller.abort(), 120_000)
+
     setOptimizingPalette(true)
+    setPaletteOptimizeStatus('Scanning palette sizes…')
     try {
       const formData = new FormData()
       formData.append('target_delta_e', targetErrorDeltaE.toString())
       formData.append('max_palette_size', maxPaletteSize.toString())
-      formData.append('library_group', selectedLibraryGroup)
+      formData.append('library_group', resolveProjectLibraryGroup(editSessionId))
       formData.append('prefer_simpler', preferSimplerMixes ? 'true' : 'false')
       if (image) {
         formData.append('image', image)
@@ -531,22 +1086,41 @@ export default function Home() {
         formData.append('session_id', editSessionId)
       }
 
+      setPaletteOptimizeStatus('Finding colours and paint recipes (may take ~30s)…')
       const response = await fetch(`${API_BASE_URL}/api/paint/optimize-palette`, {
         method: 'POST',
         body: formData,
+        signal: controller.signal,
       })
       if (!response.ok) {
-        const text = await response.text()
-        throw new Error(text || `HTTP ${response.status}`)
+        let detail = `HTTP ${response.status}`
+        try {
+          const err = await response.json()
+          detail = (err as { detail?: string }).detail || detail
+        } catch {
+          detail = (await response.text()) || detail
+        }
+        throw new Error(detail)
       }
       const data: PaletteOptimizationResult = await response.json()
       setPaletteOptimization(data)
       setNColors(data.optimal_palette_size)
+      setPaletteOptimizeStatus(null)
     } catch (error) {
-      console.error('Failed to compute optimal palette:', error)
-      alert('Failed to compute optimal palette. Check console for details.')
+      if (error instanceof Error && error.name === 'AbortError') {
+        alert('Palette optimisation timed out or was cancelled. Try a lower max palette size, or use Generate Layers without optimising first.')
+      } else {
+        console.error('Failed to compute optimal palette:', error)
+        const msg = error instanceof Error ? error.message : 'Unknown error'
+        alert(`Failed to compute optimal palette: ${msg}`)
+      }
+      setPaletteOptimizeStatus(null)
     } finally {
+      window.clearTimeout(timeoutId)
       setOptimizingPalette(false)
+      if (paletteOptimizeAbortRef.current === controller) {
+        paletteOptimizeAbortRef.current = null
+      }
     }
   }
 
@@ -557,23 +1131,6 @@ export default function Home() {
     if (newIndex < 0 || newIndex >= newOrder.length) return
     ;[newOrder[index], newOrder[newIndex]] = [newOrder[newIndex], newOrder[index]]
     setManualOrder(newOrder)
-  }
-
-  const handleBack = () => {
-    // Clear results but keep the uploaded image
-    setSessionData(null)
-    setManualOrder([])
-  }
-
-  const handleStartProjection = () => {
-    if (sessionData) {
-      localStorage.setItem('current_session_id', sessionData.session_id)
-      if (returnToHome && typeof window !== 'undefined' && window.top !== window) {
-        window.top!.location.href = `/?tab=projection&session=${sessionData.session_id}`
-      } else {
-        router.push(returnToHome ? `/?tab=projection&session=${sessionData.session_id}` : `/project/${sessionData.session_id}`)
-      }
-    }
   }
 
   // Helper function to convert hex to RGB
@@ -650,58 +1207,6 @@ export default function Home() {
     return 'Unknown recipe type'
   }
 
-  // Handle generating recipes from palette
-  const [selectedLibraryGroup, setSelectedLibraryGroup] = useState<string>('default')
-  const [libraryGroups, setLibraryGroups] = useState<Array<{group: string, name: string, paint_count: number, calibrated_count: number}>>([])
-  const [libraryGroupsLoaded, setLibraryGroupsLoaded] = useState(false)
-
-  // Load library groups on mount (client-side only)
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    loadLibraryGroups(searchParams.get('edit'))
-  }, [searchParams])
-
-  // Recipes are now only generated when user clicks the "Generate Recipes" button
-  // (Removed auto-generation on page load)
-
-  const loadLibraryGroups = async (editSessionIdParam?: string | null) => {
-    if (typeof window === 'undefined') return
-    const url = `${API_BASE_URL}/api/paint/library/groups`
-    try {
-      let data: any = null
-      let lastError: unknown = null
-      for (const delayMs of [0, 400]) {
-        if (delayMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, delayMs))
-        }
-        try {
-          const response = await fetch(url, { cache: 'no-store' })
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`)
-          }
-          data = await response.json()
-          break
-        } catch (error) {
-          lastError = error
-        }
-      }
-      if (!data) {
-        throw lastError || new Error('No response data')
-      }
-      const groups = data.groups || []
-      setLibraryGroups(groups)
-      setLibraryGroupsLoaded(true)
-      if (groups.length > 0 && !editSessionIdParam) {
-        // When not editing, pick default library; when editing, edit effect already set from project
-        const calibratedGroup = groups.find((g: any) => g.calibrated_count > 0)
-        setSelectedLibraryGroup(calibratedGroup ? calibratedGroup.group : groups[0].group)
-      }
-    } catch (error) {
-      console.error(`Failed to load library groups from ${url}:`, error)
-      setLibraryGroupsLoaded(true) // Set to true even on error to prevent infinite waiting
-    }
-  }
-
   const handleGenerateRecipes = async (forceRegenerate: boolean = false) => {
     if (!sessionData) return
 
@@ -715,7 +1220,7 @@ export default function Home() {
 
       const formData = new FormData()
       formData.append('palette', JSON.stringify(paletteForApi))
-      formData.append('library_group', selectedLibraryGroup)
+      formData.append('library_group', resolveProjectLibraryGroup(sessionData.session_id))
       if (forceRegenerate) {
         formData.append('force_regenerate', 'true')
       }
@@ -773,26 +1278,11 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-gray-900 text-white p-8">
       <div className="max-w-6xl mx-auto">
-        <div className="flex items-center gap-4 mb-6">
-          {editSessionId ? (
-            <Link
-              href={returnToHome ? `/?tab=file&session=${editSessionId}` : `/project/${editSessionId}`}
-              className="inline-flex items-center text-gray-400 hover:text-white"
-            >
-              ← Back to project
-            </Link>
-          ) : (
-            <Link href="/" className="inline-flex items-center text-gray-400 hover:text-white">
-              ← Back to menu
-            </Link>
-          )}
-        </div>
         <h1 className="text-4xl font-bold mb-8">
           {editSessionId ? 'Edit image & settings' : 'LayerPainter'}
         </h1>
 
-        {!sessionData ? (
-          <div className="space-y-6">
+        <div className="space-y-6">
             {(isNewProject || editSessionId) && (
               <div>
                 <label className="block mb-2">Project name</label>
@@ -810,17 +1300,6 @@ export default function Home() {
             )}
 
             <div>
-              {editSessionId && editSessionOriginalUrl && (
-                <div className="mb-4">
-                  <label className="block mb-2">Current image (stored on server)</label>
-                  <img
-                    src={`${API_BASE_URL}${editSessionOriginalUrl}`}
-                    alt="Current project image"
-                    className="max-w-md rounded border border-gray-600"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">Change settings below and click Generate to reprocess, or upload a new image to replace.</p>
-                </div>
-              )}
               <label className="block mb-2">
                 {editSessionId && editSessionOriginalUrl ? 'Replace image (optional)' : 'Upload Image'}
               </label>
@@ -831,118 +1310,148 @@ export default function Home() {
                 ref={fileInputRef}
                 className="block w-full text-sm text-gray-300 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700"
               />
-              {preview && (
-                <img src={preview} alt="Preview" className="mt-4 max-w-md rounded" />
+              {editSessionId && editSessionOriginalUrl && !image && (
+                <p className="text-xs text-gray-500 mt-2">
+                  Using the stored project image. Upload a new file to replace it, or adjust settings below.
+                </p>
               )}
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block mb-2">Number of Colors (2-100)</label>
-                <input
-                  type="number"
-                  min="2"
-                  max="100"
-                  value={nColors}
-                  onChange={(e) => setNColors(parseInt(e.target.value))}
-                  className="w-full px-3 py-2 bg-gray-800 rounded text-white"
-                />
+            {canShowImageComparison && (
+              <div className="border border-gray-700 rounded-lg p-4 bg-gray-900/40">
+                <h3 className="text-lg font-semibold text-gray-200 mb-1">Preview</h3>
+                <p className="text-sm text-gray-500 mb-4">
+                  Mark a priority region (brush/lasso) or use <strong className="text-gray-400">Pick colour</strong> to
+                  force colours into the palette. Toggle <strong className="text-gray-400">Mask Dim/Off</strong> to
+                  inspect the photo. Settings below update the processed preview (right).
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="flex flex-col min-w-0">
+                    <p className="text-xs font-medium text-gray-400 mb-2 uppercase tracking-wide">
+                      Original · priority region
+                    </p>
+                    <PriorityRegionEditor
+                      imageSrc={originalImageSrc}
+                      initialMaskUrl={
+                        priorityRegionCleared || priorityRegionMaskBlob
+                          ? null
+                          : editPriorityRegionUrl
+                      }
+                      brushSize={priorityBrushSize}
+                      onBrushSizeChange={setPriorityBrushSize}
+                      onMaskChange={(blob) => {
+                        setPriorityRegionMaskBlob(blob)
+                        setPriorityRegionCleared(blob === null)
+                        setPriorityRegionMaskVersion((v) => v + 1)
+                      }}
+                      detailInRegion={priorityRegionStrength}
+                      onDetailInRegionChange={setPriorityRegionStrength}
+                      viewportHeightPx={280}
+                      mustIncludeColors={mustIncludeColors}
+                      onMustIncludeColorsChange={updateMustIncludeColors}
+                      maxMustIncludeColors={Math.max(0, nColors - 1)}
+                    />
+                  </div>
+                  <div className="flex flex-col">
+                    <p className="text-xs font-medium text-gray-400 mb-2 uppercase tracking-wide">
+                      Processed ({nColors} colours)
+                    </p>
+                    <div className="flex flex-1 items-center justify-center rounded-lg border border-gray-600 bg-black min-h-[280px] max-h-[420px] overflow-hidden">
+                      {stylePreviewLoading && (
+                        <p className="text-sm text-gray-500 animate-pulse p-6">Building preview…</p>
+                      )}
+                      {!stylePreviewLoading && stylePreviewError && (
+                        <p className="text-sm text-amber-400 p-6 text-center">{stylePreviewError}</p>
+                      )}
+                      {!stylePreviewLoading && stylePreviewUrl && (
+                        <img
+                          src={stylePreviewUrl}
+                          alt="Processed preview"
+                          className="w-full h-full max-h-[420px] object-contain"
+                        />
+                      )}
+                      {!stylePreviewLoading && !stylePreviewUrl && !stylePreviewError && (
+                        <p className="text-sm text-gray-500 p-6 text-center">
+                          Adjust settings to update the processed preview.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                {stylePreviewPalette && stylePreviewPalette.length > 0 && (
+                  <div className="mt-4 pt-4 border-t border-gray-700 overflow-visible">
+                    <p className="text-xs font-medium text-gray-400 mb-2 uppercase tracking-wide">
+                      Palette ({stylePreviewPalette.length} colours)
+                      {mustIncludeColors.length > 0 && (
+                        <span className="normal-case font-normal text-gray-500 ml-2">
+                          violet ring = must include
+                        </span>
+                      )}
+                      {favorSkinTones && stylePreviewPalette.some((c) => c.skin) && (
+                        <span className="normal-case font-normal text-gray-500 ml-2">
+                          amber ring = skin tone
+                        </span>
+                      )}
+                    </p>
+                    <PreviewPaletteSwatches
+                      palette={stylePreviewPalette}
+                      mustIncludeColors={mustIncludeColors}
+                    />
+                  </div>
+                )}
               </div>
+            )}
 
-              <div>
-                <label className="block mb-2">Overpaint (mm)</label>
-                <input
-                  type="number"
-                  min="0"
-                  max="50"
-                  step="0.5"
-                  value={overpaintMm}
-                  onChange={(e) => setOverpaintMm(parseFloat(e.target.value))}
-                  className="w-full px-3 py-2 bg-gray-800 rounded text-white"
-                />
-              </div>
+            <section className="border border-gray-700 rounded-lg p-4 bg-gray-900/40 space-y-5">
+              <h3 className="text-lg font-semibold text-gray-200">Image settings</h3>
 
-              <div>
-                <label className="block mb-2">Order Mode</label>
-                <select
-                  value={orderMode}
-                  onChange={(e) => setOrderMode(e.target.value as any)}
-                  className="w-full px-3 py-2 bg-gray-800 rounded text-white"
-                >
-                  <option value="largest">Largest Coverage First</option>
-                  <option value="smallest">Smallest Coverage First</option>
-                  <option value="lightest">Lightest Colours First</option>
-                  <option value="manual">Manual</option>
-                </select>
-              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block mb-2 text-sm font-medium">Number of colours (2–100)</label>
+                  <input
+                    type="number"
+                    min="2"
+                    max="100"
+                    value={nColors}
+                    onChange={(e) => {
+                      const n = parseInt(e.target.value, 10)
+                      setNColors(Number.isNaN(n) ? 16 : Math.min(100, Math.max(2, n)))
+                    }}
+                    className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-600 text-white"
+                  />
+                </div>
 
-              <div>
-                <label className="block mb-2">Max Resolution</label>
-                <select
-                  value={maxSide}
-                  onChange={(e) => setMaxSide(parseInt(e.target.value))}
-                  className="w-full px-3 py-2 bg-gray-800 rounded text-white"
-                >
-                  <option value="1920">1920px</option>
-                  <option value="2400">2400px</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block mb-2">Canvas width (cm)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={canvasWidthCm}
-                  onChange={(e) => setCanvasWidthCm(parseFloat(e.target.value) || 0)}
-                  className="w-full px-3 py-2 bg-gray-800 rounded text-white"
-                />
-                <p className="text-xs text-gray-500 mt-1">Override default from Settings. Used for recipe weights.</p>
-              </div>
-
-              <div>
-                <label className="block mb-2">Canvas height (cm)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={canvasHeightCm}
-                  onChange={(e) => setCanvasHeightCm(parseFloat(e.target.value) || 0)}
-                  className="w-full px-3 py-2 bg-gray-800 rounded text-white"
-                />
-                <p className="text-xs text-gray-500 mt-1">Override default from Settings. Used for recipe weights.</p>
-              </div>
-
-              <div className="col-span-2">
-                <label className="block mb-2">
-                  Color Vibrancy Boost: {(saturationBoost * 100).toFixed(0)}%
-                  <span className="text-xs text-gray-400 ml-2">
-                    (100% = no change, 150% = more vibrant, 500% = maximum vibrancy)
-                  </span>
-                </label>
-                <input
-                  type="range"
-                  min="0.5"
-                  max="5.0"
-                  step="0.05"
-                  value={saturationBoost}
-                  onChange={(e) => setSaturationBoost(parseFloat(e.target.value))}
-                  className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
-                />
-                <div className="flex justify-between text-xs text-gray-400 mt-1">
-                  <span>50% (Less Vibrant)</span>
-                  <span>100% (Normal)</span>
-                  <span>500% (Maximum)</span>
+                <div>
+                  <label className="block mb-2 text-sm font-medium">Style preset</label>
+                  <select
+                    value={stylePreset}
+                    onChange={(e) => {
+                      const next = normalizeStylePreset(e.target.value)
+                      setStylePreset(next)
+                      if (presetForcesFigureDetail(next)) {
+                        setEasyFaceDetail(true)
+                        setDetailEyes(true)
+                        setDetailFace(true)
+                        setDetailBodyOutline(true)
+                      }
+                    }}
+                    className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-600 text-white"
+                  >
+                    {IMAGE_STYLE_PRESETS.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {IMAGE_STYLE_PRESETS.find((p) => p.id === stylePreset)?.description}
+                  </p>
                 </div>
               </div>
 
-              <div className="col-span-2">
-                <label className="block mb-2">
-                  Detail Level: {(detailLevel * 100).toFixed(0)}%
-                  <span className="text-xs text-gray-400 ml-2">
-                    (Higher = more detail preserved, Lower = cleaner/simpler)
-                  </span>
+              <div>
+                <label className="block mb-2 text-sm font-medium">
+                  Detail level: {(detailLevel * 100).toFixed(0)}%
                 </label>
                 <input
                   type="range"
@@ -953,45 +1462,246 @@ export default function Home() {
                   onChange={(e) => setDetailLevel(parseFloat(e.target.value))}
                   className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-green-600"
                 />
-                <div className="flex justify-between text-xs text-gray-400 mt-1">
-                  <span>0% (Simple)</span>
-                  <span>50% (Balanced)</span>
-                  <span>100% (Maximum Detail)</span>
+                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                  <span>Simpler</span>
+                  <span>More detail</span>
                 </div>
               </div>
 
-              <div className="col-span-2">
-                <label className="block mb-2">Paint library</label>
-                {mounted && libraryGroupsLoaded && libraryGroups.length > 0 ? (
-                  <>
-                    <select
-                      value={selectedLibraryGroup}
-                      onChange={(e) => setSelectedLibraryGroup(e.target.value)}
-                      className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-600 text-white"
-                    >
-                      {libraryGroups.map((group) => (
-                        <option key={group.group} value={group.group}>
-                          {group.name} ({group.paint_count} paints, {group.calibrated_count} calibrated)
-                        </option>
-                      ))}
-                    </select>
-                    <p className="text-xs text-gray-500 mt-1">
-                      Used for recipe weights and mixing recipes. You can calibrate paints in Manage Paint Libraries.
-                    </p>
-                  </>
-                ) : (
-                  <div className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-600 text-gray-500 text-sm">
-                    Loading library groups...
+              <div className="rounded-lg border border-amber-900/40 p-3 bg-amber-950/15 space-y-3">
+                <label className="flex items-start gap-2 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={favorSkinTones}
+                    onChange={(e) => {
+                      const checked = e.target.checked
+                      favorSkinTonesTouchedRef.current = true
+                      setFavorSkinTones(checked)
+                      void persistProjectImageSettings({
+                        favorSkinTones: checked,
+                        skinToneStrength,
+                      })
+                    }}
+                    className="mt-0.5 w-4 h-4 text-amber-500 bg-gray-700 border-gray-600 rounded"
+                  />
+                  <span>
+                    <span className="font-medium text-amber-100">Favor skin tones</span>
+                    <span className="block text-xs text-gray-500 mt-0.5">
+                      Reserves warm skin colours in the palette (amber ring in the palette strip).
+                    </span>
+                  </span>
+                </label>
+                {favorSkinTones && (
+                  <div>
+                    <label className="block text-sm mb-2">
+                      Skin priority: {(skinToneStrength * 100).toFixed(0)}%
+                    </label>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={skinToneStrength}
+                      onChange={(e) => setSkinToneStrength(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                    />
                   </div>
                 )}
               </div>
+            </section>
 
-              <div className="col-span-2 border border-gray-700 rounded-lg p-4 bg-gray-800/50">
-                <h3 className="text-lg font-semibold mb-3">Palette Optimisation</h3>
+            <details className="rounded-lg border border-gray-700 bg-gray-800/30 group">
+              <summary className="cursor-pointer select-none px-4 py-3 font-semibold text-gray-200 list-none flex items-center justify-between gap-2 [&::-webkit-details-marker]:hidden">
+                <span>Advanced settings</span>
+                <span className="text-gray-500 text-sm font-normal group-open:hidden">Canvas, output, optimisation…</span>
+                <span className="text-gray-500 text-sm hidden group-open:inline">▼</span>
+              </summary>
+              <div className="px-4 pb-4 pt-2 space-y-5 border-t border-gray-700">
+                <p className="text-xs text-gray-500">
+                  Optional tweaks. Most projects only need the settings above and a priority region.
+                </p>
 
-                <div className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <label className="block mb-2">
+                    <label className="block mb-2 text-sm">Canvas width (cm)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={canvasWidthCm}
+                      onChange={(e) => setCanvasWidthCm(parseFloat(e.target.value) || 0)}
+                      className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-600 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block mb-2 text-sm">Canvas height (cm)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={canvasHeightCm}
+                      onChange={(e) => setCanvasHeightCm(parseFloat(e.target.value) || 0)}
+                      className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-600 text-white"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">Swapped for portrait images automatically.</p>
+                  </div>
+                  <div>
+                    <label className="block mb-2 text-sm">Overpaint (mm)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="50"
+                      step="0.5"
+                      value={overpaintMm}
+                      onChange={(e) => setOverpaintMm(parseFloat(e.target.value))}
+                      className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-600 text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block mb-2 text-sm">Paint order</label>
+                    <select
+                      value={orderMode}
+                      onChange={(e) => setOrderMode(e.target.value as any)}
+                      className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-600 text-white"
+                    >
+                      <option value="largest">Largest coverage first</option>
+                      <option value="smallest">Smallest coverage first</option>
+                      <option value="lightest">Lightest colours first</option>
+                      <option value="manual">Manual</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block mb-2 text-sm">Max resolution</label>
+                    <select
+                      value={maxSide}
+                      onChange={(e) => setMaxSide(parseInt(e.target.value))}
+                      className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-600 text-white"
+                    >
+                      <option value="1920">1920px</option>
+                      <option value="2400">2400px</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block mb-2 text-sm">
+                    Colour vibrancy: {(saturationBoost * 100).toFixed(0)}%
+                  </label>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="5.0"
+                    step="0.05"
+                    value={saturationBoost}
+                    onChange={(e) => setSaturationBoost(parseFloat(e.target.value))}
+                    className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                  />
+                  <div className="flex justify-between text-xs text-gray-500 mt-1">
+                    <span>50%</span>
+                    <span>100% normal</span>
+                    <span>500%</span>
+                  </div>
+                </div>
+
+                {(presetUsesLegacyEasyPainting(stylePreset) ||
+                  presetShowsFigureDetailControls(stylePreset, easyPainting) ||
+                  presetShowsSimplifyControls(stylePreset, easyPainting)) && (
+                  <div className="rounded-lg border border-gray-600 p-3 bg-gray-900/50 space-y-3">
+                    <p className="text-sm font-medium text-gray-300">Style tweaks</p>
+                    {presetUsesLegacyEasyPainting(stylePreset) && (
+                      <label className="flex items-start gap-2 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={easyPainting}
+                          onChange={(e) => setEasyPainting(e.target.checked)}
+                          className="mt-0.5 w-4 h-4 text-emerald-500 bg-gray-700 border-gray-600 rounded"
+                        />
+                        <span>
+                          Easy painting mode
+                          <span className="block text-xs text-gray-500">Classic: soften background, keep figure detail.</span>
+                        </span>
+                      </label>
+                    )}
+                    {presetShowsFigureDetailControls(stylePreset, easyPainting) && (
+                      <div className="space-y-2">
+                        <p className="text-xs text-amber-400/90">
+                          Auto-detect face detail can cause halos — prefer a priority region instead.
+                        </p>
+                        <label className="flex items-start gap-2 text-sm cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={easyFaceDetail}
+                            disabled={presetForcesFigureDetail(stylePreset)}
+                            onChange={(e) => setEasyFaceDetail(e.target.checked)}
+                            className="mt-0.5 w-4 h-4 text-emerald-500 bg-gray-700 border-gray-600 rounded"
+                          />
+                          <span>Preserve detail (auto-detect eyes/face)</span>
+                        </label>
+                        {easyFaceDetail && (
+                          <div className="ml-6 space-y-1.5 text-sm">
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={detailEyes}
+                                disabled={presetForcesFigureDetail(stylePreset)}
+                                onChange={(e) => setDetailEyes(e.target.checked)}
+                                className="w-4 h-4 text-emerald-500 bg-gray-700 border-gray-600 rounded"
+                              />
+                              Eyes
+                            </label>
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={detailFace}
+                                disabled={presetForcesFigureDetail(stylePreset)}
+                                onChange={(e) => setDetailFace(e.target.checked)}
+                                className="w-4 h-4 text-emerald-500 bg-gray-700 border-gray-600 rounded"
+                              />
+                              Face
+                            </label>
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={detailBodyOutline}
+                                disabled={presetForcesFigureDetail(stylePreset)}
+                                onChange={(e) => setDetailBodyOutline(e.target.checked)}
+                                className="w-4 h-4 text-emerald-500 bg-gray-700 border-gray-600 rounded"
+                              />
+                              Body outline
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {presetShowsSimplifyControls(stylePreset, easyPainting) && (
+                      <div>
+                        <label className="block text-sm mb-2">
+                          Background simplification: {(easySimplify * 100).toFixed(0)}%
+                        </label>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          value={easySimplify}
+                          onChange={(e) => setEasySimplify(parseFloat(e.target.value))}
+                          className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="rounded-lg border border-gray-600 p-3 bg-gray-900/50 space-y-4">
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-200">Palette optimisation (paint library)</h4>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Suggests a colour count from your paints and ΔE target (uses the paint library chosen on the
+                      Projection tab). Uses a simplified pass — tune with the preview above for final look.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block mb-2 text-sm">
                       Target error (ΔE): {targetErrorDeltaE.toFixed(0)}
                     </label>
                     <input
@@ -1001,18 +1711,11 @@ export default function Home() {
                       step="1"
                       value={targetErrorDeltaE}
                       onChange={(e) => setTargetErrorDeltaE(parseInt(e.target.value, 10))}
-                      className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                      className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
                     />
-                    <div className="flex justify-between text-xs text-gray-400 mt-1">
-                      <span>1</span>
-                      <span>15</span>
-                    </div>
                   </div>
-
                   <div>
-                    <label className="block mb-2">
-                      Maximum palette size: {maxPaletteSize}
-                    </label>
+                    <label className="block mb-2 text-sm">Maximum palette size: {maxPaletteSize}</label>
                     <input
                       type="range"
                       min="4"
@@ -1020,28 +1723,23 @@ export default function Home() {
                       step="1"
                       value={maxPaletteSize}
                       onChange={(e) => setMaxPaletteSize(parseInt(e.target.value, 10))}
-                      className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                      className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
                     />
-                    <div className="flex justify-between text-xs text-gray-400 mt-1">
-                      <span>4</span>
-                      <span>24</span>
-                    </div>
                   </div>
-
                   <label className="flex items-center gap-3 text-sm">
                     <input
                       type="checkbox"
                       checked={preferSimplerMixes}
                       onChange={(e) => setPreferSimplerMixes(e.target.checked)}
-                      className="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500"
+                      className="w-4 h-4 text-indigo-500 bg-gray-700 border-gray-600 rounded"
                     />
                     Prefer simpler mixes
                   </label>
-
                   <button
+                    type="button"
                     onClick={handleComputeOptimalPalette}
-                    disabled={optimizingPalette || (!image && !(editSessionId && editSessionOriginalUrl))}
-                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    disabled={optimizingPalette || (!image && !(editSessionId && editSessionCanReprocess))}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-sm"
                   >
                     {optimizingPalette && (
                       <svg
@@ -1058,148 +1756,40 @@ export default function Home() {
                         ></path>
                       </svg>
                     )}
-                    {optimizingPalette ? 'Computing…' : 'Compute Optimal Palette'}
+                    {optimizingPalette ? 'Computing…' : 'Compute optimal palette'}
                   </button>
-
+                  {paletteOptimizeStatus && (
+                    <p className="text-xs text-gray-400">{paletteOptimizeStatus}</p>
+                  )}
                   {paletteOptimization && (
-                    <div className="mt-3 p-3 rounded border border-gray-700 bg-gray-900/60 space-y-2">
-                      <div className="text-sm">
-                        Optimal palette size: <span className="font-semibold">{paletteOptimization.optimal_palette_size} colours</span>
-                      </div>
-                      <div className="text-sm">
-                        Average ΔE: <span className="font-semibold">{paletteOptimization.average_delta_e.toFixed(2)}</span>
-                      </div>
-                      <div className="text-sm">
-                        Maximum ΔE: <span className="font-semibold">{paletteOptimization.maximum_delta_e.toFixed(2)}</span>
-                      </div>
-                      <div className="text-xs text-gray-400">
-                        Number of Colors has been set to {paletteOptimization.optimal_palette_size}. Generate layers to apply.
-                      </div>
-                      <div className="grid grid-cols-8 gap-2 pt-1">
+                    <div className="p-3 rounded border border-gray-700 bg-gray-900/60 space-y-2 text-sm">
+                      <p>
+                        Suggested: <span className="font-semibold">{paletteOptimization.optimal_palette_size} colours</span>
+                        {' '}(avg ΔE {paletteOptimization.average_delta_e.toFixed(2)})
+                      </p>
+                      <p className="text-xs text-gray-400">
+                        Number of colours updated — generate layers to apply the full pipeline.
+                      </p>
+                      <div className="flex flex-wrap gap-1.5 pt-1">
                         {paletteOptimization.palette.map((color) => (
-                          <div key={color.index} className="flex flex-col items-center">
-                            <div
-                              className="w-7 h-7 rounded border border-gray-600"
-                              style={{ backgroundColor: color.target_hex }}
-                              title={`Color ${color.index}: ${color.target_hex}`}
-                            />
-                            <span className="text-[10px] text-gray-400 mt-1">{color.index}</span>
-                          </div>
+                          <div
+                            key={color.index}
+                            className="w-6 h-6 rounded border border-gray-600"
+                            style={{ backgroundColor: color.target_hex }}
+                            title={color.target_hex}
+                          />
                         ))}
                       </div>
                     </div>
                   )}
                 </div>
               </div>
-
-              {/* Gradient-Aware Quantization - disabled and hidden for now */}
-              {false && (
-              <div className="col-span-2 border-t border-gray-700 pt-4 mt-4">
-                <h3 className="text-lg font-semibold mb-4">Gradient-Aware Quantization</h3>
-                <p className="text-sm text-gray-400 mb-4">
-                  Automatically detects smooth gradients (sky, water) and generates multi-step ramps instead of flat color bands.
-                </p>
-                
-                <div className="space-y-4">
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="checkbox"
-                      id="enableGradients"
-                      checked={enableGradients}
-                      onChange={(e) => setEnableGradients(e.target.checked)}
-                      className="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500"
-                    />
-                    <label htmlFor="enableGradients" className="text-sm">
-                      Enable gradient detection and ramp generation
-                    </label>
-                  </div>
-
-                  {enableGradients && (
-                    <>
-                      <div>
-                        <label className="block mb-2">
-                          Gradient Steps: {gradientStepsN}
-                          <span className="text-xs text-gray-400 ml-2">
-                            (Number of steps in gradient ramps, 5-15)
-                          </span>
-                        </label>
-                        <input
-                          type="range"
-                          min="5"
-                          max="15"
-                          step="1"
-                          value={gradientStepsN}
-                          onChange={(e) => setGradientStepsN(parseInt(e.target.value))}
-                          className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-600"
-                        />
-                        <div className="flex justify-between text-xs text-gray-400 mt-1">
-                          <span>5 (Fewer steps)</span>
-                          <span>9 (Default)</span>
-                          <span>15 (More steps)</span>
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block mb-2">Transition Mode</label>
-                        <select
-                          value={gradientTransitionMode}
-                          onChange={(e) => setGradientTransitionMode(e.target.value as any)}
-                          className="w-full px-3 py-2 bg-gray-800 rounded text-white"
-                        >
-                          <option value="off">Off (Hard edges)</option>
-                          <option value="dither">Dither (Smooth transitions)</option>
-                          <option value="feather-preview">Feather Preview (Preview only)</option>
-                        </select>
-                      </div>
-
-                      {gradientTransitionMode !== 'off' && (
-                        <div>
-                          <label className="block mb-2">
-                            Transition Width: {gradientTransitionWidth}px
-                            <span className="text-xs text-gray-400 ml-2">
-                              (Width of transition bands between steps, 5-60px)
-                            </span>
-                          </label>
-                          <input
-                            type="range"
-                            min="5"
-                            max="60"
-                            step="5"
-                            value={gradientTransitionWidth}
-                            onChange={(e) => setGradientTransitionWidth(parseInt(e.target.value))}
-                            className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-600"
-                          />
-                          <div className="flex justify-between text-xs text-gray-400 mt-1">
-                            <span>5px (Narrow)</span>
-                            <span>25px (Default)</span>
-                            <span>60px (Wide)</span>
-                          </div>
-                        </div>
-                      )}
-
-                      <div className="flex items-center gap-3">
-                        <input
-                          type="checkbox"
-                          id="enableGlaze"
-                          checked={enableGlaze}
-                          onChange={(e) => setEnableGlaze(e.target.checked)}
-                          className="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500"
-                        />
-                        <label htmlFor="enableGlaze" className="text-sm">
-                          Glaze pass (add a unifying thin layer per gradient region — paint last)
-                        </label>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-              )}
-            </div>
+            </details>
 
             <button
               onClick={handleGenerate}
-              disabled={Boolean(processing || (isNewProject && (!image || !projectName.trim())) || (!editSessionId && !image) || (editSessionId && !image && !editSessionOriginalUrl))}
-              title={editSessionId && editSessionOriginalUrl ? 'Use stored image and current settings, or upload a new image to replace.' : undefined}
+              disabled={Boolean(processing || (isNewProject && (!image || !projectName.trim())) || (!editSessionId && !image) || (editSessionId && !image && !editSessionCanReprocess))}
+              title={editSessionId && editSessionCanReprocess ? 'Use stored image and current settings, or upload a new image to replace.' : undefined}
               className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               {processing && (
@@ -1224,48 +1814,9 @@ export default function Home() {
                   ></path>
                 </svg>
               )}
-              {processing ? 'Processing...' : 'Generate Layers'}
+              {processing ? 'Processing...' : sessionData ? 'Regenerate Layers' : 'Generate Layers'}
             </button>
           </div>
-        ) : (
-          <div className="space-y-6">
-            <div className="p-6 bg-gray-800 rounded-lg max-w-md">
-              <p className="text-lg font-medium">Layers generated.</p>
-              <p className="text-gray-400 text-sm mb-2">The original image is stored on the server and will be reused if you change settings and regenerate.</p>
-              <p className="text-gray-400 text-sm mb-4">View palette, recipes, and layers on the Projection tab.</p>
-              <div className="flex flex-wrap gap-3">
-                <button
-                  onClick={() => {
-                    if (returnToHome && typeof window !== 'undefined' && window.top !== window) {
-                      window.top!.location.href = `/?tab=projection&session=${sessionData.session_id}`
-                    } else {
-                      router.push(returnToHome ? `/?tab=projection&session=${sessionData.session_id}` : `/project/${sessionData.session_id}`)
-                    }
-                  }}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded"
-                >
-                  Open Projection tab
-                </button>
-                <button
-                  onClick={handleBack}
-                  className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
-                >
-                  Back to settings
-                </button>
-              </div>
-            </div>
-            {sessionData.original_url && (
-              <div>
-                <h2 className="text-xl font-bold mb-2">Original image (stored on server)</h2>
-                <img
-                  src={`${API_BASE_URL}${sessionData.original_url}`}
-                  alt="Original"
-                  className="max-w-md rounded border border-gray-600"
-                />
-              </div>
-            )}
-          </div>
-        )}
 
         {/* Color Modal - only render after mount to avoid hydration issues */}
         {mounted && selectedColor && (

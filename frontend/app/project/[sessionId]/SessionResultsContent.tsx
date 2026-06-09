@@ -4,7 +4,8 @@ import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
 import type { SessionData } from './types'
 import { API_BASE_URL } from '@/lib/config'
-import { getProjectBySessionId, syncProjectsFromServer } from '@/lib/projects'
+import { projectAssetUrl } from '@/lib/projectAssets'
+import { getProjectBySessionId, saveProject, syncProjectsFromServer } from '@/lib/projects'
 import { VirtualPaintMixer } from './VirtualPaintMixer'
 import { SpotTestModal } from './SpotTestModal'
 
@@ -101,6 +102,7 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
   const [mounted, setMounted] = useState(false)
   const [, setProjectSyncTick] = useState(0)
   const [showRecipeColours, setShowRecipeColours] = useState(false)
+  const [imageView, setImageView] = useState<'preview' | 'original'>('preview')
   const recipePreviewCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const [spotTestPaletteIndex, setSpotTestPaletteIndex] = useState<number | null>(null)
 
@@ -481,47 +483,107 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
     img.onerror = () => {}
     // Use same-origin URL so the request goes through Next.js rewrites and avoids CORS (e.g. localhost vs 127.0.0.1)
     const imageOrigin = typeof window !== 'undefined' ? window.location.origin : API_BASE_URL
-    img.src = imageOrigin + sessionData.quantized_preview_url
-  }, [showRecipeColours, canShowRecipeColours, sessionData.quantized_preview_url, sessionData.palette, recipes])
+    img.src = projectAssetUrl(sessionData.quantized_preview_url, sessionData.artifacts_version)
+  }, [showRecipeColours, canShowRecipeColours, sessionData.quantized_preview_url, sessionData.artifacts_version, sessionData.palette, recipes])
 
   const layers = sessionData.layers as LayerWithSource[]
+  const assetVersion = sessionData.artifacts_version
+  const hasOriginal = Boolean(sessionData.original_url)
+  const hasPreview = Boolean(sessionData.quantized_preview_url)
+  const canFlipImage = hasOriginal && hasPreview
+  const showingOriginal = imageView === 'original' && hasOriginal
+  const showingPreview = !showingOriginal && hasPreview
 
   return (
     <div className="space-y-6">
-      {sessionData.original_url && (
+      {(hasOriginal || hasPreview) && (
         <div>
-          <h2 className="text-xl font-bold mb-2">Original image</h2>
-          <img src={`${API_BASE_URL}${sessionData.original_url}`} alt="Original" className="max-w-md rounded border border-gray-600" />
-        </div>
-      )}
-
-      {sessionData.quantized_preview_url && (
-        <div>
-          <h2 className="text-2xl font-bold mb-4">Quantized Preview</h2>
-          <label className="flex items-center gap-2 mb-2 text-sm text-gray-300">
-            <input
-              type="checkbox"
-              checked={showRecipeColours}
-              onChange={(e) => setShowRecipeColours(e.target.checked)}
-              disabled={!canShowRecipeColours}
-              className="rounded border-gray-500 bg-gray-700"
-            />
-            <span>Use recipe colours</span>
-            {!canShowRecipeColours && (
-              <span className="text-gray-500 text-xs">(Generate recipes for all palette colours to enable)</span>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <h2 className="text-2xl font-bold">
+              {showingOriginal ? 'Original' : 'Preview'}
+            </h2>
+            {canFlipImage && (
+              <div
+                className="inline-flex rounded-lg border border-gray-600 overflow-hidden text-sm shrink-0"
+                role="group"
+                aria-label="Image view"
+              >
+                <button
+                  type="button"
+                  onClick={() => setImageView('preview')}
+                  className={`px-3 py-1.5 font-medium transition-colors ${
+                    imageView === 'preview'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                  }`}
+                >
+                  Preview
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImageView('original')}
+                  className={`px-3 py-1.5 font-medium transition-colors border-l border-gray-600 ${
+                    imageView === 'original'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                  }`}
+                >
+                  Original
+                </button>
+              </div>
             )}
-          </label>
-          {!showRecipeColours && (
-            <img src={`${API_BASE_URL}${sessionData.quantized_preview_url}`} alt="Quantized" className="max-w-full rounded" />
+          </div>
+
+          {showingPreview && (
+            <label className="flex items-center gap-2 mb-3 text-sm text-gray-300">
+              <input
+                type="checkbox"
+                checked={showRecipeColours}
+                onChange={(e) => setShowRecipeColours(e.target.checked)}
+                disabled={!canShowRecipeColours}
+                className="rounded border-gray-500 bg-gray-700"
+              />
+              <span>Use recipe colours</span>
+              {!canShowRecipeColours && (
+                <span className="text-gray-500 text-xs">(Generate recipes for all palette colours to enable)</span>
+              )}
+            </label>
           )}
-          {showRecipeColours && (
-            <canvas
-              ref={recipePreviewCanvasRef}
-              className="max-w-full rounded block"
-              style={{ maxWidth: '100%', height: 'auto' }}
-              aria-label="Quantized preview with recipe colours"
-            />
-          )}
+
+          <div className="rounded-lg border border-gray-600 bg-black/40 flex items-center justify-center overflow-hidden min-h-[12rem]">
+            {showingOriginal && (
+              <img
+                key={`original-${sessionId}-${assetVersion ?? 0}`}
+                src={projectAssetUrl(sessionData.original_url!, assetVersion)}
+                alt="Original"
+                className="max-w-full max-h-[min(70vh,640px)] object-contain"
+              />
+            )}
+            {showingPreview && !showRecipeColours && (
+              <img
+                key={`quantized-${sessionId}-${assetVersion ?? 0}`}
+                src={projectAssetUrl(sessionData.quantized_preview_url!, assetVersion)}
+                alt="Quantized preview"
+                className="max-w-full max-h-[min(70vh,640px)] object-contain"
+              />
+            )}
+            {showingPreview && showRecipeColours && (
+              <canvas
+                ref={recipePreviewCanvasRef}
+                className="max-w-full block"
+                style={{ maxWidth: '100%', maxHeight: 'min(70vh, 640px)', height: 'auto' }}
+                aria-label="Quantized preview with recipe colours"
+              />
+            )}
+            {!showingOriginal && !showingPreview && hasOriginal && (
+              <img
+                key={`original-fallback-${sessionId}-${assetVersion ?? 0}`}
+                src={projectAssetUrl(sessionData.original_url!, assetVersion)}
+                alt="Original"
+                className="max-w-full max-h-[min(70vh,640px)] object-contain"
+              />
+            )}
+          </div>
         </div>
       )}
 
@@ -556,7 +618,14 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
           {libraryGroupsLoaded && libraryGroups.length > 0 ? (
             <select
               value={selectedLibraryGroup}
-              onChange={(e) => setSelectedLibraryGroup(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value
+                setSelectedLibraryGroup(next)
+                const existing = getProjectBySessionId(sessionId)
+                if (existing) {
+                  saveProject({ ...existing, libraryGroup: next })
+                }
+              }}
               className="w-full max-w-xs px-3 py-2 bg-gray-700 rounded border border-gray-600"
             >
               {libraryGroups.map((g) => (
@@ -752,7 +821,11 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
                   }
                 />
                 <img
-                  src={`${API_BASE_URL}${layer.mask_pure_url ?? `/api/sessions/${sessionId}/layer_${layer.layer_index}_pure_mask.png`}`}
+                  key={`layer-${layer.layer_index}-${assetVersion ?? 0}`}
+                  src={projectAssetUrl(
+                    layer.mask_pure_url ?? `/api/projects/${sessionId}/artifacts/layer_${layer.layer_index}_pure_mask.png`,
+                    assetVersion
+                  )}
                   alt={`Layer ${layer.layer_index + 1}`}
                   className="w-16 h-16 object-contain bg-gray-700 rounded"
                 />
