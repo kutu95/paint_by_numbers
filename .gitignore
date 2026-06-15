@@ -55,8 +55,15 @@ data/mask_cache/
 data/paint/calibration/*.json
 data/paint/calibration/*.jpg
 data/paint/calibration/*.png
-# Paint library: stored on server only (single shared library for now; per-user later)
+# Paint libraries and runtime paint data (per-server; use export/import to move libraries)
 data/paint/library.json
+data/paint/libraries/*.json
+data/paint/recipes_cache/
+data/paint/feedback_bias/
+data/paint/gamut_cache/
+data/paint/palette_optimization_cache/
+data/paint/spot_test/
+data/projects/
 
 # Deployment - allow service files in deployment directory
 !deployment/*.service
