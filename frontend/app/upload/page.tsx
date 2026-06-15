@@ -434,6 +434,21 @@ export default function Home() {
         }
       }
 
+      const loadViaDataUrl = () => {
+        const reader = new FileReader()
+        reader.onload = (event) => {
+          const originalDataUrl = event.target?.result as string
+          const img = new Image()
+          img.onload = () => {
+            finishImageLoad(img.width, img.height, (ctx, cw, ch) => {
+              ctx.drawImage(img, 0, 0, cw, ch)
+            })
+          }
+          img.src = originalDataUrl
+        }
+        reader.readAsDataURL(file)
+      }
+
       if (typeof createImageBitmap !== 'undefined') {
         void createImageBitmap(file, { imageOrientation: 'from-image' as ImageOrientation })
           .then((bitmap) => {
@@ -447,21 +462,6 @@ export default function Home() {
           })
       } else {
         loadViaDataUrl()
-      }
-
-      function loadViaDataUrl() {
-        const reader = new FileReader()
-        reader.onload = (event) => {
-          const originalDataUrl = event.target?.result as string
-          const img = new Image()
-          img.onload = () => {
-            finishImageLoad(img.width, img.height, (ctx, cw, ch) => {
-              ctx.drawImage(img, 0, 0, cw, ch)
-            })
-          }
-          img.src = originalDataUrl
-        }
-        reader.readAsDataURL(file)
       }
     }
   }

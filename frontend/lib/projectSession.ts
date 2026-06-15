@@ -20,7 +20,25 @@ export interface ProjectInfo {
 export interface ProjectUiState {
   currentLayer?: number
   doneLayers?: number[]
+  projectionScale?: number
   projectionHud?: Record<string, unknown>
+}
+
+/** Accepts structured HUD state objects; serialized as plain JSON for the API. */
+export type ProjectUiStateInput = {
+  currentLayer?: number
+  doneLayers?: number[]
+  projectionScale?: number
+  projectionHud?: Record<string, unknown> | object
+}
+
+function normalizeProjectUiState(state: ProjectUiStateInput): ProjectUiState {
+  return {
+    currentLayer: state.currentLayer,
+    doneLayers: state.doneLayers,
+    projectionScale: state.projectionScale,
+    projectionHud: state.projectionHud as Record<string, unknown> | undefined,
+  }
 }
 
 export async function fetchProjectInfo(projectId: string): Promise<ProjectInfo | null> {
@@ -53,12 +71,12 @@ export async function fetchProjectState(projectId: string): Promise<ProjectUiSta
   }
 }
 
-export async function saveProjectState(projectId: string, state: ProjectUiState): Promise<void> {
+export async function saveProjectState(projectId: string, state: ProjectUiStateInput): Promise<void> {
   try {
     await fetch(`${API_BASE_URL}/api/projects/${projectId}/state`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(state),
+      body: JSON.stringify(normalizeProjectUiState(state)),
     })
   } catch {
     /* ignore */

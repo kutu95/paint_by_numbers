@@ -258,7 +258,7 @@ export default function ProjectionViewerWindow() {
         if (Array.isArray(ui.doneLayers)) {
           setDoneLayers((prev) => {
             const next = new Set(ui.doneLayers)
-            if (prev.size === next.size && [...prev].every((x) => next.has(x))) return prev
+            if (prev.size === next.size && Array.from(prev).every((x) => next.has(x))) return prev
             return next
           })
         }

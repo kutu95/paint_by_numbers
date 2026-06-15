@@ -119,7 +119,7 @@ function mergeServerProjectWithLocal(server: Project, local?: Project): Project 
       if (localColors.length === 0 && serverColors.length > 0) continue
     }
     if (JSON.stringify(localVal) !== JSON.stringify(server[key])) {
-      ;(merged as Record<string, unknown>)[key] = localVal
+      Object.assign(merged, { [key]: localVal })
     }
   }
   return merged
