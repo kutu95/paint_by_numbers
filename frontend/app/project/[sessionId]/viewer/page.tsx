@@ -13,6 +13,14 @@ import {
   resolveMaskDisplayMode,
 } from './maskDisplay'
 import { PROJECTION_SHORTCUTS_LINES } from './projectionKeyboardHelp'
+import {
+  adjustProjectionScalePercent,
+  percentToScale,
+  PROJECTION_SCALE_COARSE_STEP_PCT,
+  PROJECTION_SCALE_FINE_STEP_PCT,
+  PROJECTION_ZOOM_OVERLAY_MS,
+  scaleToPercent,
+} from './projectionZoom'
 import { writeProjectionPopupBounds } from '@/lib/projectionWindowBounds'
 import type { Layer, SessionData } from '../types'
 import { loadViewerHudState, saveViewerHudState, getViewerHudKey } from './projectionViewerState'
@@ -90,10 +98,12 @@ export default function ProjectionViewerWindow() {
   const [showOriginalImage, setShowOriginalImage] = useState(false)
   const [usePureMask, setUsePureMask] = useState(false)
   const [showHudOverlay, setShowHudOverlay] = useState(false)
+  const [zoomOverlayPercent, setZoomOverlayPercent] = useState<number | null>(null)
   const [maskLoadError, setMaskLoadError] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const imageContainerRef = useRef<HTMLDivElement>(null)
   const mouseTimerRef = useRef<NodeJS.Timeout>()
+  const zoomOverlayTimerRef = useRef<ReturnType<typeof setTimeout>>()
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null)
   const [coloredMaskUrl, setColoredMaskUrl] = useState<string | null>(null)
   const [lassoMode, setLassoModeState] = useState<'' | 'drawing' | 'active'>(() => (typeof window !== 'undefined' ? getLassoMode(sessionId) : ''))
@@ -101,6 +111,32 @@ export default function ProjectionViewerWindow() {
   const [lassoDrawingPoints, setLassoDrawingPoints] = useState<LassoPoint[]>([])
   const [layersInLasso, setLayersInLasso] = useState<number[]>([])
   const lassoPathComputedRef = useRef(false)
+
+  const showZoomOverlay = useCallback((pct: number) => {
+    setZoomOverlayPercent(pct)
+    if (zoomOverlayTimerRef.current) clearTimeout(zoomOverlayTimerRef.current)
+    zoomOverlayTimerRef.current = setTimeout(() => {
+      setZoomOverlayPercent(null)
+      zoomOverlayTimerRef.current = undefined
+    }, PROJECTION_ZOOM_OVERLAY_MS)
+  }, [])
+
+  const nudgeProjectionZoom = useCallback(
+    (deltaPct: number) => {
+      setProjectionScale((prev) => {
+        const nextPct = adjustProjectionScalePercent(scaleToPercent(prev), deltaPct)
+        showZoomOverlay(nextPct)
+        return percentToScale(nextPct)
+      })
+    },
+    [showZoomOverlay]
+  )
+
+  useEffect(() => {
+    return () => {
+      if (zoomOverlayTimerRef.current) clearTimeout(zoomOverlayTimerRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     let debounce: ReturnType<typeof setTimeout> | undefined
@@ -158,7 +194,9 @@ export default function ProjectionViewerWindow() {
       setShowOriginalImage(hud.showOriginalImage ?? false)
       setUsePureMask(hud.usePureMask ?? false)
       setShowHudOverlay(hud.showHudOverlay ?? false)
-      if (typeof ui.projectionScale === 'number') setProjectionScale(ui.projectionScale)
+      if (typeof ui.projectionScale === 'number') {
+        setProjectionScale(percentToScale(scaleToPercent(ui.projectionScale)))
+      }
     })()
     return () => {
       cancelled = true
@@ -275,8 +313,8 @@ export default function ProjectionViewerWindow() {
           setCurrentLayerState((prev) => (prev === ui.currentLayer ? prev : ui.currentLayer!))
         }
         if (typeof ui.projectionScale === 'number') {
-          const n = ui.projectionScale
-          if (n >= 0.25 && n <= 2) setProjectionScale((prev) => (prev === n ? prev : n))
+          const n = percentToScale(scaleToPercent(ui.projectionScale))
+          setProjectionScale((prev) => (prev === n ? prev : n))
         }
         if (Array.isArray(ui.doneLayers)) {
           setDoneLayers((prev) => {
@@ -440,6 +478,16 @@ export default function ProjectionViewerWindow() {
   useEffect(() => {
     const handleKeyPress = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT') return
+      if (e.code === 'Minus' || e.code === 'NumpadSubtract') {
+        e.preventDefault()
+        nudgeProjectionZoom(e.shiftKey ? -PROJECTION_SCALE_FINE_STEP_PCT : -PROJECTION_SCALE_COARSE_STEP_PCT)
+        return
+      }
+      if (e.code === 'Equal' || e.code === 'NumpadAdd') {
+        e.preventDefault()
+        nudgeProjectionZoom(e.shiftKey ? PROJECTION_SCALE_FINE_STEP_PCT : PROJECTION_SCALE_COARSE_STEP_PCT)
+        return
+      }
       switch (e.key.toLowerCase()) {
         case 'c': setCrosshairs((p) => !p); break
         case 'g':
@@ -475,9 +523,6 @@ export default function ProjectionViewerWindow() {
         case ' ': e.preventDefault(); navigateLayer(1); break
         case 'd': toggleDone(); break
         case 's': setShowDoneLayers((p) => !p); break
-        case '-': setProjectionScale((p) => Math.max(0.25, Math.round((p - 0.05) * 100) / 100)); break
-        case '=':
-        case '+': setProjectionScale((p) => Math.min(2, Math.round((p + 0.05) * 100) / 100)); break
         case 'f':
           e.preventDefault()
           setShowFinalPreview((p) => { if (!p) setShowOriginalImage(false); return !p })
@@ -515,7 +560,7 @@ export default function ProjectionViewerWindow() {
     }
     window.addEventListener('keydown', handleKeyPress)
     return () => window.removeEventListener('keydown', handleKeyPress)
-  }, [navigateLayer, toggleDone, showDoneLayers, lassoMode, sessionId, lassoDrawingPoints])
+  }, [navigateLayer, toggleDone, showDoneLayers, lassoMode, sessionId, lassoDrawingPoints, nudgeProjectionZoom])
 
   useEffect(() => {
     if (maskDisplayMode === 'white' || !sessionData || currentLayer < 0 || currentLayer >= sessionData.layers.length) {
@@ -675,6 +720,14 @@ export default function ProjectionViewerWindow() {
     >
       {blackScreen && <div className="fixed inset-0 bg-black z-50" />}
       {whiteScreen && <div className="fixed inset-0 bg-white z-50" />}
+
+      {zoomOverlayPercent !== null && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center pointer-events-none">
+          <div className="px-10 py-5 rounded-2xl bg-black/80 text-white text-6xl font-semibold tabular-nums shadow-2xl border border-white/20">
+            {zoomOverlayPercent}%
+          </div>
+        </div>
+      )}
 
       {!blackScreen && !whiteScreen && (
         <>

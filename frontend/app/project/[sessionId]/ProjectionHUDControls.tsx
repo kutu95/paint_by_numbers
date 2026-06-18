@@ -16,6 +16,12 @@ import {
   resolveMaskDisplayMode,
 } from './viewer/maskDisplay'
 import { PROJECTION_SHORTCUTS_LINE } from './viewer/projectionKeyboardHelp'
+import {
+  adjustProjectionScalePercent,
+  percentToScale,
+  PROJECTION_SCALE_COARSE_STEP_PCT,
+  scaleToPercent,
+} from './viewer/projectionZoom'
 import { fetchProjectState, saveProjectState } from '@/lib/projectSession'
 
 async function persistUiState(
@@ -53,8 +59,8 @@ export function ProjectionHUDControls({ sessionId, sessionData }: ProjectionHUDC
       })
       if (typeof ui.currentLayer === 'number' && ui.currentLayer >= 0) setCurrentLayer(ui.currentLayer)
       if (typeof ui.projectionScale === 'number') {
-        const n = ui.projectionScale
-        if (n >= 0.25 && n <= 2) setScale(n)
+        const n = percentToScale(scaleToPercent(ui.projectionScale))
+        setScale(n)
       }
       if (Array.isArray(ui.doneLayers)) setDoneLayers(new Set(ui.doneLayers))
     })
@@ -98,11 +104,13 @@ export function ProjectionHUDControls({ sessionId, sessionData }: ProjectionHUDC
     [sessionId, sessionData.layers.length]
   )
 
-  const setScaleValue = useCallback(
-    (v: number) => {
-      const clamped = Math.max(0.25, Math.min(2, Math.round(v * 100) / 100))
-      setScale(clamped)
-      void persistUiState(sessionId, { projectionScale: clamped })
+  const nudgeScale = useCallback(
+    (deltaPct: number) => {
+      setScale((prev) => {
+        const next = percentToScale(adjustProjectionScalePercent(scaleToPercent(prev), deltaPct))
+        void persistUiState(sessionId, { projectionScale: next })
+        return next
+      })
     },
     [sessionId]
   )
@@ -240,9 +248,9 @@ export function ProjectionHUDControls({ sessionId, sessionData }: ProjectionHUDC
 
         <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-2">
-            <span className="text-sm">Scale: {Math.round(scale * 100)}%</span>
-            <button type="button" onClick={() => setScaleValue(scale - 0.05)} className="px-2 py-0.5 rounded bg-gray-700 text-sm">−</button>
-            <button type="button" onClick={() => setScaleValue(scale + 0.05)} className="px-2 py-0.5 rounded bg-gray-700 text-sm">+</button>
+            <span className="text-sm">Scale: {scaleToPercent(scale)}%</span>
+            <button type="button" onClick={() => nudgeScale(-PROJECTION_SCALE_COARSE_STEP_PCT)} className="px-2 py-0.5 rounded bg-gray-700 text-sm">−</button>
+            <button type="button" onClick={() => nudgeScale(PROJECTION_SCALE_COARSE_STEP_PCT)} className="px-2 py-0.5 rounded bg-gray-700 text-sm">+</button>
           </div>
           <label className="flex items-center gap-2">
             <input
