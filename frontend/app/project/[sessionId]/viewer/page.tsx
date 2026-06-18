@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, type CSSProperties } from 'react'
 import { useParams } from 'next/navigation'
 import { projectAssetUrl } from '@/lib/projectAssets'
 import { fetchProjectSession, fetchProjectState, saveProjectState } from '@/lib/projectSession'
@@ -29,6 +29,29 @@ import {
 type OutlineMode = 'off' | 'thin' | 'thick' | 'glow'
 
 const PROJECTION_LAYER_KEY = (id: string) => `projection_current_layer_${id}`
+
+/** Largest viewport-fitting box with the session's pixel aspect ratio. */
+function projectionStageFitStyle(width: number, height: number): CSSProperties {
+  const w = Math.max(1, width)
+  const h = Math.max(1, height)
+  return {
+    position: 'relative',
+    aspectRatio: `${w} / ${h}`,
+    width: `min(100vw, calc(100vh * ${w} / ${h}))`,
+    height: `min(100vh, calc(100vw * ${h} / ${w}))`,
+  }
+}
+
+function projectionImageStyle(extra: CSSProperties = {}): CSSProperties {
+  return {
+    position: 'absolute',
+    inset: 0,
+    width: '100%',
+    height: '100%',
+    objectFit: 'contain',
+    ...extra,
+  }
+}
 
 function pointInPolygon(px: number, py: number, path: { x: number; y: number }[]): boolean {
   if (path.length < 3) return false
@@ -641,6 +664,7 @@ export default function ProjectionViewerWindow() {
     : sessionData.quantized_preview_url
       ? projectAssetUrl(sessionData.quantized_preview_url, assetVersion)
       : null
+  const stageFitStyle = projectionStageFitStyle(sessionData.width, sessionData.height)
 
   return (
     <div
@@ -708,28 +732,29 @@ export default function ProjectionViewerWindow() {
 
           <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
             <div
-              ref={imageContainerRef}
-              className="w-full h-full flex items-center justify-center"
               style={{
                 transform: `scale(${projectionScale})`,
                 transformOrigin: 'center center',
-                clipPath: lassoMode === 'active' && lassoPath && lassoPath.length >= 3
-                  ? `polygon(${lassoPath.map((p) => `${p.x * 100}% ${p.y * 100}%`).join(', ')})`
-                  : undefined,
               }}
             >
+              <div
+                ref={imageContainerRef}
+                style={{
+                  ...stageFitStyle,
+                  clipPath:
+                    lassoMode === 'active' && lassoPath && lassoPath.length >= 3
+                      ? `polygon(${lassoPath.map((p) => `${p.x * 100}% ${p.y * 100}%`).join(', ')})`
+                      : undefined,
+                }}
+              >
               {showOriginalImage && originalImageUrl ? (
                 <img
                   src={originalImageUrl}
                   alt="Original"
-                  className="absolute"
-                  style={{
+                  style={projectionImageStyle({
                     opacity: registrationMode ? 0 : 1,
                     filter: inverted ? 'invert(1)' : 'none',
-                    maxWidth: '100%',
-                    maxHeight: '100%',
-                    objectFit: 'contain',
-                  }}
+                  })}
                 />
               ) : currentLayerData.is_finished || showFinalPreview ? (
                 <img
@@ -742,14 +767,10 @@ export default function ProjectionViewerWindow() {
                         )
                   }
                   alt="Final"
-                  className="absolute"
-                  style={{
+                  style={projectionImageStyle({
                     opacity: registrationMode ? 0 : 1,
                     filter: inverted ? 'invert(1)' : 'none',
-                    maxWidth: '100%',
-                    maxHeight: '100%',
-                    objectFit: 'contain',
-                  }}
+                  })}
                 />
               ) : (
                 <>
@@ -757,14 +778,10 @@ export default function ProjectionViewerWindow() {
                     <img
                       src={coloredMaskUrl}
                       alt={`Layer ${currentLayer + 1}`}
-                      className="absolute"
-                      style={{
+                      style={projectionImageStyle({
                         opacity: registrationMode ? 0 : maskOpacity / 100,
                         filter: inverted ? 'invert(1)' : 'none',
-                        maxWidth: '100%',
-                        maxHeight: '100%',
-                        objectFit: 'contain',
-                      }}
+                      })}
                     />
                   ) : (
                     <img
@@ -776,20 +793,16 @@ export default function ProjectionViewerWindow() {
                         assetVersion
                       )}
                       alt={`Layer ${currentLayer + 1}`}
-                      className="absolute"
                       crossOrigin="anonymous"
                       onLoad={() => setMaskLoadError(null)}
                       onError={() =>
                         setMaskLoadError(usePureMask ? 'Pure mask failed to load' : 'Mask failed to load')
                       }
-                      style={{
+                      style={projectionImageStyle({
                         opacity: registrationMode ? 0 : maskOpacity / 100,
                         filter: inverted ? 'invert(1)' : 'none',
-                        maxWidth: '100%',
-                        maxHeight: '100%',
-                        objectFit: 'contain',
                         display: maskLoadError ? 'none' : undefined,
-                      }}
+                      })}
                     />
                   )}
                   {maskLoadError && (
@@ -801,12 +814,13 @@ export default function ProjectionViewerWindow() {
                     <img
                       src={outlineUrl}
                       alt="Outline"
-                      className="absolute pointer-events-none"
-                      style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                      className="pointer-events-none"
+                      style={projectionImageStyle()}
                     />
                   )}
                 </>
               )}
+              </div>
             </div>
 
             {lassoMode === 'drawing' && (
