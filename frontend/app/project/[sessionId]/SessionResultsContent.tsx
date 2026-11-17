@@ -260,7 +260,6 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
 
   const handleGenerateRecipes = async (
     forceRegenerate: boolean = false,
-    useAiSecondPass: boolean = false,
     qualityMode: 'balanced' | 'high' | 'fast' | 'server_fast' = 'balanced',
     paletteOverride: Array<{ index: number; hex: string; target_grams: number | null }> | null = null,
     mergeIntoExisting: boolean = false,
@@ -292,7 +291,6 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
       const formData = new FormData()
       formData.append('palette', JSON.stringify(palettePayload))
       formData.append('library_group', selectedLibraryGroup)
-      formData.append('use_ai_second_pass', useAiSecondPass ? 'true' : 'false')
       formData.append('quality_mode', qualityMode)
       if (forceRegenerate) formData.append('force_regenerate', 'true')
 
@@ -388,7 +386,6 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
 
     await handleGenerateRecipes(
       true,
-      false,
       'high',
       palettePayload,
       true,
@@ -642,25 +639,18 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
         <div className="flex flex-col gap-2 mb-4">
           <div className="flex gap-2">
             <button
-              onClick={() => handleGenerateRecipes(false, false, 'balanced')}
+              onClick={() => handleGenerateRecipes(false, 'balanced')}
               disabled={loadingRecipes}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50"
             >
               {loadingRecipes ? 'Generating…' : 'Generate Recipes'}
             </button>
             <button
-              onClick={() => handleGenerateRecipes(true, false, 'balanced')}
+              onClick={() => handleGenerateRecipes(true, 'balanced')}
               disabled={loadingRecipes}
               className="px-4 py-2 bg-orange-600 hover:bg-orange-700 rounded disabled:opacity-50"
             >
               Force Regenerate
-            </button>
-            <button
-              onClick={() => handleGenerateRecipes(true, true, 'balanced')}
-              disabled={loadingRecipes}
-              className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-50"
-            >
-              Refine with AI
             </button>
             <button
               onClick={handleRefineWeakColours}

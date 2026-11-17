@@ -41,6 +41,8 @@ export interface Project {
   hasArtifacts?: boolean
   hasSource?: boolean
   updatedAt?: number
+  ownerId?: string | null
+  collaboratorIds?: string[]
 }
 
 function getStored(): Project[] {
@@ -71,13 +73,23 @@ function normalizeProjects(projects: Project[]): Project[] {
     .slice(0, MAX_PROJECTS)
 }
 
+export function clearProjectCache(): void {
+  if (typeof window === 'undefined') return
+  localStorage.removeItem(STORAGE_KEY)
+  localStorage.removeItem('layerpainter_current_session_id')
+}
+
 export async function syncProjectsFromServer(force: boolean = false): Promise<Project[]> {
   if (typeof window === 'undefined') return []
   if (!force && syncingPromise) return syncingPromise
 
   syncingPromise = (async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/projects`, { cache: 'no-store' })
+      const res = await fetch(`${API_BASE_URL}/api/projects`, { cache: 'no-store', credentials: 'include' })
+      if (res.status === 401) {
+        clearProjectCache()
+        return []
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json() as { projects?: Project[] }
       const localBefore = getStored()
@@ -128,6 +140,7 @@ function mergeServerProjectWithLocal(server: Project, local?: Project): Project 
 async function upsertProjectToServer(project: Project): Promise<void> {
   const res = await fetch(`${API_BASE_URL}/api/projects/${encodeURIComponent(project.sessionId)}`, {
     method: 'PUT',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(project),
   })
@@ -140,6 +153,7 @@ async function deleteProjectFromServer(sessionId: string): Promise<void> {
   try {
     await fetch(`${API_BASE_URL}/api/projects/${encodeURIComponent(sessionId)}`, {
       method: 'DELETE',
+      credentials: 'include',
     })
   } catch (e) {
     // Ignore network failures; local cache already updated.

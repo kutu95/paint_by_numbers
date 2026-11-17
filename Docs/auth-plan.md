@@ -1,161 +1,50 @@
-# LayerPainter — User accounts (implementation plan)
+# LayerPainter — User accounts
 
-Last updated: 2026-05-30  
-Status: Planning / not implemented  
-Blocks: founding member outreach (`Docs/founding-member-brief.md`)
+Status: implemented in this repository. The shared database and the live server are unchanged until that step is approved.
 
-Goal: **minimal multi-user accounts** so each muralist has a private project workspace on hosted infra. Not full commercialisation — no Stripe, tiers, or marketplace yet.
+Each member has a private project workspace. Paint libraries stay shared among signed-in members. There is no public signup.
 
----
+## Login
 
-## Principles
+Sign-in uses the existing Supabase Auth users. One email has one password across the apps that use this login, including Farm Cashbook. A password chosen in LayerPainter replaces that shared password.
 
-1. **One account = one tenant** for projects (paint libraries stay shared in v1; per-user paint forks later).
-2. **Self-host still works** — `AUTH_DISABLED=1` preserves today's open local workflow.
-3. **Small diff** — SQLite user store, JWT in httpOnly cookie, `ownerId` on project manifests.
-4. **Fail closed** — when auth is enabled, unauthenticated requests get 401; cross-tenant access gets 403.
+LayerPainter membership is `layerpainter.user_roles` (`user_id`, `role`, `display_name`, `created_at`). It does not reference `auth.users`, because application migrations cannot point at another schema. The migration is [supabase/migrations/20261117100000_layerpainter_user_roles.sql](../supabase/migrations/20261117100000_layerpainter_user_roles.sql) and passes `sql_guard.py`. It is not applied here.
 
----
+New LayerPainter-only people are created with `user_metadata.app = "layerpainter"`, so Cashbook does not give them a Cashbook role. An email that already has a login keeps its password and its `app` metadata. Removing someone deletes only the LayerPainter role. Their Supabase user and their project files stay.
 
-## Data model
+`john@streamtime.com.au` is the admin. Grant that role with `backend/bootstrap_admin.py` when the database change is approved. The script does not print a password. If the email already has a login, sign in with it. If the script had to create the login, use Forgot password to choose one.
 
-### Users (`data/users.db` — SQLite)
+## Forgotten password
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | TEXT PK | UUID |
-| `email` | TEXT UNIQUE | Lowercased |
-| `password_hash` | TEXT | bcrypt |
-| `display_name` | TEXT | Optional |
-| `created_at` | INTEGER | ms epoch |
+This follows Farm Cashbook:
 
-### Projects (existing `manifest.json`)
+1. `/forgot-password` accepts an email.
+2. The server sends a recovery link only when that email has a LayerPainter role. Anyone else sees the same confirmation and no email is sent.
+3. The link is created with `auth.admin.generateLink({ type: "recovery" })` and mailed through Resend from `LayerPainter <john@margies.app>`.
+4. Opening `/reset-password` does not use the link. Continue calls `verifyOtp`, then the person sets a password with `updateUser`.
+5. The optional email from the Users screen is the same link, with welcome wording.
 
-Add field:
+Production links use `https://layerpainter.margies.app`. Localhost uses the request host.
 
-```json
-{
-  "ownerId": "user-uuid-here"
-}
-```
+## Projects
 
-Legacy projects without `ownerId`: when auth enabled, assign to a bootstrap admin user on first startup, or treat as inaccessible until migrated.
+Project manifests store `ownerId`. The project list and every project or session route are limited to that id. Another member receives 403. The admin does not get a view of other people's projects. A client cannot change `ownerId`.
 
-### Paths (v1 — projects only)
+When auth is on and `BOOTSTRAP_ADMIN_USER_ID` is set, startup assigns that id to projects that have no owner. Paint routes require a signed-in member and still use the shared `data/paint/` files.
 
-```
-data/
-  users.db
-  projects/{project_id}/     # unchanged layout; ownerId in manifest
-  paint/                     # shared read-only libraries (v1)
-```
+`AUTH_DISABLED=1` (the default) leaves local use as today's open workspace. The hosted app sets `AUTH_DISABLED=0` and `NEXT_PUBLIC_AUTH_REQUIRED=1` together, after the schema and admin user exist.
 
-Per-user paint isolation (`data/users/{uid}/paint/`) is a later slice.
+## Session
 
----
+Hosted pages call same-origin `/api/...`. Next.js keeps `/api/auth/*` and `/api/users/*`, and rewrites every other `/api` request to FastAPI. After Supabase sign-in, the Next app sets an httpOnly `lp_session` cookie. FastAPI checks that cookie and reads the role again, so removing a member takes effect on the next request. Logout clears the cookie and the browser project list.
 
-## API surface (new)
+## Hosted switch-on
 
-| Method | Path | Auth | Purpose |
-|--------|------|------|---------|
-| POST | `/api/auth/register` | No | Create account, set session cookie |
-| POST | `/api/auth/login` | No | Set session cookie |
-| POST | `/api/auth/logout` | Yes | Clear cookie |
-| GET | `/api/auth/me` | Yes | Current user profile |
+Do not point the live app at this until you mean to require login.
 
-### Protected routes (enforce `ownerId` when auth enabled)
-
-All existing `/api/projects/*` routes, plus generate/upload/delete.
-
-Paint routes (`/api/paint/*`) remain **shared read** in v1; calibration write paths get user scoping in a follow-up.
-
----
-
-## Backend slices
-
-### Slice 1 — Auth module (~1 day)
-
-- `backend/auth.py`: SQLite helpers, bcrypt hash/verify, JWT create/verify
-- `backend/requirements.txt`: add `PyJWT`, `bcrypt`
-- Env: `AUTH_SECRET`, `AUTH_DISABLED` (default `1` for local dev)
-- FastAPI dependency: `get_current_user_optional` / `get_current_user_required`
-- CORS: allow credentials from frontend origin
-
-### Slice 2 — Project ownership (~1 day)
-
-- `project_store.list_projects(owner_id)` filter
-- `upsert_manifest_from_client_payload` sets `ownerId` on create
-- `assert_project_owner(project_id, user_id)` helper
-- Wire dependency into all project endpoints in `main.py`
-- Migration script: tag existing manifests with bootstrap `ownerId`
-
-### Slice 3 — Frontend auth UI (~1 day)
-
-- `frontend/app/login/page.tsx`, `frontend/app/register/page.tsx`
-- `frontend/lib/auth.ts`: `fetchMe`, `login`, `register`, `logout` with `credentials: 'include'`
-- `frontend/components/AuthGate.tsx` or layout wrapper: redirect to `/login` when auth required
-- Header: signed-in email + logout
-- All `fetch(`${API_BASE_URL}/api/...`)` calls use `credentials: 'include'`
-
-### Slice 4 — Hosted config (~0.5 day)
-
-- Production: `AUTH_DISABLED=0`, strong `AUTH_SECRET`
-- Same-origin or explicit `NEXT_PUBLIC_API_BASE_URL` + CORS credentials
-- Document in `deployment/DEPLOYMENT.md`
-
----
-
-## Frontend env
-
-| Variable | Purpose |
-|----------|---------|
-| `NEXT_PUBLIC_AUTH_REQUIRED` | `1` on hosted beta; `0` local self-host |
-
-When `AUTH_REQUIRED=0`, skip login redirect (matches backend `AUTH_DISABLED`).
-
----
-
-## Security notes (v1)
-
-- httpOnly, Secure (prod), SameSite=Lax cookie
-- Password min length 8; no email verification in v1 (add before public launch)
-- Rate-limit login/register (simple in-memory or reverse proxy)
-- No password reset in v1 — manual support for founding cohort is OK
-
----
-
-## Explicitly deferred
-
-- OAuth (Google)
-- Email verification / magic links
-- Stripe + plan entitlements
-- Per-user paint library forks
-- Admin panel / user management UI
-- Password reset flow
-
----
-
-## Definition of done (founding-beta ready)
-
-- [ ] Two test accounts see different project lists on the same server
-- [ ] User A cannot open User B's project URL (403)
-- [ ] Register → upload → generate → projection works signed in
-- [ ] Logout clears session; back button does not leak data after logout
-- [ ] `AUTH_DISABLED=1` local dev unchanged for solo self-host
-
----
-
-## Suggested build order
-
-1. Slice 1 (auth endpoints + cookie)
-2. Slice 2 (project scoping) — **highest risk; do immediately after auth**
-3. Slice 3 (login UI + gate)
-4. Slice 4 (deploy config)
-5. Then: founding invites, then Stripe
-
----
-
-## Related docs
-
-- `Docs/founding-member-brief.md`
-- `Docs/commercialisation.md` — Phase 1 commercial product table
+1. Create the `layerpainter_app` login role. Do not store its password in git.
+2. Apply the migration.
+3. Put `DATABASE_URL`, `AUTH_SECRET`, the Supabase URL, anon key, and service role key, and `RESEND_API_KEY` in the server env files. The service role key stays on the Next.js server.
+4. Run `backend/bootstrap_admin.py` for `john@streamtime.com.au`.
+5. Set `BOOTSTRAP_ADMIN_USER_ID` to that user's id and `AUTH_DISABLED=0` on the backend.
+6. Build the frontend with `NEXT_PUBLIC_AUTH_REQUIRED=1` and an empty `NEXT_PUBLIC_API_BASE_URL`.

@@ -7,6 +7,8 @@ import { getProjects, getProjectBySessionId, saveProject, removeProject, syncPro
 import { fetchProjectSession, fetchProjectState } from '@/lib/projectSession'
 import { ProjectionControlPanel } from '@/app/project/[sessionId]/ProjectionControlPanel'
 import { ProjectFileList } from '@/components/ProjectFileList'
+import { AccountBar } from '@/components/AccountBar'
+import { ProjectCollaborators } from '@/components/ProjectCollaborators'
 
 const TABS = ['file', 'settings', 'image', 'paint', 'layers', 'projection'] as const
 type TabId = (typeof TABS)[number]
@@ -31,9 +33,24 @@ export default function Home() {
   const [canvasHeightCm, setCanvasHeightCm] = useState(DEFAULT_CANVAS_HEIGHT_CM)
   const [settingsSaved, setSettingsSaved] = useState(false)
   const [sessionRevision, setSessionRevision] = useState(0)
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
 
   useEffect(() => {
     setMounted(true)
+  }, [])
+
+  useEffect(() => {
+    if (process.env.NEXT_PUBLIC_AUTH_REQUIRED !== '1') return
+    let active = true
+    fetch('/api/auth/me', { credentials: 'include', cache: 'no-store' })
+      .then(async (response) => (response.ok ? response.json() : null))
+      .then((body) => {
+        if (active && body?.id) setCurrentUserId(body.id)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
   }, [])
 
   useEffect(() => {
@@ -213,7 +230,10 @@ export default function Home() {
   return (
     <div className="h-screen min-h-0 bg-gray-900 text-white flex flex-col overflow-hidden">
       <header className="flex-shrink-0 border-b border-gray-700 bg-gray-900 px-4 py-3 flex items-center justify-between flex-wrap gap-2">
-        <h1 className="text-xl font-bold">LayerPainter</h1>
+        <div className="flex items-center gap-4">
+          <h1 className="text-xl font-bold">LayerPainter</h1>
+          <AccountBar />
+        </div>
         <nav className="flex gap-1" aria-label="Tabs">
           {TABS.map((tab) => (
             <button
@@ -269,21 +289,32 @@ export default function Home() {
                   >
                     Download project JSON
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowDeleteConfirm(true)}
-                    className="px-4 py-2 bg-red-900/80 hover:bg-red-800 text-red-200 rounded"
-                  >
-                    Project delete
-                  </button>
+                  {(!currentUserId || !currentProject?.ownerId || currentProject.ownerId === currentUserId) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowDeleteConfirm(true)}
+                      className="px-4 py-2 bg-red-900/80 hover:bg-red-800 text-red-200 rounded"
+                    >
+                      Project delete
+                    </button>
+                  )}
                 </>
               )}
             </div>
             {currentSessionId && currentProject && (
               <p className="text-gray-400 text-sm">
                 Current project: <span className="text-white font-medium">{currentProject.name || 'Untitled'}</span>
+                {currentUserId && currentProject.ownerId && currentProject.ownerId !== currentUserId ? (
+                  <span className="ml-2 text-blue-300">Shared with you</span>
+                ) : null}
               </p>
             )}
+            {currentSessionId && currentUserId && currentProject?.ownerId ? (
+              <ProjectCollaborators
+                projectId={currentSessionId}
+                isOwner={currentProject.ownerId === currentUserId}
+              />
+            ) : null}
             {!mounted ? (
               <p className="text-gray-500 text-sm">Loading…</p>
             ) : projects.length === 0 ? (
@@ -292,6 +323,7 @@ export default function Home() {
               <ProjectFileList
                 projects={projects}
                 currentSessionId={currentSessionId}
+                currentUserId={currentUserId}
                 onSelect={(sessionId) => setSessionAndTab(sessionId, activeTab)}
               />
             )}

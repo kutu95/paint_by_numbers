@@ -357,10 +357,25 @@ def manifest_to_list_item(manifest: dict[str, Any]) -> dict[str, Any]:
         "hasArtifacts": (artifacts_dir(pid) / SESSION_SNAPSHOT).is_file() if pid else False,
         "hasSource": has_oriented_source(pid) or find_source_input(pid) is not None,
         "thumbUrl": source_url(pid, SOURCE_ORIENTED) if has_oriented_source(pid) else None,
+        "ownerId": manifest.get("ownerId") or None,
+        "collaboratorIds": collaborator_ids(manifest),
     }
 
 
-def list_projects() -> list[dict[str, Any]]:
+def collaborator_ids(manifest: dict[str, Any]) -> list[str]:
+    raw = manifest.get("collaboratorIds")
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if isinstance(item, str) and item]
+
+
+def user_can_access_manifest(manifest: dict[str, Any], user_id: str) -> bool:
+    if manifest.get("ownerId") == user_id:
+        return True
+    return user_id in collaborator_ids(manifest)
+
+
+def list_projects(owner_id: str | None = None) -> list[dict[str, Any]]:
     if not PROJECTS_DIR.exists():
         return []
     items: list[dict[str, Any]] = []
@@ -368,13 +383,60 @@ def list_projects() -> list[dict[str, Any]]:
         if not entry.is_dir():
             continue
         manifest = load_manifest(entry.name)
-        if manifest:
-            items.append(manifest_to_list_item(manifest))
+        if not manifest:
+            continue
+        if owner_id is not None and not user_can_access_manifest(manifest, owner_id):
+            continue
+        items.append(manifest_to_list_item(manifest))
     items.sort(key=lambda x: int(x.get("createdAt", 0) or 0), reverse=True)
     return items
 
 
+def assign_unowned_projects(owner_id: str) -> int:
+    """Stamp projects that predate accounts. Already-owned projects are left alone."""
+    if not owner_id or not PROJECTS_DIR.exists():
+        return 0
+    assigned = 0
+    for entry in PROJECTS_DIR.iterdir():
+        if not entry.is_dir():
+            continue
+        manifest = load_manifest(entry.name)
+        if not manifest or manifest.get("ownerId"):
+            continue
+        manifest["ownerId"] = owner_id
+        save_manifest(entry.name, manifest)
+        assigned += 1
+    return assigned
+
+
+def add_collaborator(project_id: str, collaborator_id: str) -> list[str]:
+    manifest = load_manifest(project_id)
+    if not manifest:
+        raise KeyError(project_id)
+    if collaborator_id == manifest.get("ownerId"):
+        raise ValueError("owner")
+    ids = collaborator_ids(manifest)
+    if collaborator_id not in ids:
+        ids.append(collaborator_id)
+        manifest["collaboratorIds"] = ids
+        save_manifest(project_id, manifest)
+    return ids
+
+
+def remove_collaborator(project_id: str, collaborator_id: str) -> list[str]:
+    manifest = load_manifest(project_id)
+    if not manifest:
+        raise KeyError(project_id)
+    ids = [item for item in collaborator_ids(manifest) if item != collaborator_id]
+    manifest["collaboratorIds"] = ids
+    save_manifest(project_id, manifest)
+    return ids
+
+
 def upsert_manifest_from_client_payload(project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(payload)
+    payload.pop("ownerId", None)
+    payload.pop("collaboratorIds", None)
     existing = load_manifest(project_id) or {}
     processing_existing = (
         existing.get("processing") if isinstance(existing.get("processing"), dict) else {}
@@ -431,6 +493,9 @@ def upsert_manifest_from_client_payload(project_id: str, payload: dict[str, Any]
             manifest[key] = existing[key]
             processing[key] = existing.get(key, processing_existing.get(key))
     manifest["processing"] = processing
+    if existing.get("ownerId"):
+        manifest["ownerId"] = existing["ownerId"]
+    manifest["collaboratorIds"] = collaborator_ids(existing)
     # Flat fields for backward compatibility in manifest file
     for k in ("nColors", "overpaintMm", "orderMode", "maxSide"):
         v = manifest["processing"].get(k if k != "nColors" else "nColors")

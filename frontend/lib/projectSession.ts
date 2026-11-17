@@ -43,7 +43,7 @@ function normalizeProjectUiState(state: ProjectUiStateInput): ProjectUiState {
 
 export async function fetchProjectInfo(projectId: string): Promise<ProjectInfo | null> {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/projects/${projectId}/info`, { cache: 'no-store' })
+    const res = await fetch(`${API_BASE_URL}/api/projects/${projectId}/info`, { cache: 'no-store', credentials: 'include' })
     if (!res.ok) return null
     return (await res.json()) as ProjectInfo
   } catch {
@@ -53,7 +53,7 @@ export async function fetchProjectInfo(projectId: string): Promise<ProjectInfo |
 
 export async function fetchProjectSession(projectId: string): Promise<SessionData | null> {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/projects/${projectId}/session`, { cache: 'no-store' })
+    const res = await fetch(`${API_BASE_URL}/api/projects/${projectId}/session`, { cache: 'no-store', credentials: 'include' })
     if (!res.ok) return null
     return (await res.json()) as SessionData
   } catch {
@@ -63,7 +63,7 @@ export async function fetchProjectSession(projectId: string): Promise<SessionDat
 
 export async function fetchProjectState(projectId: string): Promise<ProjectUiState> {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/projects/${projectId}/state`, { cache: 'no-store' })
+    const res = await fetch(`${API_BASE_URL}/api/projects/${projectId}/state`, { cache: 'no-store', credentials: 'include' })
     if (!res.ok) return {}
     return (await res.json()) as ProjectUiState
   } catch {
@@ -75,6 +75,7 @@ export async function saveProjectState(projectId: string, state: ProjectUiStateI
   try {
     await fetch(`${API_BASE_URL}/api/projects/${projectId}/state`, {
       method: 'PUT',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(normalizeProjectUiState(state)),
     })

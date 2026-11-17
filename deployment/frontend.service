@@ -8,6 +8,8 @@ User=www-data
 WorkingDirectory=/opt/layerpainter/frontend
 Environment="PATH=/usr/bin:/usr/local/bin:/usr/local/bin:/bin:/usr/bin"
 Environment="NEXT_PUBLIC_API_BASE_URL=https://layerpainter-api.margies.app"
+# Accounts: build with NEXT_PUBLIC_AUTH_REQUIRED=1 and an empty NEXT_PUBLIC_API_BASE_URL.
+# Leave this URL in place until that build. See Docs/auth-plan.md.
 Environment="PORT=3003"
 Environment="HOSTNAME=0.0.0.0"
 ExecStart=/bin/bash -c 'source /etc/profile && /usr/bin/npm start'

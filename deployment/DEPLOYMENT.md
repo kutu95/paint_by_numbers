@@ -257,3 +257,17 @@ server {
 5. Reload Nginx: `sudo systemctl reload nginx`
 
 Then update `NEXT_PUBLIC_API_BASE_URL` to use port 80 instead of 8000, and update CORS accordingly.
+
+## Accounts
+
+Accounts are off unless you turn them on. Local development stays a single open workspace while `AUTH_DISABLED` is unset or `1`, and `NEXT_PUBLIC_AUTH_REQUIRED` is unset.
+
+Turn the hosted app over to accounts only after the `layerpainter` schema and the admin user exist. The order, the env var names, and the password-reset behaviour are in [Docs/auth-plan.md](../Docs/auth-plan.md). Until that deploy, this server copy keeps working without login.
+
+When you do switch it on:
+
+- Backend `/opt/layerpainter/backend/.env`: `AUTH_DISABLED=0`, `AUTH_SECRET`, `DATABASE_URL` for `layerpainter_app`, and `BOOTSTRAP_ADMIN_USER_ID`.
+- Frontend build: `NEXT_PUBLIC_AUTH_REQUIRED=1` and an empty `NEXT_PUBLIC_API_BASE_URL`, so the browser calls same-origin `/api` and project images send the session cookie. Set `BACKEND_URL=http://127.0.0.1:8000` for the rewrite.
+- Keep `SUPABASE_SERVICE_ROLE_KEY` and `RESEND_API_KEY` on the Next.js server only.
+
+`deployment/frontend.service` still records the current public API URL. Replace that with the empty same-origin value at build time when accounts are switched on. Copying the service file alone does not enable login.

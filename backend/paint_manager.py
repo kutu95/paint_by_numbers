@@ -1431,16 +1431,23 @@ def _predict_mix_lab_from_components(
     library_group: Optional[str] = None,
     paint_ids: Optional[List[str]] = None,
 ) -> Optional[List[float]]:
-    """Predict mixed Lab from calibration curves using total dilution and subtractive Y mixing.
+    """Predict mixed Lab from calibration curves.
 
-    Each pigment is evaluated at eff = p_i / (sum_j p_j + white_ratio). Calibration swatches
-    are already pigment-in-white at that ratio, so we do not add a separate white component.
+    Swatches are pigment mixed into white, so lightness follows the total pigment
+    fraction (every coloured paint counted together). Looking each paint up at only
+    its own percentage treats the other paints as white and predicts a lighter
+    mix than the pot, so the search keeps adding pigment and the real colour
+    comes out dark. Every paint is sampled at that total fraction, then those swatches
+    are blended (subtractive luminance, weighted a* b*). A one-paint recipe is
+    the calibration sample itself.
     """
     white_ratio = max(0.0, min(1.0, float(white_ratio)))
     total_pigment = sum(max(0.0, float(r)) for _, _, r in components)
     denom = total_pigment + white_ratio
-    if denom <= 1e-12:
+    if denom <= 1e-12 or total_pigment <= 1e-12:
         return [100.0, 0.0, 0.0]
+
+    total_fraction = max(0.0, min(1.0, total_pigment / denom))
 
     labs_list: List[List[float]] = []
     weights: List[float] = []
@@ -1449,15 +1456,14 @@ def _predict_mix_lab_from_components(
         p = max(0.0, float(pigment_ratio))
         if p <= 1e-12:
             continue
-        eff_ratio = max(0.0, min(1.0, p / denom))
         pid = paint_ids[idx] if paint_ids and idx < len(paint_ids) else None
         lab: Optional[List[float]] = None
         if calibration is not None:
             lab = interpolate_lab_from_calibration(
-                calibration, eff_ratio, group=library_group, paint_id=pid
+                calibration, total_fraction, group=library_group, paint_id=pid
             )
         elif hex_rgb is not None:
-            lab = _uncalibrated_tint_lab(hex_rgb, eff_ratio)
+            lab = _uncalibrated_tint_lab(hex_rgb, total_fraction)
         if lab is None:
             continue
         labs_list.append(lab)
@@ -1468,10 +1474,13 @@ def _predict_mix_lab_from_components(
             return [100.0, 0.0, 0.0]
         return None
 
-    mixed_lab = _combine_labs_subtractive(
-        np.array(labs_list, dtype=np.float64),
-        np.array(weights, dtype=np.float64),
-    )
+    if len(labs_list) == 1:
+        mixed_lab = [float(labs_list[0][0]), float(labs_list[0][1]), float(labs_list[0][2])]
+    else:
+        mixed_lab = _combine_labs_subtractive(
+            np.array(labs_list, dtype=np.float64),
+            np.array(weights, dtype=np.float64),
+        )
     if library_group is not None:
         params = get_substrate_compensation(library_group)
         mixed_lab[0] = _apply_substrate_l_compensation(mixed_lab[0], params)
@@ -1506,24 +1515,26 @@ def _predict_mix_lab_batch(
     valid &= (ratios_batch <= max_ratios_arr + 1e-9).all(axis=1)
 
     denom = total_pigment + white_ratio + 1e-12
+    # Lightness tracks total pigment load. Sampling each paint at only its own
+    # share predicts a pale tint and the search then prescribes too much paint.
+    total_fraction = np.clip(total_pigment / denom, 0.0, 1.0)
     labs_stack = np.zeros((n, n_pigments, 3), dtype=np.float64)
     weights = np.zeros((n, n_pigments), dtype=np.float64)
 
     slot = 0
     for i in range(n_pigments):
         p = ratios_batch[:, i]
-        eff_ratio = np.clip(p / denom, 0.0, 1.0)
         calibration = paint_calibrations[i] if i < len(paint_calibrations) else None
         hex_rgb = paint_hex_colors[i] if i < len(paint_hex_colors) else None
         pid = paint_ids[i] if paint_ids and i < len(paint_ids) else None
         lab_i: Optional[np.ndarray] = None
         if calibration is not None:
             lab_i = _interpolate_lab_from_calibration_batch(
-                calibration, eff_ratio, group=library_group, paint_id=pid
+                calibration, total_fraction, group=library_group, paint_id=pid
             )
         elif hex_rgb is not None:
             lab_i = np.array(
-                [_uncalibrated_tint_lab(hex_rgb, float(e)) for e in eff_ratio],
+                [_uncalibrated_tint_lab(hex_rgb, float(e)) for e in total_fraction],
                 dtype=np.float64,
             )
         if lab_i is None:
@@ -1534,6 +1545,8 @@ def _predict_mix_lab_batch(
 
     if slot == 0:
         mixed_lab = np.full((n, 3), np.nan, dtype=np.float64)
+    elif slot == 1:
+        mixed_lab = labs_stack[:, 0, :].copy()
     else:
         mixed_lab = _combine_labs_subtractive_batch(labs_stack[:, :slot, :], weights[:, :slot])
     if library_group is not None:

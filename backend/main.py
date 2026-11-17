@@ -13,8 +13,6 @@ import traceback
 import logging
 import hashlib
 import tempfile
-import urllib.request
-import urllib.error
 import threading
 import time
 import cv2
@@ -27,6 +25,7 @@ from image_processor import (
     make_quantization_preview,
 )
 import project_store
+import auth
 from paint_manager import (
     load_library, save_library, slugify, atomic_write,
     sample_color_from_image, sample_color_from_region, normalize_calibration_samples,
@@ -78,6 +77,49 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],  # Expose all headers for CORS
 )
+
+
+def _auth_json(request: Request, payload: dict, status_code: int) -> JSONResponse:
+    response = JSONResponse(payload, status_code=status_code)
+    origin = request.headers.get("origin")
+    if origin and (
+        origin in allowed_origins
+        or "margies.app" in origin
+        or origin.startswith("http://localhost")
+        or origin.startswith("http://127.0.0.1")
+    ):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Vary"] = "Origin"
+    return response
+
+
+@app.middleware("http")
+async def require_member(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api/") or request.method == "OPTIONS":
+        return await call_next(request)
+    try:
+        user = auth.resolve_user(request)
+    except auth.MembershipUnavailable:
+        return _auth_json(request, {"detail": "Account directory is unavailable"}, 503)
+    if user is None:
+        return _auth_json(request, {"detail": "Sign in required"}, 401)
+    request.state.user = user
+    project_id = auth.project_id_from_path(path)
+    if project_id and project_store.project_exists(project_id):
+        try:
+            auth.require_project_access(user, project_id)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, str) else "You do not have access to this project"
+            return _auth_json(request, {"detail": detail}, exc.status_code)
+        if request.method == "DELETE":
+            try:
+                auth.require_project_owner(user, project_id)
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, str) else "Only the project owner can do that"
+                return _auth_json(request, {"detail": detail}, exc.status_code)
+    return await call_next(request)
 
 CALIBRATION_MIGRATION_MARKER = PAINT_DIR / ".calibration_scope_migration_v1.done"
 
@@ -412,6 +454,15 @@ def run_calibration_scope_migration_once() -> None:
 async def startup_event():
     run_calibration_scope_migration_once()
     project_store.migrate_storage_on_startup()
+    if auth.auth_disabled():
+        return
+    admin_id = os.getenv("BOOTSTRAP_ADMIN_USER_ID", "").strip()
+    if not admin_id:
+        logger.info("BOOTSTRAP_ADMIN_USER_ID is unset; existing projects without an owner stay unassigned")
+        return
+    assigned = project_store.assign_unowned_projects(admin_id)
+    if assigned:
+        logger.info("Assigned %s existing projects to the bootstrap admin", assigned)
 
 
 def _project_info_payload(project_id: str) -> dict:
@@ -439,6 +490,7 @@ def _project_info_payload(project_id: str) -> dict:
 
 @app.post("/api/sessions")
 async def create_session(
+    request: Request,
     image: UploadFile = File(...),
     n_colors: int = Form(16),
     overpaint_mm: float = Form(5.0),
@@ -492,10 +544,13 @@ async def create_session(
         n_colors, overpaint_mm, order_mode, max_side, saturation_boost, detail_level, mask_dilation_px
     )
     pid = (project_id or "").strip() or project_store.new_project_id()
+    user = auth.current_user(request)
+    auth.require_project_access(user, pid)
     if project_store.project_exists(pid) and (project_id or "").strip():
         project_store.clear_artifacts(pid)
     else:
         project_store.ensure_project_dirs(pid)
+    auth.stamp_project_owner(user, pid)
     content = await image.read()
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded image is empty")
@@ -569,6 +624,7 @@ async def create_session(
 
 @app.post("/api/preview/quantize")
 async def preview_quantize(
+    request: Request,
     image: Optional[UploadFile] = File(None),
     project_id: str = Form(""),
     n_colors: int = Form(16),
@@ -643,6 +699,7 @@ async def preview_quantize(
             preview_pid = (project_id or "").strip()
             if not preview_pid:
                 raise HTTPException(status_code=400, detail="Provide an image or project_id")
+            auth.require_project_access(auth.current_user(request), preview_pid)
             image_path = project_store.find_source_input(preview_pid)
             if not image_path:
                 raise HTTPException(status_code=404, detail="No stored source image for this project")
@@ -1135,9 +1192,11 @@ async def get_paint_library(group: str = "default"):
 
 
 @app.get("/api/projects")
-async def list_projects():
+async def list_projects(request: Request):
     """List persisted project bundles."""
-    return {"projects": project_store.list_projects()}
+    user = auth.current_user(request)
+    owner_id = None if user.auth_disabled else user.id
+    return {"projects": project_store.list_projects(owner_id)}
 
 
 @app.put("/api/projects/{session_id}")
@@ -1149,9 +1208,53 @@ async def upsert_project(session_id: str, request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Payload must be an object")
+    user = auth.current_user(request)
+    auth.require_project_access(user, session_id)
     project_store.ensure_project_dirs(session_id)
     manifest = project_store.upsert_manifest_from_client_payload(session_id, body)
+    auth.stamp_project_owner(user, session_id)
+    manifest = project_store.load_manifest(session_id) or manifest
     return project_store.manifest_to_list_item(manifest)
+
+
+@app.get("/api/projects/{project_id}/collaborators")
+async def list_collaborators(project_id: str, request: Request):
+    auth.require_project_access(auth.current_user(request), project_id)
+    manifest = project_store.load_manifest(project_id)
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"collaboratorIds": project_store.collaborator_ids(manifest)}
+
+
+@app.post("/api/projects/{project_id}/collaborators")
+async def add_collaborator(project_id: str, request: Request):
+    user = auth.current_user(request)
+    auth.require_project_owner(user, project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+    collaborator_id = str((body or {}).get("userId") or "").strip()
+    try:
+        uuid.UUID(collaborator_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="A project member is required")
+    if not project_store.project_exists(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        ids = project_store.add_collaborator(project_id, collaborator_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="The owner is already on this project")
+    return {"collaboratorIds": ids}
+
+
+@app.delete("/api/projects/{project_id}/collaborators/{collaborator_id}")
+async def remove_collaborator(project_id: str, collaborator_id: str, request: Request):
+    auth.require_project_owner(auth.current_user(request), project_id)
+    if not project_store.project_exists(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    ids = project_store.remove_collaborator(project_id, collaborator_id)
+    return {"collaboratorIds": ids}
 
 
 @app.delete("/api/projects/{session_id}")
@@ -2120,7 +2223,6 @@ async def get_palette_gamut_slice(
                 chunk_palette,
                 group,
                 force=False,
-                use_ai=False,
                 progress_key=None,
                 quality_mode="balanced",
                 cache_only=False,
@@ -2209,7 +2311,6 @@ async def _compute_recipes_async(
     palette_list: list,
     library_group: str,
     force: bool,
-    use_ai: bool,
     progress_key: Optional[str] = None,
     quality_mode: str = "balanced",
     cache_only: bool = False,
@@ -2342,7 +2443,7 @@ async def _compute_recipes_async(
             "group": library_group,
             "coverage_mg_per_cm2": library.get("coverage_mg_per_cm2"),
             "records": records,
-            "solver_version": "deterministic_v2",
+            "solver_version": "deterministic_v3_total_pigment_lightness",
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:24]
 
@@ -2468,143 +2569,6 @@ async def _compute_recipes_async(
             "predicted_hex": predicted_hex,
         }
 
-    def _structured_from_ingredients(
-        target_hex: str,
-        ingredients_in: list[dict],
-        total_grams: Optional[float],
-        recipe_type: str = "ai_refined",
-    ) -> Optional[dict]:
-        components: list[tuple[str, float]] = []
-        for ing in ingredients_in:
-            if not isinstance(ing, dict):
-                continue
-            pid = str(ing.get("paint_id", "")).strip()
-            if not pid or pid not in paints_by_id:
-                continue
-            pct = ing.get("percentage")
-            try:
-                ratio = float(pct) / 100.0
-            except Exception:
-                continue
-            if ratio <= 0:
-                continue
-            components.append((pid, ratio))
-        if not components:
-            return None
-        ingredients = _build_ingredients(components, total_grams)
-        if not ingredients:
-            return None
-        predicted_hex = _predict_mix_hex(components)
-        return {
-            "target_hex": target_hex,
-            "ingredients": ingredients,
-            "type": recipe_type,
-            "solver_recipe_type": recipe_type,
-            "error": None,
-            "uncalibrated": False,
-            "predicted_hex": predicted_hex,
-        }
-
-    def _load_calibration_context() -> dict:
-        out: dict[str, dict] = {}
-        for p in paints:
-            pid = p.get("id")
-            if not pid:
-                continue
-            cal_file = calibration_file_for(library_group, pid)
-            if not cal_file.exists():
-                continue
-            try:
-                with open(cal_file, "r") as f:
-                    cal = json.load(f)
-                samples = cal.get("samples", [])
-                compact_samples = []
-                for s in samples:
-                    if not isinstance(s, dict):
-                        continue
-                    compact_samples.append({
-                        "ratio": s.get("ratio"),
-                        "rgb": s.get("rgb"),
-                        "lab": s.get("lab"),
-                    })
-                out[pid] = {
-                    "samples": compact_samples,
-                    "reference_strip": cal.get("reference_strip"),
-                }
-            except Exception:
-                continue
-        return out
-
-    def _call_ai_refiner(target_hex: str, deterministic_recipe: dict, total_grams: Optional[float], calibration_ctx: dict) -> Optional[dict]:
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        if not api_key:
-            return None
-        model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
-
-        paints_context = []
-        for p in paints:
-            pid = p.get("id")
-            if not pid:
-                continue
-            paints_context.append({
-                "paint_id": pid,
-                "name": p.get("name"),
-                "hex_approx": p.get("hex_approx"),
-                "calibrated": pid in calibration_ctx,
-            })
-
-        payload = {
-            "model": model,
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You refine paint-mixing recipes. Return strict JSON with key 'ingredients'. "
-                        "ingredients must be a list of objects: {paint_id, percentage}. "
-                        "Percentages should sum to 100. Use only provided paint_id values."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "task": "Refine deterministic paint recipe with full calibration context.",
-                            "target_hex": target_hex,
-                            "deterministic_recipe": deterministic_recipe,
-                            "paints": paints_context,
-                            "calibration_data": calibration_ctx,
-                            "constraints": {
-                                "max_ingredients": 4,
-                                "must_sum_to_100": True,
-                            },
-                        }
-                    ),
-                },
-            ],
-        }
-
-        req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                raw = resp.read().decode("utf-8")
-            body = json.loads(raw)
-            content = body["choices"][0]["message"]["content"]
-            ai_json = json.loads(content)
-            ingredients = ai_json.get("ingredients", [])
-            return _structured_from_ingredients(target_hex, ingredients, total_grams, "ai_refined")
-        except (KeyError, ValueError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-            return None
-
     def _ensure_predicted_hex(recipe_obj: object) -> object:
         if not isinstance(recipe_obj, dict):
             return recipe_obj
@@ -2676,7 +2640,6 @@ async def _compute_recipes_async(
         phase_solver_ms = 0.0
         phase_postprocess_ms = 0.0
         phase_cache_persist_ms = 0.0
-        phase_ai_refine_ms = 0.0
 
         fingerprint = _library_fingerprint()
         recipes_by_index: dict[int, dict] = {}
@@ -2908,66 +2871,23 @@ async def _compute_recipes_async(
                     item = dict(item)
                     item["recipe"] = _apply_total_grams(item.get("recipe"), color.get("__target_grams"))
                 ordered.append(item)
-    
-        if use_ai:
-            ai_started_at = time.perf_counter()
-            # AI second pass only for poor deterministic recipes to control latency/cost.
-            _set_progress(len(palette_list), len(palette_list), "finalizing", max(0, len(palette_list) - 1), "Refining poor recipes with AI")
-            calibration_ctx = _load_calibration_context()
-            try:
-                ai_refine_limit = max(0, int(os.getenv("AI_RECIPE_REFINE_LIMIT", "6")))
-            except Exception:
-                ai_refine_limit = 6
-            refined_count = 0
-            for item in ordered:
-                if refined_count >= ai_refine_limit:
-                    break
-                recipe = item.get("recipe")
-                if not isinstance(recipe, dict):
-                    continue
-                if recipe.get("type") != "deterministic":
-                    continue
-                err = recipe.get("error")
-                try:
-                    err_val = float(err) if err is not None else None
-                except Exception:
-                    err_val = None
-                if err_val is not None and err_val < 6.0:
-                    continue
-                target_hex = recipe.get("target_hex")
-                if not target_hex:
-                    continue
-                idx = _safe_index(item.get("palette_index"))
-                grams = None
-                for c in palette_list:
-                    if _safe_index(c.get("index")) == idx:
-                        grams = c.get("__target_grams")
-                        break
-                refined = _call_ai_refiner(target_hex, recipe, grams, calibration_ctx)
-                if refined:
-                    item["recipe"] = refined
-                    item["type"] = "ai_refined"
-                    refined_count += 1
-            phase_ai_refine_ms = (time.perf_counter() - ai_started_at) * 1000.0
 
         total_ms = (time.perf_counter() - run_started_at) * 1000.0
         logger.info(
             (
-                "Recipe timing group=%s colors=%d missing=%d force=%s use_ai=%s "
+                "Recipe timing group=%s colors=%d missing=%d force=%s "
                 "cache_load_ms=%.1f cache_lookup_ms=%.1f solver_ms=%.1f "
-                "postprocess_ms=%.1f cache_persist_ms=%.1f ai_refine_ms=%.1f total_ms=%.1f"
+                "postprocess_ms=%.1f cache_persist_ms=%.1f total_ms=%.1f"
             ),
             library_group,
             len(palette_list),
             len(missing_for_solver),
             force,
-            use_ai,
             phase_cache_load_ms,
             phase_cache_lookup_ms,
             phase_solver_ms,
             phase_postprocess_ms,
             phase_cache_persist_ms,
-            phase_ai_refine_ms,
             total_ms,
         )
         return {"recipes": ordered, "cancelled": cancelled}
@@ -3143,7 +3063,7 @@ async def get_cached_recipes(
         raise HTTPException(status_code=400, detail="Missing or invalid 'palette' array")
     try:
         result = await _compute_recipes_async(
-            palette_list, library_group, force=False, use_ai=False,
+            palette_list, library_group, force=False,
             progress_key=None, quality_mode="balanced", cache_only=True,
         )
         return result
@@ -3162,7 +3082,6 @@ async def generate_recipes_from_palette(
     palette: str = Form(...),
     library_group: str = Form("default"),
     force_regenerate: str = Form("false"),
-    use_ai_second_pass: str = Form("false"),
     progress_id: str = Form(""),
     quality_mode: str = Form("balanced"),
 ):
@@ -3174,10 +3093,9 @@ async def generate_recipes_from_palette(
     if not isinstance(palette_list, list):
         raise HTTPException(status_code=400, detail="Invalid palette JSON: expected a list")
     force = force_regenerate.lower() == "true"
-    use_ai = use_ai_second_pass.lower() == "true"
     progress_key = (progress_id or "").strip() or None
     try:
-        return await _compute_recipes_async(palette_list, library_group, force, use_ai, progress_key, quality_mode)
+        return await _compute_recipes_async(palette_list, library_group, force, progress_key, quality_mode)
     except Exception as e:
         logger.exception("Recipe generation failed: %s", e)
         return {
@@ -3193,7 +3111,6 @@ async def start_recipe_job(
     palette: str = Form(...),
     library_group: str = Form("default"),
     force_regenerate: str = Form("false"),
-    use_ai_second_pass: str = Form("false"),
     quality_mode: str = Form("balanced"),
 ):
     """Start recipe generation as a background job. Returns job_id; poll GET /api/paint/recipes/jobs/{job_id} for result."""
@@ -3204,7 +3121,6 @@ async def start_recipe_job(
     if not isinstance(palette_list, list):
         raise HTTPException(status_code=400, detail="Invalid palette JSON: expected a list")
     force = force_regenerate.lower() == "true"
-    use_ai = use_ai_second_pass.lower() == "true"
     job_id = str(uuid.uuid4())
     with RECIPE_JOBS_LOCK:
         RECIPE_JOBS[job_id] = {
@@ -3217,7 +3133,7 @@ async def start_recipe_job(
             "cancel_requested": False,
             "partial_recipes": [],
         }
-    asyncio.create_task(_run_recipe_job(job_id, palette_list, library_group, force, use_ai, quality_mode))
+    asyncio.create_task(_run_recipe_job(job_id, palette_list, library_group, force, quality_mode))
     return Response(status_code=202, content=json.dumps({"job_id": job_id}), media_type="application/json")
 
 
@@ -3226,7 +3142,6 @@ async def _run_recipe_job(
     palette_list: list,
     library_group: str,
     force: bool,
-    use_ai: bool,
     quality_mode: str,
 ):
     """Background task: run recipe computation and store result in RECIPE_JOBS[job_id]."""
@@ -3239,7 +3154,6 @@ async def _run_recipe_job(
             palette_list,
             library_group,
             force,
-            use_ai,
             progress_key=job_id,
             quality_mode=quality_mode,
         )
@@ -3343,11 +3257,13 @@ async def reset_feedback_bias(body: dict = Body(...)):
 # Verification endpoints
 @app.post("/api/paint/verify/upload")
 async def upload_verification_photo(
+    request: Request,
     image: UploadFile = File(...),
     session_id: str = Form(...),
     palette_index: int = Form(...)
 ):
     """Upload a verification swatch photo."""
+    auth.require_project_access(auth.current_user(request), session_id)
     if not project_store.project_root(session_id).is_dir():
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -3529,6 +3445,7 @@ async def spot_test_sample(
 
 @app.post("/api/paint/verify/sample")
 async def verify_swatch(
+    request: Request,
     session_id: str = Form(...),
     palette_index: int = Form(...),
     image_id: str = Form(...),
@@ -3545,6 +3462,7 @@ async def verify_swatch(
     focus_paint_id: str = Form(""),
 ):
     """Sample verification swatch and compare to target. Average over a region (x1,y1,x2,y2) if provided, else over a small area around (x,y). If target_hex and recipe are provided and apply_feedback is true, updates per-paint feedback bias. If focus_paint_id is set, apply 100%% of the correction to that paint only (so other recipes using that paint learn from this spot test)."""
+    auth.require_project_access(auth.current_user(request), session_id)
     if not project_store.project_root(session_id).is_dir():
         raise HTTPException(status_code=404, detail="Project not found")
 

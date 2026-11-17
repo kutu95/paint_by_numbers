@@ -15,6 +15,10 @@ function formatCanvasSize(p: Project): string {
   return '—'
 }
 
+function isSharedWithMe(project: Project, currentUserId?: string | null): boolean {
+  return Boolean(currentUserId && project.ownerId && project.ownerId !== currentUserId)
+}
+
 function projectTitle(p: Project): string {
   return p.name?.trim() || 'Untitled'
 }
@@ -22,10 +26,11 @@ function projectTitle(p: Project): string {
 interface ProjectFileListProps {
   projects: Project[]
   currentSessionId: string | null
+  currentUserId?: string | null
   onSelect: (sessionId: string) => void
 }
 
-export function ProjectFileList({ projects, currentSessionId, onSelect }: ProjectFileListProps) {
+export function ProjectFileList({ projects, currentSessionId, currentUserId, onSelect }: ProjectFileListProps) {
   const [viewMode, setViewMode] = useState<ProjectFileViewMode>('list')
 
   useEffect(() => {
@@ -82,7 +87,10 @@ export function ProjectFileList({ projects, currentSessionId, onSelect }: Projec
                     selected ? 'bg-gray-700' : 'bg-gray-800/60 hover:bg-gray-700/70'
                   }`}
                 >
-                  <span className="flex-1 min-w-0 truncate font-medium text-white">{title}</span>
+                  <span className="flex-1 min-w-0 truncate font-medium text-white">
+                    {title}
+                    {isSharedWithMe(p, currentUserId) ? <span className="ml-2 text-xs font-normal text-blue-300">Shared</span> : null}
+                  </span>
                   <span className="shrink-0 text-xs text-gray-500 tabular-nums">{size}</span>
                   {fileName ? (
                     <span className="hidden xl:inline min-w-0 max-w-[10rem] 2xl:max-w-[14rem] truncate text-xs text-gray-600">
@@ -123,7 +131,10 @@ export function ProjectFileList({ projects, currentSessionId, onSelect }: Projec
                     )}
                   </div>
                   <div className="px-2 py-1.5 min-w-0">
-                    <p className="text-xs font-medium text-white truncate">{title}</p>
+                    <p className="text-xs font-medium text-white truncate">
+                      {title}
+                      {isSharedWithMe(p, currentUserId) ? <span className="ml-1 text-[10px] font-normal text-blue-300">Shared</span> : null}
+                    </p>
                     <p className="text-[10px] text-gray-500 truncate tabular-nums">{formatCanvasSize(p)}</p>
                   </div>
                 </button>
