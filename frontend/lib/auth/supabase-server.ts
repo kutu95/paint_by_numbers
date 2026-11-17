@@ -6,17 +6,14 @@ const publicAuthUrl = () => (process.env.NEXT_PUBLIC_SUPABASE_URL || '').replace
 const internalAuthUrl = () => (process.env.SUPABASE_INTERNAL_URL || '').replace(/\/$/, '')
 
 /** Keep the public project URL for cookie names, but call GoTrue on this machine. */
-export function serverAuthFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+export const serverAuthFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
   const pub = publicAuthUrl()
   const internal = internalAuthUrl()
   const rewrite = (href: string) =>
     pub && internal && href.startsWith(pub) ? internal + href.slice(pub.length) : href
-  if (typeof input === 'string') return fetch(rewrite(input), init)
-  if (input instanceof URL) return fetch(rewrite(input.toString()), init)
-  const next = rewrite(input.url)
-  if (next === input.url) return fetch(input, init)
-  return fetch(new Request(next, input), init)
-}
+  const href = typeof input === 'string' ? input : input instanceof URL ? input.toString() : String(input)
+  return fetch(rewrite(href), init)
+}) as typeof fetch
 
 export function routeSupabase() {
   const cookieStore = cookies()
