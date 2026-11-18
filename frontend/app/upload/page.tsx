@@ -297,6 +297,8 @@ export default function Home() {
   } | null>(null)
   const [mounted, setMounted] = useState(false)
   const [projectName, setProjectName] = useState('')
+  const [savedProjectName, setSavedProjectName] = useState('')
+  const [nameSaveState, setNameSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [editSessionOriginalUrl, setEditSessionOriginalUrl] = useState<string | null>(null)
 
   const appendPriorityRegionToForm = (formData: FormData) => {
@@ -320,6 +322,29 @@ export default function Home() {
   const searchParams = useSearchParams()
   const isNewProject = searchParams.get('new') === '1'
   const editSessionId = searchParams.get('edit')
+
+  const saveProjectName = useCallback(async () => {
+    if (!editSessionId) return
+    const name = projectName.trim()
+    if (!name || name === savedProjectName) return
+    const existing = getProjectBySessionId(editSessionId)
+    if (!existing) return
+    setNameSaveState('saving')
+    const saved = await saveProject({ ...existing, name }, { awaitServer: true })
+    if (!saved) {
+      setNameSaveState('error')
+      return
+    }
+    setProjectName(name)
+    setSavedProjectName(name)
+    setNameSaveState('saved')
+    if (typeof window !== 'undefined' && window.parent !== window) {
+      window.parent.postMessage(
+        { type: 'layerpainter-session-updated', sessionId: editSessionId },
+        window.location.origin
+      )
+    }
+  }, [editSessionId, projectName, savedProjectName])
 
   const persistProjectImageSettings = useCallback(
     async (
@@ -632,6 +657,8 @@ export default function Home() {
       }
       if (p) {
         setProjectName(p.name)
+        setSavedProjectName(p.name)
+        setNameSaveState('idle')
         setCanvasWidthCm(p.canvasWidthCm)
         setCanvasHeightCm(p.canvasHeightCm)
         setSaturationBoost(p.saturationBoost)
@@ -979,9 +1006,10 @@ export default function Home() {
       // Persist as a named project when created via New project or when editing
       if (editSessionId) {
         const existingProject = getProjectBySessionId(editSessionId)
+        const savedName = projectName.trim() || existingProject?.name || 'Untitled'
         saveProject({
           sessionId: data.session_id,
-          name: projectName.trim() || existingProject?.name || 'Untitled',
+          name: savedName,
           imageFileName: useStoredImage ? (existingProject?.imageFileName ?? 'image') : (image?.name || 'image'),
           libraryGroup: existingProject?.libraryGroup ?? libraryGroup,
           canvasWidthCm,
@@ -1006,6 +1034,8 @@ export default function Home() {
           orderMode,
           maxSide,
         })
+        setSavedProjectName(savedName)
+        setNameSaveState('idle')
         return
       }
       if (isNewProject && projectName.trim()) {
@@ -1285,17 +1315,44 @@ export default function Home() {
         <div className="space-y-6">
             {(isNewProject || editSessionId) && (
               <div>
-                <label className="block mb-2">Project name</label>
-                <input
-                  type="text"
-                  value={projectName}
-                  onChange={(e) => setProjectName(e.target.value)}
-                  placeholder="e.g. Sunset landscape"
-                  className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-600 text-white placeholder-gray-500"
-                />
+                <label className="block mb-2" htmlFor="project-name">Project name</label>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    id="project-name"
+                    type="text"
+                    value={projectName}
+                    onChange={(e) => {
+                      setProjectName(e.target.value)
+                      setNameSaveState('idle')
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && editSessionId) {
+                        e.preventDefault()
+                        void saveProjectName()
+                      }
+                    }}
+                    placeholder="e.g. Sunset landscape"
+                    className="min-w-[16rem] flex-1 px-3 py-2 bg-gray-800 rounded border border-gray-600 text-white placeholder-gray-500"
+                  />
+                  {editSessionId ? (
+                    <button
+                      type="button"
+                      onClick={() => void saveProjectName()}
+                      disabled={nameSaveState === 'saving' || !projectName.trim() || projectName.trim() === savedProjectName}
+                      className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {nameSaveState === 'saving' ? 'Saving…' : nameSaveState === 'saved' ? 'Saved' : 'Save name'}
+                    </button>
+                  ) : null}
+                </div>
                 <p className="text-xs text-gray-500 mt-1">
-                  {editSessionId ? 'Update the project name if you like.' : 'Give this project a title so you can find it in recent projects.'}
+                  {editSessionId
+                    ? 'Save name keeps this title without regenerating layers.'
+                    : 'Give this project a title so you can find it in recent projects.'}
                 </p>
+                {nameSaveState === 'error' ? (
+                  <p className="text-xs text-red-300 mt-1">The name could not be saved. Try again.</p>
+                ) : null}
               </div>
             )}
 

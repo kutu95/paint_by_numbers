@@ -182,7 +182,7 @@ export interface SaveProjectOptions {
 }
 
 /** Add or update a project by sessionId. Keeps list bounded. */
-export async function saveProject(project: Project, options?: SaveProjectOptions): Promise<void> {
+export async function saveProject(project: Project, options?: SaveProjectOptions): Promise<boolean> {
   const list = getStored()
   const idx = list.findIndex((p) => p.sessionId === project.sessionId)
   if (idx >= 0) list.splice(idx, 1)
@@ -192,14 +192,16 @@ export async function saveProject(project: Project, options?: SaveProjectOptions
   if (options?.awaitServer) {
     try {
       await upsertProjectToServer(project)
+      return true
     } catch (e) {
       console.error('Failed to save project to server:', e)
+      return false
     }
-  } else {
-    void upsertProjectToServer(project).catch((e) => {
-      console.error('Failed to save project to server:', e)
-    })
   }
+  void upsertProjectToServer(project).catch((e) => {
+    console.error('Failed to save project to server:', e)
+  })
+  return true
 }
 
 /** Remove a project by sessionId. */
