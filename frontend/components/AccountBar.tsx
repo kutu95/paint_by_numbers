@@ -1,7 +1,6 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import Link from 'next/link'
 import { browserSupabase } from '@/lib/auth/supabase-browser'
 import { clearProjectCache } from '@/lib/projects'
 
@@ -44,7 +43,6 @@ export function AccountBar() {
   return (
     <div className="flex items-center gap-3 text-sm text-gray-300">
       <span className="max-w-[16rem] truncate">{me.email}</span>
-      {me.role === 'admin' ? <Link href="/manage-users" className="text-blue-300 hover:underline">Users</Link> : null}
       <button type="button" onClick={() => void logout()} className="rounded bg-gray-700 px-2 py-1 hover:bg-gray-600">Log out</button>
     </div>
   )

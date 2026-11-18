@@ -29,6 +29,11 @@ export default function ManageUsersPage() {
   const [notice, setNotice] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [embedded, setEmbedded] = useState(false)
+
+  useEffect(() => {
+    setEmbedded(new URLSearchParams(window.location.search).get('embed') === '1')
+  }, [])
 
   const load = useCallback(async () => {
     const response = await fetch('/api/users', { cache: 'no-store', credentials: 'include' })
@@ -122,7 +127,7 @@ export default function ManageUsersPage() {
     <div className="min-h-screen bg-gray-900 text-white">
       <header className="border-b border-gray-700 px-4 py-3 flex items-center justify-between">
         <h1 className="text-xl font-bold">Users</h1>
-        <Link href="/" className="text-sm text-blue-300 hover:underline">Back to LayerPainter</Link>
+        {embedded ? null : <Link href="/" className="text-sm text-blue-300 hover:underline">Back to LayerPainter</Link>}
       </header>
       <main className="max-w-5xl mx-auto p-6 space-y-6">
         {error ? <p className="rounded bg-red-900/40 px-3 py-2 text-sm text-red-100">{error}</p> : null}

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { getProjects, getProjectBySessionId, saveProject, removeProject, syncProjectsFromServer, type Project } from '@/lib/projects'
@@ -10,8 +10,29 @@ import { ProjectFileList } from '@/components/ProjectFileList'
 import { AccountBar } from '@/components/AccountBar'
 import { ProjectCollaborators } from '@/components/ProjectCollaborators'
 
-const TABS = ['file', 'settings', 'image', 'paint', 'layers', 'projection'] as const
-type TabId = (typeof TABS)[number]
+const PROJECT_TABS = ['projects', 'image', 'layers', 'projection'] as const
+type ProjectTab = (typeof PROJECT_TABS)[number]
+type AdminSection = 'library' | 'users' | 'defaults'
+type WorkspaceTab = ProjectTab | 'admin'
+
+const AUTH_REQUIRED = process.env.NEXT_PUBLIC_AUTH_REQUIRED === '1'
+
+function projectTabFromParam(tab: string | null): ProjectTab {
+  if (tab === 'file' || tab === 'projects') return 'projects'
+  if (tab === 'image' || tab === 'layers' || tab === 'projection') return tab
+  return 'projects'
+}
+
+function adminSectionFromParam(tab: string | null, section: string | null): AdminSection {
+  if (tab === 'paint' || section === 'library') return 'library'
+  if (tab === 'settings' || section === 'defaults') return 'defaults'
+  if (section === 'users' && AUTH_REQUIRED) return 'users'
+  return 'library'
+}
+
+function isAdminRequest(tab: string | null): boolean {
+  return tab === 'admin' || tab === 'paint' || tab === 'settings'
+}
 
 const CURRENT_SESSION_KEY = 'layerpainter_current_session_id'
 const DEFAULT_PAINT_MARGIN_PERCENT = 33
@@ -20,10 +41,18 @@ const DEFAULT_CANVAS_HEIGHT_CM = 40
 
 export default function Home() {
   const searchParams = useSearchParams()
-  const tabParam = searchParams.get('tab') as TabId | null
+  const tabParam = searchParams.get('tab')
+  const sectionParam = searchParams.get('section')
   const sessionParam = searchParams.get('session')
 
-  const [activeTab, setActiveTab] = useState<TabId>(TABS.includes(tabParam as TabId) ? (tabParam as TabId) : 'file')
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>(() => (
+    isAdminRequest(tabParam) && !AUTH_REQUIRED ? 'admin' : projectTabFromParam(tabParam)
+  ))
+  const [adminSection, setAdminSection] = useState<AdminSection>(() => adminSectionFromParam(tabParam, sectionParam))
+  const [isAdmin, setIsAdmin] = useState(!AUTH_REQUIRED)
+  const [roleReady, setRoleReady] = useState(!AUTH_REQUIRED)
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false)
+  const projectMenuRef = useRef<HTMLDivElement>(null)
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
   const [mounted, setMounted] = useState(false)
@@ -45,9 +74,14 @@ export default function Home() {
     fetch('/api/auth/me', { credentials: 'include', cache: 'no-store' })
       .then(async (response) => (response.ok ? response.json() : null))
       .then((body) => {
-        if (active && body?.id) setCurrentUserId(body.id)
+        if (!active) return
+        if (body?.id) setCurrentUserId(body.id)
+        setIsAdmin(body?.role === 'admin')
+        setRoleReady(true)
       })
-      .catch(() => {})
+      .catch(() => {
+        if (active) setRoleReady(true)
+      })
     return () => {
       active = false
     }
@@ -110,8 +144,27 @@ export default function Home() {
   }, [paintMarginPercent, canvasWidthCm, canvasHeightCm, currentSessionId])
 
   useEffect(() => {
-    if (tabParam && TABS.includes(tabParam as TabId)) setActiveTab(tabParam as TabId)
-  }, [tabParam])
+    if (!roleReady) return
+    if (isAdminRequest(tabParam)) {
+      if (isAdmin) {
+        setActiveTab('admin')
+        setAdminSection(adminSectionFromParam(tabParam, sectionParam))
+      } else {
+        setActiveTab('projects')
+      }
+      return
+    }
+    if (tabParam) setActiveTab(projectTabFromParam(tabParam))
+  }, [roleReady, isAdmin, tabParam, sectionParam])
+
+  useEffect(() => {
+    if (!projectMenuOpen) return
+    const close = (event: MouseEvent) => {
+      if (!projectMenuRef.current?.contains(event.target as Node)) setProjectMenuOpen(false)
+    }
+    window.addEventListener('mousedown', close)
+    return () => window.removeEventListener('mousedown', close)
+  }, [projectMenuOpen])
 
   useEffect(() => {
     if (activeTab === 'layers' || activeTab === 'projection') {
@@ -149,7 +202,19 @@ export default function Home() {
     setCurrentSessionId(stored)
   }, [sessionParam])
 
-  const setSessionAndTab = useCallback((sessionId: string | null, tab: TabId) => {
+  const showWorkspace = useCallback((tab: WorkspaceTab, section?: AdminSection) => {
+    if (tab === 'admin' && section) setAdminSection(section)
+    setActiveTab(tab)
+    setProjectMenuOpen(false)
+    const url = new URL(window.location.href)
+    url.searchParams.set('tab', tab)
+    if (tab === 'admin') url.searchParams.set('section', section || adminSection)
+    else url.searchParams.delete('section')
+    if (currentSessionId) url.searchParams.set('session', currentSessionId)
+    window.history.replaceState({}, '', url.toString())
+  }, [adminSection, currentSessionId])
+
+  const setSessionAndTab = useCallback((sessionId: string | null, tab: ProjectTab) => {
     setCurrentSessionId(sessionId)
     if (typeof window !== 'undefined') {
       if (sessionId) localStorage.setItem(CURRENT_SESSION_KEY, sessionId)
@@ -229,33 +294,38 @@ export default function Home() {
 
   return (
     <div className="h-screen min-h-0 bg-gray-900 text-white flex flex-col overflow-hidden">
-      <header className="flex-shrink-0 border-b border-gray-700 bg-gray-900 px-4 py-3 flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-4">
+      <header className="flex-shrink-0 border-b border-gray-700 bg-gray-900 px-4 py-3 flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-4 flex-wrap">
           <h1 className="text-xl font-bold">LayerPainter</h1>
+          <nav className="flex gap-1" aria-label="Project">
+            {PROJECT_TABS.map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => showWorkspace(tab)}
+                className={`px-4 py-2 rounded capitalize ${activeTab === tab ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'}`}
+              >
+                {tab}
+              </button>
+            ))}
+          </nav>
+        </div>
+        <div className="flex items-center gap-3">
+          {isAdmin ? (
+            <button
+              type="button"
+              onClick={() => showWorkspace('admin', adminSection)}
+              className={`px-4 py-2 rounded ${activeTab === 'admin' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'}`}
+            >
+              Admin
+            </button>
+          ) : null}
           <AccountBar />
         </div>
-        <nav className="flex gap-1" aria-label="Tabs">
-          {TABS.map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              onClick={() => {
-                setActiveTab(tab)
-                const url = new URL(window.location.href)
-                url.searchParams.set('tab', tab)
-                if (currentSessionId) url.searchParams.set('session', currentSessionId)
-                window.history.replaceState({}, '', url.toString())
-              }}
-              className={`px-4 py-2 rounded capitalize ${activeTab === tab ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'}`}
-            >
-              {tab === 'paint' ? 'Paint Library' : tab === 'layers' ? 'Layers' : tab === 'projection' ? 'Projection' : tab === 'settings' ? 'Settings' : tab}
-            </button>
-          ))}
-        </nav>
       </header>
 
       <main className="flex-1 min-h-0 overflow-auto p-6">
-        <div className={activeTab !== 'file' ? 'hidden' : ''}>
+        <div className={activeTab !== 'projects' ? 'hidden' : ''}>
           <div className="max-w-4xl mx-auto space-y-4">
             <div className="flex flex-wrap items-center gap-3">
               <button
@@ -266,39 +336,27 @@ export default function Home() {
                 New project
               </button>
               {currentSessionId && (
-                <>
+                <div className="relative" ref={projectMenuRef}>
                   <button
                     type="button"
-                    onClick={handleSave}
+                    onClick={() => setProjectMenuOpen((open) => !open)}
                     className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
+                    aria-expanded={projectMenuOpen}
+                    aria-haspopup="menu"
                   >
-                    Project save
+                    Project
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setSessionAndTab(currentSessionId, 'image')}
-                    className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
-                    title="Change name in Image tab and Generate to create a new project"
-                  >
-                    Project save as
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleDownloadJson}
-                    className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
-                  >
-                    Download project JSON
-                  </button>
-                  {(!currentUserId || !currentProject?.ownerId || currentProject.ownerId === currentUserId) && (
-                    <button
-                      type="button"
-                      onClick={() => setShowDeleteConfirm(true)}
-                      className="px-4 py-2 bg-red-900/80 hover:bg-red-800 text-red-200 rounded"
-                    >
-                      Project delete
-                    </button>
-                  )}
-                </>
+                  {projectMenuOpen ? (
+                    <div className="absolute left-0 z-20 mt-1 w-56 rounded-lg border border-gray-600 bg-gray-800 py-1" role="menu">
+                      <button type="button" role="menuitem" onClick={() => { setProjectMenuOpen(false); handleSave() }} className="block w-full px-3 py-2 text-left text-sm hover:bg-gray-700">Save</button>
+                      <button type="button" role="menuitem" title="Opens Image so you can rename it and generate a new project" onClick={() => { setProjectMenuOpen(false); setSessionAndTab(currentSessionId, 'image') }} className="block w-full px-3 py-2 text-left text-sm hover:bg-gray-700">Save as new project</button>
+                      <button type="button" role="menuitem" onClick={() => { setProjectMenuOpen(false); handleDownloadJson() }} className="block w-full px-3 py-2 text-left text-sm hover:bg-gray-700">Download JSON</button>
+                      {(!currentUserId || !currentProject?.ownerId || currentProject.ownerId === currentUserId) ? (
+                        <button type="button" role="menuitem" onClick={() => { setProjectMenuOpen(false); setShowDeleteConfirm(true) }} className="block w-full px-3 py-2 text-left text-sm text-red-200 hover:bg-gray-700">Delete</button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               )}
             </div>
             {currentSessionId && currentProject && (
@@ -324,74 +382,9 @@ export default function Home() {
                 projects={projects}
                 currentSessionId={currentSessionId}
                 currentUserId={currentUserId}
-                onSelect={(sessionId) => setSessionAndTab(sessionId, activeTab)}
+                onSelect={(sessionId) => setSessionAndTab(sessionId, 'projects')}
               />
             )}
-          </div>
-        </div>
-
-        <div className={activeTab !== 'settings' ? 'hidden' : ''}>
-          <div className="max-w-lg mx-auto space-y-6">
-            <h2 className="text-xl font-bold">Settings</h2>
-
-            <div className="bg-gray-800 rounded-lg p-6 space-y-4">
-              <h3 className="text-lg font-semibold">Paint mix margin</h3>
-              <p className="text-sm text-gray-400">
-                Extra paint to order as a percentage (e.g. 33% = 1.33× calculated amount). Default 33%.
-              </p>
-              <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  min={0}
-                  max={200}
-                  value={paintMarginPercent}
-                  onChange={(e) => setPaintMarginPercent(Number(e.target.value) || 0)}
-                  className="w-24 px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:border-blue-500"
-                />
-                <span className="text-gray-400">%</span>
-              </div>
-            </div>
-
-            <div className="bg-gray-800 rounded-lg p-6 space-y-4">
-              <h3 className="text-lg font-semibold">Default canvas size (new projects)</h3>
-              <p className="text-sm text-gray-400">
-                Default width and height in cm used when creating a new project.
-              </p>
-              <div className="flex flex-wrap gap-4">
-                <div className="flex items-center gap-2">
-                  <label htmlFor="settings-canvas-width" className="text-sm text-gray-400">Width (cm)</label>
-                  <input
-                    id="settings-canvas-width"
-                    type="number"
-                    min={1}
-                    step={0.1}
-                    value={canvasWidthCm}
-                    onChange={(e) => setCanvasWidthCm(Number(e.target.value) || 0)}
-                    className="w-24 px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:border-blue-500"
-                  />
-                </div>
-                <div className="flex items-center gap-2">
-                  <label htmlFor="settings-canvas-height" className="text-sm text-gray-400">Height (cm)</label>
-                  <input
-                    id="settings-canvas-height"
-                    type="number"
-                    min={1}
-                    step={0.1}
-                    value={canvasHeightCm}
-                    onChange={(e) => setCanvasHeightCm(Number(e.target.value) || 0)}
-                    className="w-24 px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:border-blue-500"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={saveLocalSettings}
-              className="px-6 py-3 bg-blue-600 hover:bg-blue-500 rounded font-medium"
-            >
-              {settingsSaved ? 'Saved' : 'Save paint margin & default canvas'}
-            </button>
           </div>
         </div>
 
@@ -405,15 +398,68 @@ export default function Home() {
           </div>
         </div>
 
-        <div className={activeTab !== 'paint' ? 'hidden' : ''}>
-          <div className="h-[calc(100vh-8rem)] w-full">
-            <iframe
-              src="/paints"
-              title="Paint Library"
-              className="w-full h-full rounded border border-gray-700 bg-gray-900"
-            />
+        {isAdmin ? (
+        <div className={activeTab !== 'admin' ? 'hidden' : ''}>
+          <div className="max-w-6xl mx-auto space-y-4">
+            <div className="flex gap-1" role="tablist" aria-label="Admin">
+              {([
+                ['library', 'Paint library'],
+                ...(AUTH_REQUIRED ? [['users', 'Users'] as const] : []),
+                ['defaults', 'Defaults'],
+              ] as const).map(([section, label]) => (
+                <button
+                  key={section}
+                  type="button"
+                  role="tab"
+                  aria-selected={adminSection === section}
+                  onClick={() => showWorkspace('admin', section)}
+                  className={`px-3 py-1.5 rounded text-sm ${adminSection === section ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className={adminSection !== 'library' ? 'hidden' : 'h-[calc(100vh-11rem)] w-full'}>
+              <iframe src="/paints?embed=1" title="Paint library" className="w-full h-full rounded border border-gray-700 bg-gray-900" />
+            </div>
+            {AUTH_REQUIRED ? (
+              <div className={adminSection !== 'users' ? 'hidden' : 'h-[calc(100vh-11rem)] w-full'}>
+                <iframe src="/manage-users?embed=1" title="Users" className="w-full h-full rounded border border-gray-700 bg-gray-900" />
+              </div>
+            ) : null}
+            {adminSection === 'defaults' ? (
+              <div className="max-w-lg space-y-6">
+                <h2 className="text-xl font-bold">Defaults</h2>
+                <div className="bg-gray-800 rounded-lg p-6 space-y-4">
+                  <h3 className="text-lg font-semibold">Paint mix margin</h3>
+                  <p className="text-sm text-gray-400">Extra paint to order as a percentage (e.g. 33% = 1.33× calculated amount). Default 33%.</p>
+                  <div className="flex items-center gap-2">
+                    <input type="number" min={0} max={200} value={paintMarginPercent} onChange={(e) => setPaintMarginPercent(Number(e.target.value) || 0)} className="w-24 px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:border-blue-500" />
+                    <span className="text-gray-400">%</span>
+                  </div>
+                </div>
+                <div className="bg-gray-800 rounded-lg p-6 space-y-4">
+                  <h3 className="text-lg font-semibold">Default canvas size (new projects)</h3>
+                  <p className="text-sm text-gray-400">Default width and height in cm used when creating a new project.</p>
+                  <div className="flex flex-wrap gap-4">
+                    <div className="flex items-center gap-2">
+                      <label htmlFor="settings-canvas-width" className="text-sm text-gray-400">Width (cm)</label>
+                      <input id="settings-canvas-width" type="number" min={1} step={0.1} value={canvasWidthCm} onChange={(e) => setCanvasWidthCm(Number(e.target.value) || 0)} className="w-24 px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:border-blue-500" />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <label htmlFor="settings-canvas-height" className="text-sm text-gray-400">Height (cm)</label>
+                      <input id="settings-canvas-height" type="number" min={1} step={0.1} value={canvasHeightCm} onChange={(e) => setCanvasHeightCm(Number(e.target.value) || 0)} className="w-24 px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:border-blue-500" />
+                    </div>
+                  </div>
+                </div>
+                <button type="button" onClick={saveLocalSettings} className="px-6 py-3 bg-blue-600 hover:bg-blue-500 rounded font-medium">
+                  {settingsSaved ? 'Saved' : 'Save paint margin & default canvas'}
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
+        ) : null}
 
         <div className={activeTab !== 'layers' ? 'hidden' : ''}>
           <div className="max-w-4xl mx-auto">
@@ -433,13 +479,13 @@ export default function Home() {
               />
             ) : (
               <div className="bg-gray-800 rounded-lg p-8 text-center text-gray-400">
-                <p className="mb-4">Select a project from the File tab to view layers and palette.</p>
+                <p className="mb-4">Select a project from Projects to view layers and palette.</p>
                 <button
                   type="button"
-                  onClick={() => setActiveTab('file')}
+                  onClick={() => showWorkspace('projects')}
                   className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
                 >
-                  Go to File tab
+                  Go to Projects
                 </button>
               </div>
             )}
@@ -464,13 +510,13 @@ export default function Home() {
               />
             ) : (
               <div className="bg-gray-800 rounded-lg p-8 text-center text-gray-400">
-                <p className="mb-4">Select a project from the File tab to open the projection launcher.</p>
+                <p className="mb-4">Select a project from Projects to open the projection launcher.</p>
                 <button
                   type="button"
-                  onClick={() => setActiveTab('file')}
+                  onClick={() => showWorkspace('projects')}
                   className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
                 >
-                  Go to File tab
+                  Go to Projects
                 </button>
               </div>
             )}

@@ -371,6 +371,10 @@ interface LibraryRecipeRow {
 
 export default function PaintsPage() {
   const router = useRouter()
+  const [embedded, setEmbedded] = useState(false)
+  useEffect(() => {
+    setEmbedded(new URLSearchParams(window.location.search).get('embed') === '1')
+  }, [])
   const [paints, setPaints] = useState<Paint[]>([])
   const [loading, setLoading] = useState(true)
   const [showAddForm, setShowAddForm] = useState(false)
@@ -910,18 +914,22 @@ export default function PaintsPage() {
   return (
     <div className="min-h-screen bg-gray-900 text-white p-8">
       <div className="max-w-6xl mx-auto">
-        <Link href="/" className="inline-flex items-center text-gray-400 hover:text-white mb-6">
-          ← Back to menu
-        </Link>
+        {embedded ? null : (
+          <Link href="/" className="inline-flex items-center text-gray-400 hover:text-white mb-6">
+            ← Back to menu
+          </Link>
+        )}
         <div className="flex items-center justify-between mb-8">
           <h1 className="text-4xl font-bold">Paint Library</h1>
           <div className="flex gap-4">
-            <button
-              onClick={() => router.push('/')}
-              className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
-            >
-              ← Back to Home
-            </button>
+            {embedded ? null : (
+              <button
+                onClick={() => router.push('/')}
+                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
+              >
+                ← Back to Home
+              </button>
+            )}
             <button
               onClick={() => {
                 setShowAddForm(true)
