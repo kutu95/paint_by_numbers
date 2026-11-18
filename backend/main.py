@@ -124,9 +124,9 @@ async def require_member(request: Request, call_next):
 CALIBRATION_MIGRATION_MARKER = PAINT_DIR / ".calibration_scope_migration_v1.done"
 
 
-def _cors_file_response(file_path: Path, request: Request) -> FileResponse:
+def _cors_file_response(file_path: Path, request: Request, cache_control: str = "no-store, must-revalidate") -> FileResponse:
     response = FileResponse(file_path)
-    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    response.headers["Cache-Control"] = cache_control
     origin = request.headers.get("origin")
     if origin:
         if origin in allowed_origins or "layerpainter.margies.app" in origin or "margies.app" in origin:
@@ -454,6 +454,7 @@ def run_calibration_scope_migration_once() -> None:
 async def startup_event():
     run_calibration_scope_migration_once()
     project_store.migrate_storage_on_startup()
+    project_store.ensure_all_source_thumbs()
     if auth.auth_disabled():
         return
     admin_id = os.getenv("BOOTSTRAP_ADMIN_USER_ID", "").strip()
@@ -1158,10 +1159,13 @@ async def get_project_artifact(project_id: str, filename: str, request: Request)
 async def get_project_source(project_id: str, filename: str, request: Request):
     if not project_store.project_root(project_id).is_dir():
         raise HTTPException(status_code=404, detail="Project not found")
+    if filename == project_store.SOURCE_THUMB:
+        project_store.ensure_source_thumb(project_id)
     file_path = project_store.resolve_source_file(project_id, filename)
     if not file_path:
         raise HTTPException(status_code=404, detail="File not found")
-    return _cors_file_response(file_path, request)
+    cache_control = "private, max-age=31536000" if filename == project_store.SOURCE_THUMB else "no-store, must-revalidate"
+    return _cors_file_response(file_path, request, cache_control)
 
 
 @app.get("/api/sessions/{session_id}/{filename}")

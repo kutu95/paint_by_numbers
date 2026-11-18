@@ -12,7 +12,7 @@ import json
 import random
 from dataclasses import dataclass, field
 
-from project_store import SOURCE_ORIENTED, artifact_url, source_url
+from project_store import SOURCE_ORIENTED, artifact_url, source_url, write_source_thumb_for_oriented
 
 logger = logging.getLogger(__name__)
 
@@ -2544,6 +2544,8 @@ def write_oriented_source_jpeg(image_path: str, source_path: Path) -> bool:
         image = load_rgb_image_oriented(image_path)
         source_path.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(source_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        if source_path.exists():
+            write_source_thumb_for_oriented(source_path)
         return source_path.exists()
     except Exception as e:
         logger.warning(f"write_oriented_source_jpeg failed: {e}")
@@ -2722,6 +2724,7 @@ def process_image(
     # Save an oriented copy of the original image (for projection viewer "original" toggle)
     try:
         cv2.imwrite(str(oriented_file), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        write_source_thumb_for_oriented(oriented_file)
     except Exception as e:
         logger.warning(f"Failed to save oriented source image to {oriented_file}: {e}")
     

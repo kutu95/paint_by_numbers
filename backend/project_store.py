@@ -19,7 +19,9 @@ PROJECTS_DIR = Path(__file__).parent.parent / "data" / "projects"
 LEGACY_SESSIONS_DIR = Path(__file__).parent.parent / "data" / "sessions"
 
 SOURCE_ORIENTED = "oriented.jpg"
+SOURCE_THUMB = "thumb.jpg"
 SOURCE_PRIORITY_REGION = "priority_region.png"
+THUMB_MAX_SIDE = 480
 SESSION_SNAPSHOT = "session.json"
 
 
@@ -130,6 +132,75 @@ def oriented_source_path(project_id: str) -> Path:
 
 def has_oriented_source(project_id: str) -> bool:
     return oriented_source_path(project_id).is_file()
+
+
+def source_thumb_path(project_id: str) -> Path:
+    return source_dir(project_id) / SOURCE_THUMB
+
+
+def write_source_thumb_for_oriented(oriented: Path) -> bool:
+    """Write a small JPEG beside oriented.jpg for the project grid."""
+    if not oriented.is_file():
+        return False
+    try:
+        import cv2
+    except ImportError:
+        logger.warning("Cannot write source thumb; cv2 is not installed")
+        return False
+    image = cv2.imread(str(oriented))
+    if image is None:
+        return False
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    if longest > THUMB_MAX_SIDE:
+        scale = THUMB_MAX_SIDE / float(longest)
+        image = cv2.resize(
+            image,
+            (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+    dest = oriented.with_name(SOURCE_THUMB)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return bool(cv2.imwrite(str(dest), image, [int(cv2.IMWRITE_JPEG_QUALITY), 75])) and dest.is_file()
+
+
+def ensure_source_thumb(project_id: str) -> Optional[Path]:
+    """Return thumb.jpg, creating it when the oriented photo is newer."""
+    oriented = oriented_source_path(project_id)
+    dest = source_thumb_path(project_id)
+    if not oriented.is_file():
+        return dest if dest.is_file() else None
+    if dest.is_file() and dest.stat().st_mtime >= oriented.stat().st_mtime:
+        return dest
+    if write_source_thumb_for_oriented(oriented):
+        return dest
+    return None
+
+
+def source_thumb_url(project_id: str) -> Optional[str]:
+    path = ensure_source_thumb(project_id)
+    if path is None or not path.is_file():
+        return None
+    version = int(path.stat().st_mtime)
+    return f"{source_url(project_id, SOURCE_THUMB)}?v={version}"
+
+
+def ensure_all_source_thumbs() -> int:
+    if not PROJECTS_DIR.is_dir():
+        return 0
+    written = 0
+    for entry in PROJECTS_DIR.iterdir():
+        if not entry.is_dir() or not has_oriented_source(entry.name):
+            continue
+        dest = source_thumb_path(entry.name)
+        oriented = oriented_source_path(entry.name)
+        if dest.is_file() and dest.stat().st_mtime >= oriented.stat().st_mtime:
+            continue
+        if write_source_thumb_for_oriented(oriented):
+            written += 1
+    if written:
+        logger.info("Wrote %s project preview images", written)
+    return written
 
 
 def priority_region_path(project_id: str) -> Path:
@@ -356,7 +427,7 @@ def manifest_to_list_item(manifest: dict[str, Any]) -> dict[str, Any]:
         "maxSide": processing.get("maxSide") or manifest.get("maxSide"),
         "hasArtifacts": (artifacts_dir(pid) / SESSION_SNAPSHOT).is_file() if pid else False,
         "hasSource": has_oriented_source(pid) or find_source_input(pid) is not None,
-        "thumbUrl": source_url(pid, SOURCE_ORIENTED) if has_oriented_source(pid) else None,
+        "thumbUrl": source_thumb_url(pid) if has_oriented_source(pid) else None,
         "ownerId": manifest.get("ownerId") or None,
         "collaboratorIds": collaborator_ids(manifest),
     }
@@ -604,6 +675,7 @@ def _migrate_legacy_session(session_path: Path) -> None:
     oriented_legacy = session_path / "original_oriented.jpg"
     if oriented_legacy.is_file() and not has_oriented_source(pid):
         shutil.copy2(oriented_legacy, sdir / SOURCE_ORIENTED)
+        write_source_thumb_for_oriented(sdir / SOURCE_ORIENTED)
 
     # Artifacts
     if adir.is_dir():
