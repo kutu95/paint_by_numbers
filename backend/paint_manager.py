@@ -4,6 +4,7 @@ import numpy as np
 from itertools import combinations
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Callable, Any
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import os
 import re
@@ -27,6 +28,8 @@ FEEDBACK_BIAS_DIR = PAINT_DIR / "feedback_bias"
 FEEDBACK_BIAS_DIR.mkdir(parents=True, exist_ok=True)
 
 _CALIBRATION_CACHE: Dict[str, Tuple[int, Dict[str, Any]]] = {}
+_FEEDBACK_BIAS_CACHE: Dict[str, Tuple[int, Dict[str, List[float]]]] = {}
+_MONO_CACHE: Dict[int, Tuple[Tuple[int, int], np.ndarray, np.ndarray]] = {}
 
 # ----- Substrate (paper/canvas) black-point compensation defaults -----
 # Real paint on real paper cannot reach L*=0; predicted darks otherwise read too dark
@@ -51,17 +54,13 @@ def _bias_key(paint_id: str) -> str:
     return str(paint_id or "").strip().lower()
 
 
-def load_feedback_bias(group: str) -> Dict[str, List[float]]:
-    """Load per-paint Lab bias from feedback (L, a, b corrections). Keys normalized to lower case."""
-    path = _feedback_bias_file(group)
-    if not path.exists():
-        return {}
+def _read_feedback_bias_file(path: Path) -> Dict[str, List[float]]:
     try:
         with open(path, "r") as f:
             raw = json.load(f)
         if not isinstance(raw, dict):
             return {}
-        out = {}
+        out: Dict[str, List[float]] = {}
         for pid, v in raw.items():
             key = _bias_key(pid)
             if isinstance(v, (list, tuple)) and len(v) >= 3:
@@ -73,6 +72,27 @@ def load_feedback_bias(group: str) -> Dict[str, List[float]]:
         return {}
 
 
+def _feedback_bias_cached(group: str) -> Dict[str, List[float]]:
+    """In-process bias table. ``save_feedback_bias`` drops the entry after a write."""
+    cached = _FEEDBACK_BIAS_CACHE.get(group)
+    if cached is not None:
+        return cached[1]
+    path = _feedback_bias_file(group)
+    try:
+        exists = path.exists()
+    except OSError:
+        exists = False
+    out = _read_feedback_bias_file(path) if exists else {}
+    _FEEDBACK_BIAS_CACHE[group] = (0, out)
+    return out
+
+
+def load_feedback_bias(group: str) -> Dict[str, List[float]]:
+    """Load per-paint Lab bias from feedback (L, a, b corrections). Keys normalized to lower case."""
+    data = _feedback_bias_cached(group)
+    return {key: list(value) for key, value in data.items()}
+
+
 def save_feedback_bias(group: str, biases: Dict[str, List[float]]) -> None:
     """Save per-paint Lab bias (L, a, b). Keys normalized so lookup matches library paint ids."""
     path = _feedback_bias_file(group)
@@ -80,14 +100,14 @@ def save_feedback_bias(group: str, biases: Dict[str, List[float]]) -> None:
     try:
         with open(path, "w") as f:
             json.dump(payload, f, indent=2)
+        _FEEDBACK_BIAS_CACHE.pop(group, None)
     except Exception as e:
         logger.warning("Failed to save feedback bias for %s: %s", group, e)
 
 
 def get_paint_bias(group: str, paint_id: str) -> Optional[List[float]]:
     """Return [L, a, b] bias for a paint, or None if none. Lookup is case-insensitive."""
-    biases = load_feedback_bias(group)
-    return biases.get(_bias_key(paint_id))
+    return _feedback_bias_cached(group).get(_bias_key(paint_id))
 
 
 def calibration_file_for(group: str, paint_id: str) -> Path:
@@ -101,7 +121,9 @@ def _load_calibration_cached(paint_id: str, group: str = "default") -> Optional[
     cache_key = f"{group}:{paint_id}"
     cal_file = calibration_file_for(group, paint_id)
     if not cal_file.exists():
-        _CALIBRATION_CACHE.pop(cache_key, None)
+        old = _CALIBRATION_CACHE.pop(cache_key, None)
+        if old is not None:
+            _MONO_CACHE.pop(id(old[1]), None)
         return None
     try:
         mtime_ns = cal_file.stat().st_mtime_ns
@@ -111,6 +133,8 @@ def _load_calibration_cached(paint_id: str, group: str = "default") -> Optional[
         with open(cal_file, 'r') as f:
             calibration = json.load(f)
         if isinstance(calibration, dict):
+            if cached is not None:
+                _MONO_CACHE.pop(id(cached[1]), None)
             _CALIBRATION_CACHE[cache_key] = (mtime_ns, calibration)
             return calibration
     except Exception:
@@ -972,8 +996,17 @@ def _lab_Y_to_L_batch(Y: np.ndarray) -> np.ndarray:
 def _monotonic_calibration_labs(calibration: Dict) -> Tuple[np.ndarray, np.ndarray]:
     """Return (ratios asc, labs) with L* non-increasing as pigment ratio increases."""
     samples = calibration.get("samples", [])
+    sample_n = len(samples) if isinstance(samples, list) else 0
+    stamp = (id(samples) if isinstance(samples, list) else 0, sample_n)
+    cache_key = id(calibration)
+    cached = _MONO_CACHE.get(cache_key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1], cached[2]
     if not samples:
-        return np.array([], dtype=np.float64), np.zeros((0, 3), dtype=np.float64)
+        empty_ratios = np.array([], dtype=np.float64)
+        empty_labs = np.zeros((0, 3), dtype=np.float64)
+        _MONO_CACHE[cache_key] = (stamp, empty_ratios, empty_labs)
+        return empty_ratios, empty_labs
     sorted_samples = sorted(samples, key=lambda x: float(x["ratio"]))
     ratios = np.array([float(s["ratio"]) for s in sorted_samples], dtype=np.float64)
     labs = np.array([_coerce_lab_to_cielab(s["lab"]) for s in sorted_samples], dtype=np.float64)
@@ -981,6 +1014,7 @@ def _monotonic_calibration_labs(calibration: Dict) -> Tuple[np.ndarray, np.ndarr
     for i in range(1, len(labs)):
         if labs[i, 0] > labs[i - 1, 0]:
             labs[i, 0] = labs[i - 1, 0]
+    _MONO_CACHE[cache_key] = (stamp, ratios, labs)
     return ratios, labs
 
 
@@ -1045,6 +1079,28 @@ def _uncalibrated_tint_lab(hex_rgb: List[int], eff_ratio: float) -> List[float]:
     labs = np.stack([paint_lab, white_lab], axis=0)
     weights = np.array([eff_ratio, 1.0 - eff_ratio], dtype=np.float64)
     return _combine_labs_subtractive(labs, weights)
+
+
+def _uncalibrated_tint_lab_batch(hex_rgb: List[int], eff_ratios: np.ndarray) -> np.ndarray:
+    """Vector form of :func:`_uncalibrated_tint_lab`. Same branches, same subtractive mix."""
+    eff = np.clip(np.asarray(eff_ratios, dtype=np.float64).ravel(), 0.0, 1.0)
+    paint_lab = np.array(rgb_to_lab([float(c) for c in hex_rgb]), dtype=np.float64)
+    out = np.empty((eff.size, 3), dtype=np.float64)
+    near0 = eff <= 1e-9
+    near1 = eff >= 1.0 - 1e-9
+    mid = ~(near0 | near1)
+    out[near0] = (100.0, 0.0, 0.0)
+    out[near1] = paint_lab
+    if np.any(mid):
+        weight = eff[mid]
+        white_weight = 1.0 - weight
+        paint_y = float(_lab_L_to_Y_batch(np.array([paint_lab[0]], dtype=np.float64))[0])
+        white_y = float(_lab_L_to_Y_batch(np.array([100.0], dtype=np.float64))[0])
+        y_mix = 1.0 / (weight / paint_y + white_weight / white_y)
+        out[mid, 0] = _lab_Y_to_L_batch(y_mix)
+        out[mid, 1] = weight * paint_lab[1]
+        out[mid, 2] = weight * paint_lab[2]
+    return out
 
 
 def _combine_labs_subtractive(labs: np.ndarray, weights: np.ndarray) -> List[float]:
@@ -1533,10 +1589,7 @@ def _predict_mix_lab_batch(
                 calibration, total_fraction, group=library_group, paint_id=pid
             )
         elif hex_rgb is not None:
-            lab_i = np.array(
-                [_uncalibrated_tint_lab(hex_rgb, float(e)) for e in total_fraction],
-                dtype=np.float64,
-            )
+            lab_i = _uncalibrated_tint_lab_batch(hex_rgb, total_fraction)
         if lab_i is None:
             continue
         labs_stack[:, slot, :] = lab_i
@@ -1592,23 +1645,34 @@ def find_best_one_pigment_recipe(
             cal_max_ratio = max(0.0, min(1.0, get_calibration_max_ratio(calibration)))
             if cal_max_ratio <= 0.0:
                 return None
-            # Search for best ratio
-            best_ratio = None
-            best_error = float('inf')
-            
-            # Test pigment ratios across target-appropriate range.
+            # Same 0.01 grid as the previous per-step loop, evaluated in one batch.
             upper_ratio = min(max_total_pigment, cal_max_ratio)
-            for test_ratio in np.arange(0.0, upper_ratio + 0.001, 0.01):
-                white_r = 1.0 - test_ratio
-                predicted_lab = predict_mix_lab_for_paint_ratios(
-                    library_group, [paint_id], [test_ratio], white_r
+            test_ratios = np.arange(0.0, upper_ratio + 0.001, 0.01)
+            predicted = np.full((test_ratios.size, 3), np.nan, dtype=np.float64)
+            zero = test_ratios <= 1e-12
+            predicted[zero] = (100.0, 0.0, 0.0)
+            if np.any(~zero):
+                pigment = test_ratios[~zero]
+                white = 1.0 - pigment
+                denom = pigment + white
+                total_fraction = np.clip(pigment / denom, 0.0, 1.0)
+                tinted = _interpolate_lab_from_calibration_batch(
+                    calibration, total_fraction, group=library_group, paint_id=paint_id
                 )
-                if predicted_lab:
-                    error = delta_e_lab(target_lab, predicted_lab)
-                    if error < best_error:
-                        best_error = error
-                        best_ratio = test_ratio
-            
+                if tinted is not None:
+                    tinted = np.array(tinted, dtype=np.float64, copy=True)
+                    if library_group is not None:
+                        params = get_substrate_compensation(library_group)
+                        tinted[:, 0] = _apply_substrate_l_compensation_batch(tinted[:, 0], params)
+                    predicted[~zero] = tinted
+            errors = _delta_e_batch(predicted, target_lab)
+            best_index = int(np.argmin(errors)) if errors.size else -1
+            best_ratio = None
+            best_error = float("inf")
+            if best_index >= 0 and np.isfinite(errors[best_index]):
+                best_ratio = float(test_ratios[best_index])
+                best_error = float(errors[best_index])
+
             if best_ratio is not None:
                 result = {
                     'pigment_id': paint_id,
@@ -1801,6 +1865,74 @@ def find_best_two_pigment_recipe(
     return None
 
 
+def _best_on_ratio_axes(
+    axes: List[np.ndarray],
+    evaluate_batch: Callable[[Any], np.ndarray],
+    max_total_pigment: float,
+    min_ratio: float,
+    chunk_size: int,
+) -> Tuple[Optional[List[float]], float]:
+    """Argmin over the same ratio grid the recursive walk used to visit.
+
+    Each depth still reserves ``min_ratio`` for the pigments not yet chosen and
+    allows the walk's 1e-9 slack. Axis order matches that depth-first walk, so
+    equal errors keep the same first winner.
+    """
+    best_ratios: Optional[List[float]] = None
+    best_error = float("inf")
+    axis_max = [float(axis[-1]) for axis in axes]
+
+    def consume(block: np.ndarray) -> None:
+        nonlocal best_ratios, best_error
+        if block.size == 0:
+            return
+        keep = np.ones(block.shape[0], dtype=bool)
+        prefix = np.zeros(block.shape[0], dtype=np.float64)
+        pigment_count = block.shape[1]
+        for depth in range(pigment_count):
+            reserve = (pigment_count - depth - 1) * min_ratio
+            max_this = np.minimum(axis_max[depth], max_total_pigment - prefix - reserve)
+            keep &= max_this >= min_ratio
+            keep &= block[:, depth] <= max_this + 1e-9
+            prefix = prefix + block[:, depth]
+        block = block[keep]
+        if block.shape[0] == 0:
+            return
+        for start in range(0, block.shape[0], chunk_size):
+            chunk = block[start:start + chunk_size]
+            errors = evaluate_batch(chunk)
+            if errors.size == 0:
+                continue
+            index = int(np.argmin(errors))
+            err = float(errors[index])
+            if err < best_error:
+                best_error = err
+                best_ratios = [float(value) for value in chunk[index]]
+
+    def emit(outer: List[float], remaining: List[np.ndarray]) -> None:
+        if not outer and len(remaining) == 4:
+            inner_grids = np.meshgrid(*remaining[1:], indexing="ij")
+            inner = np.column_stack([grid.ravel() for grid in inner_grids])
+            for value in remaining[0]:
+                column = np.full((inner.shape[0], 1), float(value), dtype=np.float64)
+                consume(np.concatenate([column, inner], axis=1))
+            return
+        if len(remaining) > 3:
+            for value in remaining[0]:
+                emit(outer + [float(value)], remaining[1:])
+            return
+        grids = np.meshgrid(*remaining, indexing="ij")
+        block = np.column_stack([grid.ravel() for grid in grids])
+        if outer:
+            prefix = np.tile(np.asarray(outer, dtype=np.float64), (block.shape[0], 1))
+            block = np.concatenate([prefix, block], axis=1)
+        consume(block)
+
+    if axes:
+        emit([], axes)
+    return best_ratios, best_error
+
+
 def find_best_multi_pigment_recipe(
     target_lab: List[float],
     paint_ids: List[str],
@@ -1872,7 +2004,7 @@ def find_best_multi_pigment_recipe(
     }.get(n_pigments, f'{n_pigments}_pigment')
 
     uncalibrated_penalty = (n_pigments - calibrated_count) * (3.0 if n_pigments == 3 else 4.0)
-    _RECIPE_BATCH_SIZE = 2048
+    _RECIPE_BATCH_SIZE = 8192
     hue_coeffs = _hue_penalty_coeffs_per_paint(target_lab, paint_ids, library_group)
     umber_cap = None
     umber_idx = None
@@ -1882,11 +2014,13 @@ def find_best_multi_pigment_recipe(
             umber_cap = value_caps[i]
             break
 
-    def evaluate_batch(ratios_list: List[List[float]]) -> np.ndarray:
-        """List of N ratio vectors -> (N,) errors; inf for invalid."""
-        if not ratios_list:
+    def evaluate_batch(ratios_list: Any) -> np.ndarray:
+        """Ratio rows (N, pigments) -> (N,) errors; inf for invalid."""
+        ratios_arr = np.asarray(ratios_list, dtype=np.float64)
+        if ratios_arr.size == 0:
             return np.array([], dtype=np.float64)
-        ratios_arr = np.array(ratios_list, dtype=np.float64)
+        if ratios_arr.ndim == 1:
+            ratios_arr = ratios_arr.reshape(1, -1)
         lab_batch = _predict_mix_lab_batch(
             paint_calibrations,
             paint_hex_colors,
@@ -1924,47 +2058,13 @@ def find_best_multi_pigment_recipe(
                 return None, float('inf')
             ratio_axes.append(axis)
 
-        best_ratios = None
-        best_error = float('inf')
-        batch_list: List[List[float]] = []
-
-        def flush_batch() -> None:
-            nonlocal best_ratios, best_error
-            if not batch_list:
-                return
-            errors = evaluate_batch(batch_list)
-            for k, err in enumerate(errors):
-                if err < best_error:
-                    best_error = float(err)
-                    best_ratios = batch_list[k].copy()
-            batch_list.clear()
-
-        def walk(depth: int, chosen: List[float], total: float) -> None:
-            nonlocal best_ratios, best_error
-            remaining = n_pigments - depth
-            if depth == n_pigments:
-                batch_list.append(chosen.copy())
-                if len(batch_list) >= _RECIPE_BATCH_SIZE:
-                    flush_batch()
-                return
-
-            min_needed_for_rest = (remaining - 1) * min_ratio
-            max_this = min(
-                ratio_axes[depth][-1],
-                max_total_pigment - total - min_needed_for_rest
-            )
-            if max_this < min_ratio:
-                return
-
-            for ratio in ratio_axes[depth]:
-                r = float(ratio)
-                if r > max_this + 1e-9:
-                    break
-                walk(depth + 1, chosen + [r], total + r)
-
-        walk(0, [], 0.0)
-        flush_batch()
-        return best_ratios, best_error
+        return _best_on_ratio_axes(
+            ratio_axes,
+            evaluate_batch,
+            max_total_pigment,
+            min_ratio,
+            _RECIPE_BATCH_SIZE,
+        )
 
     mode = (quality_mode or "balanced").lower()
     if mode == "high":
@@ -2053,6 +2153,77 @@ def predict_mix_lab_for_paint_ratios(
         library_group=library_group,
         paint_ids=[pid for pid, r in zip(pigment_ids, pigment_ratios) if r > 1e-12],
     )
+
+
+def _warm_recipe_search_cache(paints: List[Dict], library_group: str) -> None:
+    """Load curves and bias once so parallel combo searches only read them."""
+    get_substrate_compensation(library_group)
+    _feedback_bias_cached(library_group)
+    for paint in paints:
+        paint_id = str(paint.get("id") or "").strip()
+        if not paint_id:
+            continue
+        calibration = _load_calibration_cached(paint_id, library_group)
+        if calibration is not None:
+            _monotonic_calibration_labs(calibration)
+
+
+def _recipes_for_combos(
+    target_lab: List[float],
+    combos: List[Tuple],
+    pigment_count: int,
+    library_group: str,
+    quality_mode: str,
+):
+    """Solve combos in combination order. A few run at once; later ones wait their turn.
+
+    The caller still stops at the early-exit threshold, so a later combo cannot
+    replace a winner the sequential search would not have reached.
+    """
+    if not combos:
+        return
+
+    def solve(combo: Tuple) -> Optional[Dict]:
+        paint_ids = [paint["id"] for paint in combo]
+        paint_hexes = [paint.get("hex_approx", "") for paint in combo]
+        if pigment_count == 2:
+            return find_best_two_pigment_recipe(
+                target_lab,
+                paint_ids[0],
+                paint_ids[1],
+                paint_hexes[0],
+                paint_hexes[1],
+                library_group=library_group,
+            )
+        return find_best_multi_pigment_recipe(
+            target_lab,
+            paint_ids,
+            paint_hexes,
+            library_group=library_group,
+            quality_mode=quality_mode,
+        )
+
+    workers = min(4, len(combos), os.cpu_count() or 1)
+    if workers <= 1:
+        for combo in combos:
+            yield solve(combo)
+        return
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending: Dict[int, Any] = {}
+        next_index = 0
+
+        def fill() -> None:
+            nonlocal next_index
+            while next_index < len(combos) and len(pending) < workers:
+                pending[next_index] = pool.submit(solve, combos[next_index])
+                next_index += 1
+
+        fill()
+        for index in range(len(combos)):
+            future = pending.pop(index)
+            yield future.result()
+            fill()
 
 
 def generate_recipes_for_palette(
@@ -2273,6 +2444,7 @@ def generate_recipes_for_palette(
                 multi_search_paints = search_paints[: min(local_paint_limit, len(search_paints))]
 
             max_pigments = min(local_max_pigments, len(multi_search_paints))
+            _warm_recipe_search_cache(multi_search_paints, library_group)
             for pigment_count in range(2, max_pigments + 1):
                 if cancel_cb and cancel_cb():
                     if progress_cb:
@@ -2283,7 +2455,20 @@ def generate_recipes_for_palette(
                     return recipes
                 if best_multi_error <= local_early_exit:
                     break
+                pending = []
                 for combo in combinations(multi_search_paints, pigment_count):
+                    paint_ids = [p['id'] for p in combo]
+                    if not _combo_allowed_for_target(target_lab, paint_ids):
+                        continue
+                    pending.append(combo)
+                recipes_for_combos = _recipes_for_combos(
+                    target_lab,
+                    pending,
+                    pigment_count,
+                    library_group,
+                    mode,
+                )
+                for recipe in recipes_for_combos:
                     if cancel_cb and cancel_cb():
                         if progress_cb:
                             try:
@@ -2291,40 +2476,17 @@ def generate_recipes_for_palette(
                             except Exception:
                                 pass
                         return recipes
-                    paint_ids = [p['id'] for p in combo]
-                    if not _combo_allowed_for_target(target_lab, paint_ids):
-                        continue
-                    paint_hexes = [p.get('hex_approx', '') for p in combo]
-
-                    if pigment_count == 2:
-                        recipe = find_best_two_pigment_recipe(
-                            target_lab,
-                            paint_ids[0],
-                            paint_ids[1],
-                            paint_hexes[0],
-                            paint_hexes[1],
-                            library_group=library_group,
-                        )
-                    else:
-                        recipe = find_best_multi_pigment_recipe(
-                            target_lab,
-                            paint_ids,
-                            paint_hexes,
-                            library_group=library_group,
-                            quality_mode=mode,
-                        )
-
                     if not recipe:
                         continue
-
                     adjusted_error = recipe['error']
-
                     complexity_penalty = max(0, pigment_count - 2) * 0.15
                     score = adjusted_error + complexity_penalty
                     if score < best_multi_score:
                         best_multi_score = score
                         best_multi_error = adjusted_error
                         best_multi_pigment = recipe
+                    if best_multi_error <= local_early_exit:
+                        break
                 if best_multi_error <= local_early_exit:
                     break
 
