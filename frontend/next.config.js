@@ -5,10 +5,11 @@ const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000'
 const nextConfig = {
   reactStrictMode: true,
   async rewrites() {
-    // afterFiles: Next.js auth routes under /api/auth and /api/users stay in this app.
-    // Every other /api request is proxied to FastAPI on the same origin, so the session cookie is sent.
+    // fallback runs after static files and dynamic App Router routes.
+    // afterFiles runs before dynamic routes, so it was stealing
+    // /api/projects/[projectId]/collaborators and FastAPI then rejected the email.
     return {
-      afterFiles: [
+      fallback: [
         {
           source: '/api/:path*',
           destination: `${backendUrl}/api/:path*`,
