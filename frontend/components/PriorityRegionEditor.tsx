@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 export type PriorityRegionTool = 'brush' | 'lasso' | 'picker'
 export type MaskOverlayMode = 'show' | 'dim' | 'hide'
@@ -33,8 +33,8 @@ const MAX_ZOOM = 6
 const DEFAULT_VIEWPORT_HEIGHT_PX = 320
 
 const MASK_OVERLAY_OPACITY: Record<MaskOverlayMode, number> = {
-  show: 0.45,
-  dim: 0.18,
+  show: 0.55,
+  dim: 0.22,
   hide: 0,
 }
 
@@ -128,6 +128,15 @@ export function PriorityRegionEditor({
   const displayScale = fitScale * zoom
   const displayW = naturalSize.w > 0 ? naturalSize.w * displayScale : 0
   const displayH = naturalSize.h > 0 ? naturalSize.h * displayScale : 0
+  const naturalSizeRef = useRef(naturalSize)
+  naturalSizeRef.current = naturalSize
+  const displayScaleRef = useRef(displayScale)
+  displayScaleRef.current = displayScale
+  const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null)
+
+  const screenPxToNatural = useCallback((screenPx: number) => {
+    return screenPx / Math.max(displayScaleRef.current, 1e-4)
+  }, [])
 
   const recomputeFitScale = useCallback((nw: number, nh: number) => {
     const vp = viewportRef.current
@@ -251,17 +260,20 @@ export function PriorityRegionEditor({
     }
   }, [imageReady, naturalSize.w, initialMaskUrl, exportMask])
 
-  useEffect(() => {
-    if (!imageReady || naturalSize.w <= 0) return
+  const ensureMaskCanvas = useCallback(() => {
     const canvas = maskRef.current
-    const img = imgRef.current
-    if (!canvas || !img?.naturalWidth) return
-    if (canvas.width === img.naturalWidth && canvas.height === img.naturalHeight) return
-    canvas.width = img.naturalWidth
-    canvas.height = img.naturalHeight
-    const ctx = canvas.getContext('2d')
-    ctx?.clearRect(0, 0, canvas.width, canvas.height)
-  }, [imageReady, naturalSize.w, naturalSize.h])
+    const size = naturalSizeRef.current
+    if (!canvas || size.w <= 0 || size.h <= 0) return null
+    if (canvas.width !== size.w || canvas.height !== size.h) {
+      canvas.width = size.w
+      canvas.height = size.h
+    }
+    return canvas
+  }, [])
+
+  useLayoutEffect(() => {
+    ensureMaskCanvas()
+  }, [ensureMaskCanvas, imageReady, naturalSize.w, naturalSize.h, displayW, displayH])
 
   const syncSampleCanvas = useCallback(() => {
     const img = imgRef.current
@@ -334,36 +346,38 @@ export function PriorityRegionEditor({
 
   const paintBrush = useCallback(
     (x: number, y: number) => {
-      const canvas = maskRef.current
+      const canvas = ensureMaskCanvas()
       if (!canvas) return
       const ctx = canvas.getContext('2d')
       if (!ctx) return
-      const r = Math.max(4, brushSize)
+      // The slider is a size on screen. The photo is much larger than the preview,
+      // so a natural-pixel radius would be about one pixel and invisible.
+      const r = Math.max(1, screenPxToNatural(brushSize))
       const g = ctx.createRadialGradient(x, y, 0, x, y, r)
       g.addColorStop(0, 'rgba(255,255,255,0.95)')
-      g.addColorStop(0.65, 'rgba(255,255,255,0.55)')
+      g.addColorStop(0.7, 'rgba(255,255,255,0.75)')
       g.addColorStop(1, 'rgba(255,255,255,0)')
       ctx.fillStyle = g
       ctx.beginPath()
       ctx.arc(x, y, r, 0, Math.PI * 2)
       ctx.fill()
     },
-    [brushSize]
+    [brushSize, ensureMaskCanvas, screenPxToNatural]
   )
 
   const fillLasso = useCallback((points: { x: number; y: number }[]) => {
     if (points.length < 3) return
-    const canvas = maskRef.current
+    const canvas = ensureMaskCanvas()
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    ctx.fillStyle = 'rgba(255,255,255,0.88)'
+    ctx.fillStyle = 'rgba(255,255,255,0.92)'
     ctx.beginPath()
     ctx.moveTo(points[0].x, points[0].y)
     for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y)
     ctx.closePath()
     ctx.fill()
-  }, [])
+  }, [ensureMaskCanvas])
 
   const zoomAtClient = useCallback((clientX: number, clientY: number, factor: number) => {
     const vp = viewportRef.current
@@ -408,10 +422,11 @@ export function PriorityRegionEditor({
   }
 
   const onPointerMove = (e: React.PointerEvent) => {
-    if (!drawing) return
     const img = imgRef.current
-    if (!img?.naturalWidth) return
+    if (!img) return
     const { x, y } = clientToNatural(e.clientX, e.clientY, img)
+    if (tool !== 'picker') setCursor({ x, y })
+    if (!drawing) return
     if (tool === 'brush') {
       paintBrush(x, y)
     } else {
@@ -616,20 +631,23 @@ export function PriorityRegionEditor({
             )}
             <canvas
               ref={maskRef}
-              className="absolute left-0 top-0 touch-none cursor-crosshair"
+              className="absolute left-0 top-0 touch-none"
               style={{
                 width: displayW,
                 height: displayH,
-                mixBlendMode: 'screen',
                 opacity: MASK_OVERLAY_OPACITY[maskOverlayMode],
                 pointerEvents: tool === 'picker' ? 'none' : 'auto',
+                cursor: 'none',
               }}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={onPointerUp}
-              onPointerLeave={onPointerUp}
+              onPointerLeave={(e) => {
+                setCursor(null)
+                onPointerUp(e)
+              }}
             />
-            {tool === 'lasso' && lassoPoints.length > 1 && naturalSize.w > 0 && (
+            {tool !== 'picker' && naturalSize.w > 0 && (cursor || (tool === 'lasso' && lassoPoints.length > 1)) && (
               <svg
                 className="absolute left-0 top-0 pointer-events-none"
                 width={displayW}
@@ -637,12 +655,24 @@ export function PriorityRegionEditor({
                 viewBox={`0 0 ${naturalSize.w} ${naturalSize.h}`}
                 preserveAspectRatio="none"
               >
-                <polyline
-                  points={lassoPoints.map((p) => `${p.x},${p.y}`).join(' ')}
-                  fill="none"
-                  stroke="rgb(45, 212, 191)"
-                  strokeWidth={Math.max(2, brushSize * 0.15)}
-                />
+                {tool === 'lasso' && lassoPoints.length > 1 && (
+                  <polyline
+                    points={lassoPoints.map((p) => `${p.x},${p.y}`).join(' ')}
+                    fill="none"
+                    stroke="rgb(45, 212, 191)"
+                    strokeWidth={screenPxToNatural(2.5)}
+                  />
+                )}
+                {cursor && (
+                  <circle
+                    cx={cursor.x}
+                    cy={cursor.y}
+                    r={screenPxToNatural(tool === 'brush' ? brushSize : 6)}
+                    fill={tool === 'brush' ? 'rgba(45, 212, 191, 0.28)' : 'none'}
+                    stroke="rgb(45, 212, 191)"
+                    strokeWidth={screenPxToNatural(1.5)}
+                  />
+                )}
               </svg>
             )}
           </div>
