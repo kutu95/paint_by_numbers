@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Bump this any time the processing pipeline changes in a way
 # that should invalidate previously cached masks/preview images.
-PIPELINE_VERSION = "v32"
+PIPELINE_VERSION = "v33"
 # Written beside a project source after we have checked its embedded profile.
 # "converted" means oriented.jpg is sRGB and can be reused without another transform.
 COLOR_MANAGED_MARKER = "color-managed-v1"
@@ -956,16 +956,47 @@ def apply_priority_region_preprocess(
     priority_mask: np.ndarray,
     detail_strength: float = 0.7,
 ) -> np.ndarray:
-    """Keep sharp source colour/detail inside a user-drawn region; simplify only outside."""
+    """Keep the marked region sharp. The edge stays a hard step, not a blended rim."""
     strength = _clip01(detail_strength)
     if strength <= 0.01 or not np.any(priority_mask > 0.05):
         return image_rgb
     sigma = 28.0 + (1.0 - strength) * 22.0
     smooth = cv2.bilateralFilter(image_rgb, 9, sigma, sigma)
-    core = _blur_figure_mask(priority_mask)
-    weight = np.clip(core * (0.15 + 0.85 * strength), 0.0, 1.0)[:, :, None]
+    hard = (priority_mask > 0.55).astype(np.float32)
+    weight = cv2.GaussianBlur(hard, (3, 3), 0)[:, :, None]
     blended = smooth.astype(np.float32) * (1.0 - weight) + image_rgb.astype(np.float32) * weight
     return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+def _priority_subject_mask(image_rgb: np.ndarray, priority_mask: np.ndarray) -> np.ndarray:
+    """Marked pixels, without the bright fringe where the subject meets the background.
+
+    That fringe is only a few pixels wide. Giving it a palette colour draws a halo
+    around the figure. Flat areas inside the brush, including clothing, stay.
+    """
+    hard = priority_mask > 0.55
+    if int(hard.sum()) < 64:
+        return hard
+    lab = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    lightness = lab[:, :, 0]
+    gradient = np.hypot(
+        cv2.Sobel(lightness, cv2.CV_32F, 1, 0, ksize=3),
+        cv2.Sobel(lightness, cv2.CV_32F, 0, 1, ksize=3),
+    )
+    outside = ~hard
+    if not np.any(outside):
+        return hard
+    outside_colour = np.median(lab[outside], axis=0)
+    distance = np.linalg.norm(lab - outside_colour, axis=2)
+    cut = max(18.0, float(np.percentile(gradient[hard], 80)))
+    # Only the edge pixels that already look like the surrounding photo.
+    # Clothing is a different colour, so its boundary stays in the region.
+    fringe = hard & (gradient >= cut) & (distance <= 36.0)
+    fringe_u8 = cv2.dilate(fringe.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1)
+    keep = hard & (fringe_u8 == 0)
+    if int(keep.sum()) < 64:
+        return hard
+    return keep
 
 
 def apply_easy_painting_preprocess(
@@ -1184,6 +1215,39 @@ def _fit_region_lab_centers(region_pixels: np.ndarray, n_slots: int, seed: int) 
     centers = finite[:n_slots]
     order = np.argsort(-centers[:, 0])
     return centers[order]
+
+
+def _release_priority_fringe(
+    labels: np.ndarray,
+    fringe: np.ndarray,
+    image_rgb: np.ndarray,
+) -> np.ndarray:
+    """Paint the bright subject edge with the colour just outside it, not a new outline."""
+    if not np.any(fringe):
+        return labels
+    lightness = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB)[:, :, 0].astype(np.float32)
+    gx = cv2.Sobel(lightness, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(lightness, cv2.CV_32F, 0, 1, ksize=3)
+    magnitude = np.maximum(np.hypot(gx, gy), 1e-3)
+    height, width = labels.shape
+    ys, xs = np.where(fringe)
+    step_y = gy[ys, xs] / magnitude[ys, xs]
+    step_x = gx[ys, xs] / magnitude[ys, xs]
+
+    def sample_at(distance: float) -> tuple[np.ndarray, np.ndarray]:
+        sy = np.clip(np.rint(ys + step_y * distance).astype(np.int32), 0, height - 1)
+        sx = np.clip(np.rint(xs + step_x * distance).astype(np.int32), 0, width - 1)
+        return sy, sx
+
+    sy, sx = sample_at(6.0)
+    sampled = labels[sy, sx]
+    still_on_fringe = fringe[sy, sx]
+    if np.any(still_on_fringe):
+        sy2, sx2 = sample_at(12.0)
+        sampled = np.where(still_on_fringe, labels[sy2, sx2], sampled)
+    out = labels.copy()
+    out[ys, xs] = sampled
+    return out
 
 
 def _assign_priority_pixels_to_slots(
@@ -1798,13 +1862,13 @@ def quantize_for_pipeline(
     )
     label_mask = figure_mask_labels if figure_mask_labels is not None else figure_mask
     snap_skin_slots = 0 if must_hex_list else reserved_slots
-    if label_mask is not None and (has_priority or style.figure_detail.enabled):
+    if label_mask is not None and style.figure_detail.enabled and not has_priority:
         labels = snap_figure_labels_to_original(
             image,
             labels,
             palette,
             label_mask,
-            min_weight=0.42 if has_priority else 0.72,
+            min_weight=0.72,
             skin_slot_count=snap_skin_slots,
         )
 
@@ -1827,9 +1891,13 @@ def quantize_for_pipeline(
     if reserved_slots > 0 and not must_hex_list:
         source_lab = _rgb_to_lab_pixels(image)
         if has_priority and priority_slots > 0 and label_mask is not None:
-            region_px = _gather_priority_sample_pixels(source_lab, label_mask)
+            subject = _priority_subject_mask(image, label_mask)
+            subject_weight = subject.astype(np.float32)
+            region_px = _gather_priority_sample_pixels(source_lab, subject_weight)
             region_lab = _fit_region_lab_centers(region_px, reserved_slots, seed)
-            labels = _assign_priority_pixels_to_slots(labels, label_mask, source_lab, region_lab)
+            labels = _assign_priority_pixels_to_slots(labels, subject_weight, source_lab, region_lab)
+            fringe = (label_mask > 0.55) & ~subject
+            labels = _release_priority_fringe(labels, fringe, image)
         else:
             region_px = _gather_skin_sample_pixels(image, source_lab, skin_ref)
             region_lab = _fit_skin_lab_centers(region_px, reserved_slots, seed)

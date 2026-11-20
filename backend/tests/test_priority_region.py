@@ -36,6 +36,37 @@ class PriorityRegionTests(unittest.TestCase):
         shorts_fraction = float(np.mean(shorts == shorts_label))
         self.assertGreater(shorts_fraction, 0.8)
 
+    def test_bright_subject_edge_does_not_become_its_own_colour(self):
+        image = np.full((80, 100, 3), (170, 200, 230), dtype=np.uint8)
+        image[18:62, 30:70] = (32, 28, 26)
+        # Two-pixel bright rim around the dark figure.
+        image[16:18, 28:72] = (176, 206, 228)
+        image[62:64, 28:72] = (176, 206, 228)
+        image[16:64, 28:30] = (176, 206, 228)
+        image[16:64, 70:72] = (176, 206, 228)
+        mask = np.zeros(image.shape[:2], dtype=np.float32)
+        mask[14:66, 26:74] = 1.0
+
+        labels, _quantized, _palette = quantize_for_pipeline(
+            image,
+            8,
+            saturation_boost=1.0,
+            style_preset="none",
+            favor_skin_tones=False,
+            priority_region_mask=mask,
+            priority_region_strength=0.7,
+            mask_detail_level=0.9,
+        )
+
+        rim = np.zeros(labels.shape, dtype=bool)
+        rim[16:18, 28:72] = True
+        rim[62:64, 28:72] = True
+        rim[16:64, 28:30] = True
+        rim[16:64, 70:72] = True
+        rim_label = int(np.bincount(labels[rim]).argmax())
+        shared = int(np.sum(labels == rim_label)) - int(np.sum(labels[rim] == rim_label))
+        self.assertGreater(shared, int(rim.sum()))
+
 
 if __name__ == "__main__":
     unittest.main()
