@@ -362,8 +362,16 @@ export default function Home() {
             {currentSessionId && currentProject && (
               <p className="text-gray-400 text-sm">
                 Current project: <span className="text-white font-medium">{currentProject.name || 'Untitled'}</span>
-                {currentUserId && currentProject.ownerId && currentProject.ownerId !== currentUserId ? (
+                {currentUserId && currentProject.ownerId && currentProject.ownerId !== currentUserId && (currentProject.collaboratorIds || []).includes(currentUserId) ? (
                   <span className="ml-2 text-blue-300">Shared with you</span>
+                ) : null}
+                {isAdmin && currentProject.owner ? (
+                  <span className="ml-2 text-gray-500">
+                    Owner {currentProject.owner.displayName || currentProject.owner.email || 'Unknown'}
+                    {(currentProject.collaborators || []).length > 0
+                      ? ` · With ${(currentProject.collaborators || []).map((person) => person.displayName || person.email || 'Unknown').join(', ')}`
+                      : ' · No collaborators'}
+                  </span>
                 ) : null}
               </p>
             )}
@@ -371,6 +379,7 @@ export default function Home() {
               <ProjectCollaborators
                 projectId={currentSessionId}
                 isOwner={currentProject.ownerId === currentUserId}
+                isAdmin={isAdmin}
               />
             ) : null}
             {!mounted ? (
@@ -382,6 +391,7 @@ export default function Home() {
                 projects={projects}
                 currentSessionId={currentSessionId}
                 currentUserId={currentUserId}
+                showPeople={isAdmin}
                 onSelect={(sessionId) => setSessionAndTab(sessionId, 'projects')}
               />
             )}

@@ -60,6 +60,7 @@ export async function sendPasswordEmail(
   request: { headers: Headers; nextUrl: URL },
   email: string,
   kind: PasswordEmailKind,
+  options?: { projectName?: string },
 ): Promise<PasswordEmailResult> {
   if (!process.env.RESEND_API_KEY || !process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
     console.error('Password email was not sent because email or auth is not configured')
@@ -97,9 +98,15 @@ export async function sendPasswordEmail(
   resetUrl.searchParams.set('token_hash', data.properties.hashed_token)
   resetUrl.searchParams.set('type', 'recovery')
   const safeUrl = escapeHtml(resetUrl.toString())
-  const subject = kind === 'welcome' ? 'Your LayerPainter account' : 'Reset your LayerPainter password'
+  const projectName = (options?.projectName || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 120)
+  const safeProject = escapeHtml(projectName)
+  const subject = kind === 'welcome'
+    ? (projectName ? `You're invited to ${projectName} on LayerPainter` : 'Your LayerPainter account')
+    : 'Reset your LayerPainter password'
   const intro = kind === 'welcome'
-    ? 'An account has been created for you on LayerPainter. Choose a password to sign in.'
+    ? (projectName
+      ? `You have been invited to the LayerPainter project “${safeProject}”. An account is ready for you. Choose a password to sign in and open the project.`
+      : 'An account has been created for you on LayerPainter. Choose a password to sign in.')
     : 'We received a request to reset the password for your LayerPainter account.'
   const closing = kind === 'welcome'
     ? 'This link opens the page where you set your password. It is valid for a short time. Ask an admin to send a new link if this one expires.'

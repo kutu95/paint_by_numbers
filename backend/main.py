@@ -109,7 +109,10 @@ async def require_member(request: Request, call_next):
     project_id = auth.project_id_from_path(path)
     if project_id and project_store.project_exists(project_id):
         try:
-            auth.require_project_access(user, project_id)
+            if request.method in {"GET", "HEAD"}:
+                auth.require_project_access(user, project_id)
+            else:
+                auth.require_project_member(user, project_id)
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else "You do not have access to this project"
             return _auth_json(request, {"detail": detail}, exc.status_code)
@@ -546,12 +549,13 @@ async def create_session(
     )
     pid = (project_id or "").strip() or project_store.new_project_id()
     user = auth.current_user(request)
-    auth.require_project_access(user, pid)
-    if project_store.project_exists(pid) and (project_id or "").strip():
+    replacing = bool((project_id or "").strip()) and project_store.project_exists(pid)
+    auth.require_project_member(user, pid)
+    auth.stamp_project_owner(user, pid)
+    if replacing:
         project_store.clear_artifacts(pid)
     else:
         project_store.ensure_project_dirs(pid)
-    auth.stamp_project_owner(user, pid)
     content = await image.read()
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded image is empty")
@@ -1199,8 +1203,13 @@ async def get_paint_library(group: str = "default"):
 async def list_projects(request: Request):
     """List persisted project bundles."""
     user = auth.current_user(request)
-    owner_id = None if user.auth_disabled else user.id
-    return {"projects": project_store.list_projects(owner_id)}
+    # Admins can see every project. Everyone else sees projects they own or collaborate on.
+    # A new project is stamped to the signed-in member who creates it.
+    if user.auth_disabled or user.role == "admin":
+        projects = project_store.list_projects(None)
+    else:
+        projects = project_store.list_projects(user.id)
+    return {"projects": projects}
 
 
 @app.put("/api/projects/{session_id}")
@@ -1213,10 +1222,10 @@ async def upsert_project(session_id: str, request: Request):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Payload must be an object")
     user = auth.current_user(request)
-    auth.require_project_access(user, session_id)
+    auth.require_project_member(user, session_id)
+    auth.stamp_project_owner(user, session_id)
     project_store.ensure_project_dirs(session_id)
     manifest = project_store.upsert_manifest_from_client_payload(session_id, body)
-    auth.stamp_project_owner(user, session_id)
     manifest = project_store.load_manifest(session_id) or manifest
     return project_store.manifest_to_list_item(manifest)
 

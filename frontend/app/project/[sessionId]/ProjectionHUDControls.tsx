@@ -15,7 +15,7 @@ import {
   maskDisplayModeLabel,
   resolveMaskDisplayMode,
 } from './viewer/maskDisplay'
-import { PROJECTION_SHORTCUTS_LINE } from './viewer/projectionKeyboardHelp'
+import { PROJECTION_SHORTCUT_GROUPS } from './viewer/projectionKeyboardHelp'
 import {
   adjustProjectionScalePercent,
   percentToScale,
@@ -311,8 +311,35 @@ export function ProjectionHUDControls({ sessionId, sessionData }: ProjectionHUDC
           </div>
         )}
 
-        <div className="text-xs text-gray-500 pt-2 border-t border-gray-700 leading-relaxed">
-          {PROJECTION_SHORTCUTS_LINE}
+        <div className="pt-4 border-t border-gray-700 space-y-4">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-200">What each key does</h3>
+            <p className="text-xs text-gray-500 mt-1 leading-relaxed">
+              These keys work while the projection window is focused. The on-screen HUD keeps a short reminder. The full behavior, including numpad scale keys and the = key, is listed here.
+            </p>
+          </div>
+          {PROJECTION_SHORTCUT_GROUPS.map((group) => (
+            <div key={group.title}>
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">{group.title}</h4>
+              <dl className="space-y-3">
+                {group.shortcuts.map((shortcut) => (
+                  <div key={shortcut.keys.join('|')} className="sm:grid sm:grid-cols-[11rem_1fr] sm:gap-x-4">
+                    <dt className="flex flex-wrap gap-1 mb-1 sm:mb-0">
+                      {shortcut.keys.map((key) => (
+                        <kbd
+                          key={key}
+                          className="px-1.5 py-0.5 rounded bg-gray-900 border border-gray-600 text-xs font-mono text-gray-100"
+                        >
+                          {key}
+                        </kbd>
+                      ))}
+                    </dt>
+                    <dd className="text-sm text-gray-300 leading-relaxed">{shortcut.detail}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ))}
         </div>
       </div>
     </div>

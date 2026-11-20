@@ -178,6 +178,20 @@ def project_id_from_path(path: str) -> str | None:
 def require_project_access(user: SessionUser, project_id: str) -> None:
     if user.auth_disabled or not project_id:
         return
+    if user.role == "admin":
+        return
+    if not project_store.project_exists(project_id):
+        return
+    manifest = project_store.load_manifest(project_id) or {}
+    if project_store.user_can_access_manifest(manifest, user.id):
+        return
+    raise HTTPException(status_code=403, detail="You do not have access to this project")
+
+
+def require_project_member(user: SessionUser, project_id: str) -> None:
+    """Owner or collaborator. An admin can read every project, but not change one they are not on."""
+    if user.auth_disabled or not project_id:
+        return
     if not project_store.project_exists(project_id):
         return
     manifest = project_store.load_manifest(project_id) or {}

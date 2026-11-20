@@ -86,6 +86,21 @@ class TestProjectOwnership(unittest.TestCase):
             auth.require_project_access(_user(OWNER_B), "project-a")
         self.assertEqual(raised.exception.status_code, 403)
 
+    def test_admin_can_see_another_members_project_without_taking_it(self):
+        self._write("project-a", OWNER_A)
+        self._write("project-b", OWNER_B)
+        admin = auth.SessionUser(id=OWNER_B, email="admin@example.com", role="admin")
+        auth.require_project_access(admin, "project-a")
+        with self.assertRaises(HTTPException) as raised:
+            auth.require_project_member(admin, "project-a")
+        self.assertEqual(raised.exception.status_code, 403)
+        with self.assertRaises(HTTPException) as raised:
+            auth.stamp_project_owner(admin, "project-a")
+        self.assertEqual(raised.exception.status_code, 403)
+        manifest = project_store.load_manifest("project-a")
+        assert manifest is not None
+        self.assertEqual(manifest["ownerId"], OWNER_A)
+
     def test_stamp_assigns_a_new_project_and_refuses_a_taken_one(self):
         auth.stamp_project_owner(_user(OWNER_A), "project-new")
         manifest = project_store.load_manifest("project-new")

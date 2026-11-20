@@ -16,7 +16,8 @@ function formatCanvasSize(p: Project): string {
 }
 
 function isSharedWithMe(project: Project, currentUserId?: string | null): boolean {
-  return Boolean(currentUserId && project.ownerId && project.ownerId !== currentUserId)
+  if (!currentUserId || !project.ownerId || project.ownerId === currentUserId) return false
+  return (project.collaboratorIds || []).includes(currentUserId)
 }
 
 function projectTitle(p: Project): string {
@@ -27,10 +28,23 @@ interface ProjectFileListProps {
   projects: Project[]
   currentSessionId: string | null
   currentUserId?: string | null
+  showPeople?: boolean
   onSelect: (sessionId: string) => void
 }
 
-export function ProjectFileList({ projects, currentSessionId, currentUserId, onSelect }: ProjectFileListProps) {
+function personName(person: { email: string; displayName: string | null; userId: string } | null | undefined): string {
+  if (!person) return 'Unknown'
+  return person.displayName || person.email || 'Unknown'
+}
+
+function peopleLine(project: Project): string {
+  const owner = `Owner ${personName(project.owner)}`
+  const collaborators = project.collaborators || []
+  if (collaborators.length === 0) return `${owner} · No collaborators`
+  return `${owner} · With ${collaborators.map((person) => personName(person)).join(', ')}`
+}
+
+export function ProjectFileList({ projects, currentSessionId, currentUserId, showPeople = false, onSelect }: ProjectFileListProps) {
   const [viewMode, setViewMode] = useState<ProjectFileViewMode>('list')
 
   useEffect(() => {
@@ -82,14 +96,17 @@ export function ProjectFileList({ projects, currentSessionId, currentUserId, onS
                 <button
                   type="button"
                   onClick={() => onSelect(p.sessionId)}
-                  title={[title, size, fileName].filter(Boolean).join(' · ')}
-                  className={`w-full flex items-center gap-2 sm:gap-3 px-3 py-1.5 text-left text-sm transition-colors min-h-[2rem] ${
+                  title={[title, size, fileName, showPeople ? peopleLine(p) : ''].filter(Boolean).join(' · ')}
+                  className={`w-full flex ${showPeople ? 'items-start' : 'items-center'} gap-2 sm:gap-3 px-3 py-1.5 text-left text-sm transition-colors min-h-[2rem] ${
                     selected ? 'bg-gray-700' : 'bg-gray-800/60 hover:bg-gray-700/70'
                   }`}
                 >
-                  <span className="flex-1 min-w-0 truncate font-medium text-white">
-                    {title}
-                    {isSharedWithMe(p, currentUserId) ? <span className="ml-2 text-xs font-normal text-blue-300">Shared</span> : null}
+                  <span className="flex-1 min-w-0 font-medium text-white">
+                    <span className="block truncate">
+                      {title}
+                      {isSharedWithMe(p, currentUserId) ? <span className="ml-2 text-xs font-normal text-blue-300">Shared</span> : null}
+                    </span>
+                    {showPeople ? <span className="mt-0.5 block truncate text-xs font-normal text-gray-400">{peopleLine(p)}</span> : null}
                   </span>
                   <span className="shrink-0 text-xs text-gray-500 tabular-nums">{size}</span>
                   {fileName ? (
@@ -136,6 +153,7 @@ export function ProjectFileList({ projects, currentSessionId, currentUserId, onS
                       {isSharedWithMe(p, currentUserId) ? <span className="ml-1 text-[10px] font-normal text-blue-300">Shared</span> : null}
                     </p>
                     <p className="text-[10px] text-gray-500 truncate tabular-nums">{formatCanvasSize(p)}</p>
+                    {showPeople ? <p className="text-[10px] text-gray-400 truncate">{peopleLine(p)}</p> : null}
                   </div>
                 </button>
               </li>

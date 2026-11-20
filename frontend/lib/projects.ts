@@ -43,6 +43,8 @@ export interface Project {
   updatedAt?: number
   ownerId?: string | null
   collaboratorIds?: string[]
+  owner?: { userId: string; email: string; displayName: string | null } | null
+  collaborators?: { userId: string; email: string; displayName: string | null }[]
 }
 
 function getStored(): Project[] {
