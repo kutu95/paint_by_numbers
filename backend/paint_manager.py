@@ -1091,31 +1091,82 @@ def _uncalibrated_tint_lab_batch(hex_rgb: List[int], eff_ratios: np.ndarray) -> 
     return out
 
 
+# Paints below this chroma are greys. They darken a mix through their L* only.
+_CHROMA_CONFLICT_MIN = 6.0
+# Safety cap so one near-black channel cannot collapse the whole mix.
+_CONFLICT_FACTOR_FLOOR = 0.25
+
+
+def _spectral_conflict_factors(labs_stack: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """How much extra a mix darkens because the paints reflect different wavelengths.
+
+    Equal L* values stay equal only when the swatches reflect the same light.
+    A red and a blue both at L* 50 each absorb the wavelengths the other reflects,
+    so the pot is darker than 50. The factor is the luminance of the geometric
+    mean of their reflectance *shapes* divided by the arithmetic mean. Identical
+    colours give 1. White and grey are left out, so a tint is not darkened twice.
+    """
+    n, k, _ = labs_stack.shape
+    factors = np.ones(n, dtype=np.float64)
+    w = weights / np.maximum(weights.sum(axis=1, keepdims=True), 1e-12)
+    chroma = np.hypot(labs_stack[:, :, 1], labs_stack[:, :, 2])
+    chromatic = (weights > 1e-12) & (chroma >= _CHROMA_CONFLICT_MIN)
+    rows = np.flatnonzero(chromatic.sum(axis=1) >= 2)
+    if rows.size == 0:
+        return factors
+    sub_w = w[rows]
+    ww = np.where(chromatic[rows], sub_w, 0.0)
+    ww = ww / np.maximum(ww.sum(axis=1, keepdims=True), 1e-12)
+    rgb = _lab_to_rgb_batch(labs_stack[rows].reshape(-1, 3))
+    reflectance = np.clip(_rgb_to_linear_batch(rgb), 1e-4, 1.0).reshape(rows.size, k, 3)
+    channel_y = np.maximum(
+        0.2126 * reflectance[:, :, 0]
+        + 0.7152 * reflectance[:, :, 1]
+        + 0.0722 * reflectance[:, :, 2],
+        1e-4,
+    )
+    shape = reflectance / channel_y[:, :, None]
+    arith = np.sum(ww[:, :, None] * shape, axis=1)
+    geo = np.exp(np.sum(ww[:, :, None] * np.log(np.clip(shape, 1e-4, None)), axis=1))
+    y_arith = np.maximum(
+        0.2126 * arith[:, 0] + 0.7152 * arith[:, 1] + 0.0722 * arith[:, 2],
+        1e-6,
+    )
+    y_geo = 0.2126 * geo[:, 0] + 0.7152 * geo[:, 1] + 0.0722 * geo[:, 2]
+    factors[rows] = np.clip(y_geo / y_arith, _CONFLICT_FACTOR_FLOOR, 1.0)
+    return factors
+
+
 def _combine_labs_subtractive(labs: np.ndarray, weights: np.ndarray) -> List[float]:
-    """Mix calibrated swatch Labs by mass fraction using subtractive Y (1/sum w/Y)."""
-    weights = np.asarray(weights, dtype=np.float64)
+    """Mix swatch Labs by mass. Lightness uses subtractive Y, then hue conflict."""
+    weights = np.asarray(weights, dtype=np.float64).reshape(-1)
     labs = np.asarray(labs, dtype=np.float64)
-    total = float(weights.sum())
-    if total <= 1e-12 or labs.shape[0] == 0:
+    if labs.ndim != 2 or labs.shape[0] == 0 or weights.shape[0] != labs.shape[0]:
         return [100.0, 0.0, 0.0]
-    w = weights / total
-    Y = _lab_L_to_Y_batch(labs[:, 0])
-    Y_mix = 1.0 / np.sum(w / Y)
-    L_mix = float(_lab_Y_to_L_batch(np.array([Y_mix]))[0])
-    a_mix = float(np.sum(w * labs[:, 1]))
-    b_mix = float(np.sum(w * labs[:, 2]))
-    return [L_mix, a_mix, b_mix]
+    if float(weights.sum()) <= 1e-12:
+        return [100.0, 0.0, 0.0]
+    mixed = _combine_labs_subtractive_batch(
+        labs.reshape(1, labs.shape[0], 3),
+        weights.reshape(1, -1),
+    )[0]
+    return [float(mixed[0]), float(mixed[1]), float(mixed[2])]
 
 
 def _combine_labs_subtractive_batch(labs_stack: np.ndarray, weights: np.ndarray) -> np.ndarray:
-    """labs_stack (N, K, 3), weights (N, K) -> (N, 3) CIELAB."""
-    N, K, _ = labs_stack.shape
-    out = np.zeros((N, 3), dtype=np.float64)
+    """labs_stack (N, K, 3), weights (N, K) -> (N, 3) CIELAB.
+
+    L* is the subtractive mix of the swatch lightnesses, reduced further when the
+    swatches have different hues. a* and b* stay a weighted average so the hue
+    stays between the paints.
+    """
+    n, k, _ = labs_stack.shape
+    out = np.zeros((n, 3), dtype=np.float64)
     w = weights / np.maximum(weights.sum(axis=1, keepdims=True), 1e-12)
-    Y = _lab_L_to_Y_batch(labs_stack[:, :, 0].reshape(-1)).reshape(N, K)
-    inv = np.sum(w / np.maximum(Y, 1e-6), axis=1)
-    Y_mix = 1.0 / np.maximum(inv, 1e-6)
-    out[:, 0] = _lab_Y_to_L_batch(Y_mix)
+    y = _lab_L_to_Y_batch(labs_stack[:, :, 0].reshape(-1)).reshape(n, k)
+    inv = np.sum(w / np.maximum(y, 1e-6), axis=1)
+    y_mix = 1.0 / np.maximum(inv, 1e-6)
+    y_mix = y_mix * _spectral_conflict_factors(labs_stack, weights)
+    out[:, 0] = _lab_Y_to_L_batch(y_mix)
     out[:, 1] = np.sum(w * labs_stack[:, :, 1], axis=1)
     out[:, 2] = np.sum(w * labs_stack[:, :, 2], axis=1)
     return out
@@ -1480,9 +1531,9 @@ def _predict_mix_lab_from_components(
     Swatches are pigment mixed into white, so lightness follows the total pigment
     fraction (every coloured paint counted together). Looking each paint up at only
     its own percentage treats the other paints as white and predicts a lighter
-    mix than the pot, so the search keeps adding pigment and the real colour
-    comes out dark. Every paint is sampled at that total fraction, then those swatches
-    are blended (subtractive luminance, weighted a* b*). A one-paint recipe is
+    mix than the pot. Swatches are sampled at that total fraction, then blended.
+    Different hues darken the mix further: two paints at the same L* do not stay
+    at that L* unless they reflect the same wavelengths. A one-paint recipe is
     the calibration sample itself.
     """
     white_ratio = max(0.0, min(1.0, float(white_ratio)))

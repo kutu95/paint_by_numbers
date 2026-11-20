@@ -2654,7 +2654,7 @@ async def _compute_recipes_async(
             "group": library_group,
             "coverage_mg_per_cm2": library.get("coverage_mg_per_cm2"),
             "records": records,
-            "solver_version": "deterministic_v3_total_pigment_lightness",
+            "solver_version": "deterministic_v4_hue_darkening",
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:24]
 

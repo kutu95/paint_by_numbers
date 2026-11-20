@@ -56,9 +56,36 @@ class MixLightnessTests(unittest.TestCase):
             paint_ids=["red", "blue"],
         )
         self.assertIsNotNone(lab)
-        # The 40% swatches are L* 64. The old per-paint lookup predicted L* 82.
-        self.assertAlmostEqual(lab[0], 64.0, delta=2.0)
+        # Each 40% swatch is L* 64. The mix is darker than that, because the
+        # two hues do not reflect the same light, and it stays warm of neutral.
+        self.assertLess(lab[0], 63.5)
+        self.assertGreater(lab[0], 50.0)
         self.assertGreater(lab[1], 10.0)
+
+    def test_same_lightness_different_hues_mix_darker(self):
+        lab = paint_manager._combine_labs_subtractive(
+            np.array([[50.0, 55.0, 30.0], [50.0, 5.0, -50.0]], dtype=np.float64),
+            np.array([1.0, 1.0], dtype=np.float64),
+        )
+        self.assertLess(lab[0], 45.0)
+        self.assertGreater(lab[0], 30.0)
+        self.assertGreater(lab[1], 15.0)
+
+    def test_same_colour_keeps_its_lightness(self):
+        lab = paint_manager._combine_labs_subtractive(
+            np.array([[50.0, 40.0, 20.0], [50.0, 40.0, 20.0]], dtype=np.float64),
+            np.array([1.0, 1.0], dtype=np.float64),
+        )
+        self.assertAlmostEqual(lab[0], 50.0, delta=0.5)
+        self.assertAlmostEqual(lab[1], 40.0, delta=0.5)
+        self.assertAlmostEqual(lab[2], 20.0, delta=0.5)
+
+    def test_similar_hues_barely_darken(self):
+        lab = paint_manager._combine_labs_subtractive(
+            np.array([[50.0, 55.0, 30.0], [50.0, 48.0, 28.0]], dtype=np.float64),
+            np.array([1.0, 1.0], dtype=np.float64),
+        )
+        self.assertAlmostEqual(lab[0], 50.0, delta=1.0)
 
     def test_batch_matches_scalar_for_same_recipe(self):
         scalar = paint_manager._predict_mix_lab_from_components(
