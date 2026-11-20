@@ -8,6 +8,8 @@ export interface ProjectInfo {
   session_id: string
   project_id?: string
   original_url?: string | null
+  /** Smaller JPEG for on-screen preview. Full original_url stays for projection. */
+  display_url?: string | null
   priority_region_url?: string | null
   has_stored_image?: boolean
   has_artifacts?: boolean

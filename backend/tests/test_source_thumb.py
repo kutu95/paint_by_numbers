@@ -6,7 +6,13 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from project_store import THUMB_MAX_SIDE, ensure_source_thumb, write_source_thumb_for_oriented
+from project_store import (
+    DISPLAY_MAX_SIDE,
+    THUMB_MAX_SIDE,
+    ensure_source_thumb,
+    write_source_display_for_oriented,
+    write_source_thumb_for_oriented,
+)
 
 
 class SourceThumbTests(unittest.TestCase):
@@ -24,6 +30,19 @@ class SourceThumbTests(unittest.TestCase):
             height, width = decoded.shape[:2]
             self.assertEqual(max(height, width), THUMB_MAX_SIDE)
             self.assertLess(min(height, width), THUMB_MAX_SIDE)
+
+    def test_display_jpeg_is_capped_for_onscreen_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            oriented = Path(tmp) / "oriented.jpg"
+            image = np.zeros((2000, 4000, 3), dtype=np.uint8)
+            self.assertTrue(cv2.imwrite(str(oriented), image))
+            self.assertTrue(write_source_display_for_oriented(oriented))
+            display = Path(tmp) / "display.jpg"
+            decoded = cv2.imread(str(display))
+            self.assertIsNotNone(decoded)
+            height, width = decoded.shape[:2]
+            self.assertEqual(max(height, width), DISPLAY_MAX_SIDE)
+            self.assertLess(display.stat().st_size, oriented.stat().st_size)
 
     def test_current_thumb_is_not_rewritten(self):
         with tempfile.TemporaryDirectory() as tmp:

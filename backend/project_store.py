@@ -20,8 +20,10 @@ LEGACY_SESSIONS_DIR = Path(__file__).parent.parent / "data" / "sessions"
 
 SOURCE_ORIENTED = "oriented.jpg"
 SOURCE_THUMB = "thumb.jpg"
+SOURCE_DISPLAY = "display.jpg"
 SOURCE_PRIORITY_REGION = "priority_region.png"
 THUMB_MAX_SIDE = 480
+DISPLAY_MAX_SIDE = 1600
 SESSION_SNAPSHOT = "session.json"
 
 
@@ -164,6 +166,61 @@ def write_source_thumb_for_oriented(oriented: Path) -> bool:
     return bool(cv2.imwrite(str(dest), image, [int(cv2.IMWRITE_JPEG_QUALITY), 75])) and dest.is_file()
 
 
+def source_display_path(project_id: str) -> Path:
+    return source_dir(project_id) / SOURCE_DISPLAY
+
+
+def _write_resized_jpeg(oriented: Path, dest_name: str, max_side: int, quality: int) -> bool:
+    if not oriented.is_file():
+        return False
+    try:
+        import cv2
+    except ImportError:
+        logger.warning("Cannot write %s; cv2 is not installed", dest_name)
+        return False
+    image = cv2.imread(str(oriented))
+    if image is None:
+        return False
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    if longest > max_side:
+        scale = max_side / float(longest)
+        image = cv2.resize(
+            image,
+            (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+    dest = oriented.with_name(dest_name)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return bool(cv2.imwrite(str(dest), image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])) and dest.is_file()
+
+
+def write_source_display_for_oriented(oriented: Path) -> bool:
+    """JPEG sized for on-screen preview. The full oriented.jpg stays for projection."""
+    return _write_resized_jpeg(oriented, SOURCE_DISPLAY, DISPLAY_MAX_SIDE, 82)
+
+
+def ensure_source_display(project_id: str) -> Optional[Path]:
+    """Return display.jpg, creating it when the oriented photo is newer."""
+    oriented = oriented_source_path(project_id)
+    dest = source_display_path(project_id)
+    if not oriented.is_file():
+        return dest if dest.is_file() else None
+    if dest.is_file() and dest.stat().st_mtime >= oriented.stat().st_mtime:
+        return dest
+    if write_source_display_for_oriented(oriented):
+        return dest
+    return None
+
+
+def source_display_url(project_id: str) -> Optional[str]:
+    path = ensure_source_display(project_id)
+    if path is None or not path.is_file():
+        return None
+    version = int(path.stat().st_mtime)
+    return f"{source_url(project_id, SOURCE_DISPLAY)}?v={version}"
+
+
 def ensure_source_thumb(project_id: str) -> Optional[Path]:
     """Return thumb.jpg, creating it when the oriented photo is newer."""
     oriented = oriented_source_path(project_id)
@@ -272,6 +329,9 @@ def rewrite_session_urls(session: dict[str, Any], project_id: str) -> dict[str, 
     out["session_id"] = project_id
     if has_oriented_source(project_id):
         out["original_url"] = source_url(project_id, SOURCE_ORIENTED)
+        display = source_display_url(project_id)
+        if display:
+            out["display_url"] = display
     if out.get("quantized_preview_url"):
         out["quantized_preview_url"] = artifact_url(project_id, "preview.jpg")
     layers = out.get("layers")

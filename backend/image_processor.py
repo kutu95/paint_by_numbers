@@ -1,9 +1,10 @@
 import cv2
+import io
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 from sklearn.cluster import KMeans
-from PIL import Image
+from PIL import Image, ImageCms, ImageOps
 import uuid
 import logging
 import hashlib
@@ -12,13 +13,29 @@ import json
 import random
 from dataclasses import dataclass, field
 
-from project_store import SOURCE_ORIENTED, artifact_url, source_url, write_source_thumb_for_oriented
+from project_store import (
+    SOURCE_ORIENTED,
+    artifact_url,
+    find_source_input,
+    oriented_source_path,
+    source_dir,
+    source_url,
+    write_source_display_for_oriented,
+    write_source_thumb_for_oriented,
+)
+
+# Interactive previews only. Layer generation still uses the requested max_side and a full fit.
+PREVIEW_MAX_SIDE = 1280
+PREVIEW_FIT_SAMPLE = 80_000
 
 logger = logging.getLogger(__name__)
 
 # Bump this any time the processing pipeline changes in a way
 # that should invalidate previously cached masks/preview images.
-PIPELINE_VERSION = "v29"
+PIPELINE_VERSION = "v32"
+# Written beside a project source after we have checked its embedded profile.
+# "converted" means oriented.jpg is sRGB and can be reused without another transform.
+COLOR_MANAGED_MARKER = "color-managed-v1"
 
 VALID_STYLE_PRESETS = frozenset({
     "none",
@@ -33,6 +50,20 @@ VALID_STYLE_PRESETS = frozenset({
     "sketch",
     "harmony",
 })
+
+# Display order for the style-comparison grid. Keep in sync with IMAGE_STYLE_PRESETS.
+STYLE_PRESET_ORDER = (
+    "none",
+    "easy_painting",
+    "portrait",
+    "poster",
+    "bold",
+    "expressive",
+    "graphic",
+    "stipple",
+    "sketch",
+    "harmony",
+)
 
 # Mask cache directory
 MASK_CACHE_DIR = Path(__file__).parent.parent / "data" / "mask_cache"
@@ -128,18 +159,147 @@ def normalize_image(image: np.ndarray, max_side: int) -> Tuple[np.ndarray, float
     return resized, scale
 
 
+def _icc_description(icc: bytes) -> str:
+    profile = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+    desc = profile.profile.profile_description
+    if isinstance(desc, bytes):
+        desc = desc.decode("utf-8", "replace")
+    return str(desc or "")
+
+
+def _icc_needs_srgb_conversion(icc: bytes) -> bool:
+    """True when the embedded profile is wider than sRGB (ProPhoto, Display P3, Adobe RGB)."""
+    try:
+        desc = _icc_description(icc).lower().replace(" ", "")
+    except Exception:
+        return False
+    if not desc:
+        return True
+    if "srgb" in desc or "61966-2.1" in desc or "61966-2-1" in desc:
+        return False
+    return True
+
+
+def _pil_to_srgb_array(pil: Image.Image, icc: Optional[bytes]) -> np.ndarray:
+    """Return RGB uint8. Wide-gamut profiles are converted into sRGB; sRGB and untagged files are not."""
+    if pil.mode == "P":
+        pil = pil.convert("RGBA" if "transparency" in pil.info else "RGB")
+    converted = False
+    if icc and _icc_needs_srgb_conversion(icc) and pil.mode in ("RGB", "RGBA", "CMYK", "L"):
+        try:
+            working = pil
+            if working.mode in ("RGBA", "L"):
+                working = working.convert("RGB")
+            transformed = ImageCms.profileToProfile(
+                working,
+                ImageCms.ImageCmsProfile(io.BytesIO(icc)),
+                ImageCms.createProfile("sRGB"),
+                outputMode="RGB",
+                renderingIntent=ImageCms.Intent.RELATIVE_COLORIMETRIC,
+            )
+            arr = np.asarray(transformed)
+            converted = True
+        except Exception as exc:
+            logger.warning("ICC to sRGB failed (%s); using unconverted pixels", exc)
+    if not converted:
+        arr = np.asarray(pil.convert("RGB"))
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+    if arr.shape[-1] == 4:
+        arr = arr[:, :, :3]
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(arr)
+
+
+def load_rgb_from_bytes(data: bytes) -> np.ndarray:
+    """Decode image bytes to RGB uint8, applying EXIF orientation and any wide-gamut profile."""
+    try:
+        pil = Image.open(io.BytesIO(data))
+        pil.load()
+    except Exception as exc:
+        raise ValueError("Could not read image bytes") from exc
+    icc = pil.info.get("icc_profile")
+    transposed = ImageOps.exif_transpose(pil)
+    if transposed is not None:
+        pil = transposed
+    array = _pil_to_srgb_array(pil, icc if isinstance(icc, bytes) else None)
+    if array.size == 0:
+        raise ValueError("Loaded image is empty")
+    return array
+
+
 def load_rgb_image_oriented(image_path: str) -> np.ndarray:
-    """Load RGB uint8 image with EXIF orientation applied; no aspect-ratio rotation."""
-    image = cv2.imread(image_path)
-    if image is None or image.size == 0:
+    """Load RGB uint8 with EXIF orientation and wide-gamut profiles converted to sRGB.
+
+    Browsers apply the embedded profile, so a ProPhoto or Display P3 photo looks
+    vivid on upload. OpenCV ignores that profile, and the JPEG we then save has
+    none, so a refresh shows the raw numbers as sRGB and the palette is built
+    from those duller colours.
+    """
+    try:
+        with open(image_path, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        raise ValueError(f"Could not read image: {image_path}") from exc
+    if not data:
         raise ValueError(f"Could not read image: {image_path}")
-    image = apply_exif_orientation(image, image_path)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    if image.dtype != np.uint8:
-        image = np.clip(image, 0, 255).astype(np.uint8)
-    else:
-        image = np.clip(image, 0, 255)
-    return image
+    try:
+        return load_rgb_from_bytes(data)
+    except ValueError as exc:
+        raise ValueError(f"Could not read image: {image_path}") from exc
+
+
+def refresh_project_color_management(project_id: str) -> None:
+    """Rewrite oriented/display/thumb once when the upload uses a wide-gamut profile.
+
+    The original upload is left untouched, so the profile can still be applied.
+    Already-sRGB uploads are marked and skipped. A failed rewrite is not marked,
+    so the next open tries again.
+    """
+    original = find_source_input(project_id)
+    if original is None:
+        return
+    marker = source_dir(project_id) / COLOR_MANAGED_MARKER
+    try:
+        if marker.is_file() and marker.stat().st_mtime >= original.stat().st_mtime:
+            return
+        with Image.open(original) as im:
+            icc = im.info.get("icc_profile")
+    except Exception as exc:
+        logger.warning("Could not inspect colour profile for %s: %s", project_id, exc)
+        return
+    icc_bytes = icc if isinstance(icc, bytes) else None
+    if not icc_bytes or not _icc_needs_srgb_conversion(icc_bytes):
+        try:
+            marker.write_text("srgb")
+        except OSError:
+            pass
+        return
+    try:
+        rgb = load_rgb_image_oriented(str(original))
+        oriented = oriented_source_path(project_id)
+        oriented.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(rgb).save(oriented, format="JPEG", quality=92, subsampling=2, optimize=True)
+        write_source_thumb_for_oriented(oriented)
+        write_source_display_for_oriented(oriented)
+        marker.write_text("converted")
+    except Exception as exc:
+        logger.warning("Colour-managed refresh failed for %s: %s", project_id, exc)
+
+
+def project_preview_source(project_id: str) -> Optional[Path]:
+    """Source for interactive previews. Prefer the sRGB oriented copy once it exists."""
+    refresh_project_color_management(project_id)
+    marker = source_dir(project_id) / COLOR_MANAGED_MARKER
+    oriented = oriented_source_path(project_id)
+    if oriented.is_file() and marker.is_file():
+        try:
+            if marker.read_text(encoding="utf-8").strip() == "converted":
+                return oriented
+        except OSError:
+            pass
+    return find_source_input(project_id)
 
 
 def load_rgb_image_normalized(image_path: str, max_side: int) -> np.ndarray:
@@ -959,7 +1119,12 @@ def _gather_priority_sample_pixels(
 
 
 def _fit_region_lab_centers(region_pixels: np.ndarray, n_slots: int, seed: int) -> np.ndarray:
-    """Cluster centres for a priority region (full colour range, sorted light → dark)."""
+    """Cluster centres for a priority region, with slots kept for smaller saturated patches.
+
+    A plain average of the lasso is dominated by the largest area inside it, so a
+    backlit figure becomes one dark colour and red clothing disappears. Saturated
+    pixels that are only a fraction of the region get their own centres first.
+    """
     if n_slots <= 0:
         return np.zeros((0, 3), dtype=np.float32)
     if region_pixels.shape[0] == 0:
@@ -980,11 +1145,71 @@ def _fit_region_lab_centers(region_pixels: np.ndarray, n_slots: int, seed: int) 
         return np.repeat(mean, n_slots, axis=0)
     if n_slots == 1:
         return np.mean(region_pixels, axis=0, keepdims=True)
-    kmeans = KMeans(n_clusters=n_slots, random_state=seed, n_init=12, init="random")
-    kmeans.fit(region_pixels)
-    centers = kmeans.cluster_centers_
+
+    chroma = np.hypot(region_pixels[:, 1] - 128.0, region_pixels[:, 2] - 128.0)
+    vivid_slots = 2 if n_slots >= 6 else (1 if n_slots >= 4 else 0)
+    cut = max(16.0, float(np.percentile(chroma, 72)))
+    vivid_sel = chroma >= cut
+    vivid_count = int(vivid_sel.sum())
+    vivid_frac = vivid_count / float(region_pixels.shape[0])
+    if vivid_slots == 0 or vivid_frac < 0.035 or vivid_frac > 0.62 or vivid_count < 24:
+        vivid_slots = 0
+
+    if vivid_slots > 0:
+        vivid_pts = region_pixels[vivid_sel]
+        n_vivid = min(vivid_slots, max(1, vivid_count // 12))
+        if float(np.std(vivid_pts.astype(np.float32), axis=0).sum()) < 6.0:
+            n_vivid = 1
+        vivid_model = KMeans(n_clusters=n_vivid, random_state=seed, n_init=8, init="random")
+        vivid_model.fit(vivid_pts)
+        rest_slots = n_slots - n_vivid
+        rest = region_pixels[~vivid_sel]
+        if rest.shape[0] < rest_slots * 3:
+            rest = region_pixels
+        if float(np.std(rest.astype(np.float32), axis=0).sum()) < 6.0:
+            rest_slots = 1
+        rest_model = KMeans(n_clusters=rest_slots, random_state=seed + 1, n_init=8, init="random")
+        rest_model.fit(rest)
+        centers = np.vstack([vivid_model.cluster_centers_, rest_model.cluster_centers_])
+    else:
+        kmeans = KMeans(n_clusters=n_slots, random_state=seed, n_init=12, init="random")
+        kmeans.fit(region_pixels)
+        centers = kmeans.cluster_centers_
+    finite = centers[np.isfinite(centers).all(axis=1)]
+    if finite.shape[0] == 0:
+        finite = np.mean(region_pixels, axis=0, keepdims=True)
+    if finite.shape[0] < n_slots:
+        pad = np.repeat(finite[:1], n_slots - finite.shape[0], axis=0)
+        finite = np.vstack([finite, pad])
+    centers = finite[:n_slots]
     order = np.argsort(-centers[:, 0])
     return centers[order]
+
+
+def _assign_priority_pixels_to_slots(
+    labels: np.ndarray,
+    priority_mask: np.ndarray,
+    lab_pixels: np.ndarray,
+    reserved_centers: np.ndarray,
+    threshold: float = 0.35,
+) -> np.ndarray:
+    """Paint the lasso only with colours fitted inside it.
+
+    Without this, pixels in the marked region are free to take the single
+    nearest colour from the whole photo, which collapses a figure to one tone.
+    """
+    if reserved_centers.shape[0] == 0:
+        return labels
+    inside = priority_mask.ravel() > threshold
+    if not np.any(inside):
+        return labels
+    distances = np.sum(
+        (lab_pixels[inside, None, :] - reserved_centers[None, :, :]) ** 2,
+        axis=2,
+    )
+    out = labels.reshape(-1).copy()
+    out[inside] = distances.argmin(axis=1).astype(np.int32)
+    return out.reshape(labels.shape)
 
 
 def _gather_skin_sample_pixels(
@@ -1318,6 +1543,56 @@ def _labels_from_lab_centers(
     return dists.argmin(axis=1).reshape(h, w).astype(np.int32)
 
 
+# A k-means centre is the average of its region. Averaging pulls chroma inward,
+# so the swatch is duller than the colours in that region. Move chroma out to
+# the colourful end of the same region, and no further.
+CHROMA_RESTORE_PERCENTILE = 80.0
+CHROMA_RESTORE_MAX_SCALE = 1.45
+CHROMA_RESTORE_NEUTRAL = 11.0
+
+
+def _restore_palette_chroma(
+    image_rgb: np.ndarray,
+    labels: np.ndarray,
+    palette: List[Dict],
+) -> List[Dict]:
+    """Lift each swatch toward the saturated pixels already in its region.
+
+    Lightness and hue stay with the region average. Greys stay grey. Colours the
+    user forced into the palette are left unchanged. The result cannot be more
+    saturated than the colourful pixels of that region, and it cannot jump by
+    more than CHROMA_RESTORE_MAX_SCALE.
+    """
+    if not palette:
+        return palette
+    lab = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB).reshape(-1, 3).astype(np.float32)
+    flat = labels.ravel()
+    chroma = np.hypot(lab[:, 1] - 128.0, lab[:, 2] - 128.0)
+    for entry in palette:
+        if entry.get("must_include"):
+            continue
+        sel = flat == int(entry["index"])
+        count = int(sel.sum())
+        if count < 32:
+            continue
+        pts = lab[sel]
+        center = pts.mean(axis=0)
+        c_mean = float(np.hypot(center[1] - 128.0, center[2] - 128.0))
+        if c_mean < 1.0:
+            continue
+        target = float(np.percentile(chroma[sel], CHROMA_RESTORE_PERCENTILE))
+        if target < CHROMA_RESTORE_NEUTRAL or target <= c_mean * 1.01:
+            continue
+        scale = min(target / c_mean, CHROMA_RESTORE_MAX_SCALE)
+        lifted = center.copy()
+        lifted[1] = 128.0 + (center[1] - 128.0) * scale
+        lifted[2] = 128.0 + (center[2] - 128.0) * scale
+        rgb = _lab_float_to_rgb_uint8(lifted)
+        entry["rgb"] = rgb.tolist()
+        entry["hex"] = "#{:02x}{:02x}{:02x}".format(int(rgb[0]), int(rgb[1]), int(rgb[2]))
+    return palette
+
+
 def _build_palette_and_quantized(
     image: np.ndarray,
     labels: np.ndarray,
@@ -1434,6 +1709,7 @@ def quantize_for_pipeline(
     mask_detail_level: float = 0.5,
     must_include_hex: Optional[List[str]] = None,
     seed: int = 42,
+    fit_sample_size: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[Dict]]:
     """Quantize with optional style preset / figure-detail preservation."""
     must_hex_list = _normalize_must_include_hex_list(must_include_hex)
@@ -1518,6 +1794,7 @@ def quantize_for_pipeline(
         reserved_fit_mask=skin_ref if reserved_slots > 0 and not must_hex_list else None,
         reserved_from_priority=has_priority and priority_slots >= skin_slots and not must_hex_list,
         must_include_hex=must_hex_list or None,
+        fit_sample_size=fit_sample_size,
     )
     label_mask = figure_mask_labels if figure_mask_labels is not None else figure_mask
     snap_skin_slots = 0 if must_hex_list else reserved_slots
@@ -1548,11 +1825,13 @@ def quantize_for_pipeline(
         )
 
     if reserved_slots > 0 and not must_hex_list:
-        if has_priority and priority_slots > 0:
-            region_px = _gather_priority_sample_pixels(_rgb_to_lab_pixels(image), label_mask)
+        source_lab = _rgb_to_lab_pixels(image)
+        if has_priority and priority_slots > 0 and label_mask is not None:
+            region_px = _gather_priority_sample_pixels(source_lab, label_mask)
             region_lab = _fit_region_lab_centers(region_px, reserved_slots, seed)
+            labels = _assign_priority_pixels_to_slots(labels, label_mask, source_lab, region_lab)
         else:
-            region_px = _gather_skin_sample_pixels(image, _rgb_to_lab_pixels(image), skin_ref)
+            region_px = _gather_skin_sample_pixels(image, source_lab, skin_ref)
             region_lab = _fit_skin_lab_centers(region_px, reserved_slots, seed)
         palette = _sync_palette_skin_swatches(labels, palette, reserved_slots, image, region_lab)
     if must_hex_list:
@@ -1581,12 +1860,15 @@ def make_quantization_preview(
     priority_region_strength: float = 0.7,
     mask_detail_level: float = 0.5,
     must_include_hex: Optional[List[str]] = None,
+    fit_sample_size: Optional[int] = PREVIEW_FIT_SAMPLE,
 ) -> Tuple[bytes, List[Dict]]:
-    """Fast JPEG preview and palette swatches (no layer masks).
+    """JPEG preview and palette swatches (no layer masks).
 
-    Uses the same max_side as layer generation so the Image tab palette matches Layers.
+    The interactive preview is capped and colour-fit on a sample so it returns
+    quickly. Layer generation does not use this path.
     """
-    normalized = load_rgb_image_normalized(image_path, int(max_side))
+    side = min(int(max_side), PREVIEW_MAX_SIDE)
+    normalized = load_rgb_image_normalized(image_path, side)
     _labels, quantized, palette = quantize_for_pipeline(
         normalized,
         n_colors,
@@ -1604,13 +1886,66 @@ def make_quantization_preview(
         priority_region_strength=priority_region_strength,
         mask_detail_level=mask_detail_level,
         must_include_hex=must_include_hex,
+        fit_sample_size=fit_sample_size,
     )
     ok, buf = cv2.imencode(
-        ".jpg", cv2.cvtColor(quantized, cv2.COLOR_RGB2BGR), [int(cv2.IMWRITE_JPEG_QUALITY), 88]
+        ".jpg", cv2.cvtColor(quantized, cv2.COLOR_RGB2BGR), [int(cv2.IMWRITE_JPEG_QUALITY), 82]
     )
     if not ok:
         raise ValueError("Failed to encode preview JPEG")
     return buf.tobytes(), palette
+
+
+def render_preset_preview_jpeg(
+    image_rgb: np.ndarray,
+    style_preset: str,
+    *,
+    n_colors: int,
+    saturation_boost: float = 1.0,
+    easy_painting: bool = False,
+    easy_simplify: float = 0.65,
+    easy_face_detail: bool = False,
+    detail_eyes: bool = True,
+    detail_face: bool = True,
+    detail_body_outline: bool = True,
+    favor_skin_tones: bool = False,
+    skin_tone_strength: float = 0.65,
+    priority_region_mask: Optional[np.ndarray] = None,
+    priority_region_strength: float = 0.7,
+    mask_detail_level: float = 0.5,
+    must_include_hex: Optional[List[str]] = None,
+    jpeg_quality: int = 82,
+) -> bytes:
+    """JPEG for one style preset. `image_rgb` is already resized to the preview size."""
+    source = np.array(image_rgb, copy=True)
+    _labels, quantized, _palette = quantize_for_pipeline(
+        source,
+        n_colors,
+        saturation_boost=saturation_boost,
+        easy_painting=easy_painting,
+        easy_simplify=easy_simplify,
+        easy_face_detail=easy_face_detail,
+        detail_eyes=detail_eyes,
+        detail_face=detail_face,
+        detail_body_outline=detail_body_outline,
+        style_preset=style_preset,
+        favor_skin_tones=favor_skin_tones,
+        skin_tone_strength=skin_tone_strength,
+        priority_region_mask=priority_region_mask,
+        priority_region_strength=priority_region_strength,
+        mask_detail_level=mask_detail_level,
+        must_include_hex=must_include_hex,
+        fit_sample_size=PREVIEW_FIT_SAMPLE,
+    )
+    quality = int(max(60, min(95, jpeg_quality)))
+    ok, buf = cv2.imencode(
+        ".jpg",
+        cv2.cvtColor(quantized, cv2.COLOR_RGB2BGR),
+        [int(cv2.IMWRITE_JPEG_QUALITY), quality],
+    )
+    if not ok:
+        raise ValueError(f"Failed to encode preview JPEG for {style_preset}")
+    return buf.tobytes()
 
 
 def make_quantization_preview_jpeg(
@@ -1651,6 +1986,36 @@ def make_quantization_preview_jpeg(
     return jpeg
 
 
+def _fit_kmeans(
+    pixels: np.ndarray,
+    n_clusters: int,
+    seed: int,
+    sample_weight: Optional[np.ndarray] = None,
+    fit_sample_size: Optional[int] = None,
+    n_init: int = 10,
+) -> KMeans:
+    """Fit k-means, optionally on a sample, then let the caller label every pixel."""
+    fit_pixels = pixels
+    fit_weight = sample_weight
+    sample_n = int(fit_sample_size or 0)
+    if sample_n > 0 and pixels.shape[0] > sample_n:
+        rng = np.random.default_rng(seed)
+        if sample_weight is None:
+            idx = rng.choice(pixels.shape[0], sample_n, replace=False)
+        else:
+            weights = np.clip(np.asarray(sample_weight, dtype=np.float64), 1e-8, None)
+            probs = weights / weights.sum()
+            idx = rng.choice(pixels.shape[0], sample_n, replace=True, p=probs)
+        fit_pixels = pixels[idx]
+        fit_weight = None
+    model = KMeans(n_clusters=n_clusters, random_state=seed, n_init=n_init, init="random")
+    if fit_weight is not None:
+        model.fit(fit_pixels, sample_weight=fit_weight)
+    else:
+        model.fit(fit_pixels)
+    return model
+
+
 def quantize_lab(
     image: np.ndarray,
     n_colors: int,
@@ -1665,6 +2030,7 @@ def quantize_lab(
     reserved_fit_mask: Optional[np.ndarray] = None,
     reserved_from_priority: bool = False,
     must_include_hex: Optional[List[str]] = None,
+    fit_sample_size: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[Dict]]:
     """Quantize image using Lab color space and k-means.
     
@@ -1743,9 +2109,12 @@ def quantize_lab(
                 skin_src, original_lab_pixels, reserved_fit_mask
             )
             skin_centers_reserved = _fit_skin_lab_centers(skin_pixels, reserved_slots, seed)
-        skin_sel = skin_bias_mask.ravel() > 0.22 if skin_bias_mask is not None else np.zeros(0, dtype=bool)
-        if skin_sel.size == 0:
+        if reserved_from_priority:
             skin_sel = reserved_fit_mask.ravel() > 0.2
+        else:
+            skin_sel = skin_bias_mask.ravel() > 0.22 if skin_bias_mask is not None else np.zeros(0, dtype=bool)
+            if skin_sel.size == 0:
+                skin_sel = reserved_fit_mask.ravel() > 0.2
         min_skin_px = max(reserved_slots * 2, 12) if reserved_from_priority else max(reserved_slots * 4, 24)
         if skin_pixels.shape[0] >= min_skin_px:
             bg_slots = inner_colors - reserved_slots
@@ -1755,19 +2124,30 @@ def quantize_lab(
                 else np.ones(pixels.shape[0], dtype=np.float64)
             )
             bg_weight[skin_sel] *= 0.06
-            kmeans_bg = KMeans(
-                n_clusters=bg_slots, random_state=seed + 1, n_init=10, init="random"
-            )
-            kmeans_bg.fit(pixels, sample_weight=bg_weight)
+            if fit_sample_size:
+                kmeans_bg = _fit_kmeans(
+                    pixels, bg_slots, seed + 1, bg_weight, fit_sample_size
+                )
+            else:
+                kmeans_bg = KMeans(
+                    n_clusters=bg_slots, random_state=seed + 1, n_init=10, init="random"
+                )
+                kmeans_bg.fit(pixels, sample_weight=bg_weight)
             lab_centers_float = np.vstack([skin_centers_reserved, kmeans_bg.cluster_centers_])
 
     if lab_centers_float is None:
-        kmeans = KMeans(n_clusters=inner_colors, random_state=seed, n_init=10, init="random")
-        if sample_weight is not None:
-            kmeans.fit(pixels, sample_weight=sample_weight)
+        if fit_sample_size:
+            kmeans = _fit_kmeans(
+                pixels, inner_colors, seed, sample_weight, fit_sample_size
+            )
             labels_flat = kmeans.predict(pixels)
         else:
-            labels_flat = kmeans.fit_predict(pixels)
+            kmeans = KMeans(n_clusters=inner_colors, random_state=seed, n_init=10, init="random")
+            if sample_weight is not None:
+                kmeans.fit(pixels, sample_weight=sample_weight)
+                labels_flat = kmeans.predict(pixels)
+            else:
+                labels_flat = kmeans.fit_predict(pixels)
         lab_centers_float = kmeans.cluster_centers_
         if skin_centers_reserved is not None and reserved_slots > 0:
             lab_centers_float = _inject_skin_lab_centers(lab_centers_float, skin_centers_reserved)
@@ -1837,6 +2217,8 @@ def quantize_lab(
         palette = _sync_palette_must_include_swatches(labels, palette, must_count, must_hex_list)
         palette = _inject_missing_must_include_swatches(palette, must_hex_list)
         quantized = render_quantized_from_labels(labels, palette)
+    palette = _restore_palette_chroma(image, labels, palette)
+    quantized = render_quantized_from_labels(labels, palette)
     return labels, quantized, palette
 
 
@@ -2546,6 +2928,7 @@ def write_oriented_source_jpeg(image_path: str, source_path: Path) -> bool:
         cv2.imwrite(str(source_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
         if source_path.exists():
             write_source_thumb_for_oriented(source_path)
+            write_source_display_for_oriented(source_path)
         return source_path.exists()
     except Exception as e:
         logger.warning(f"write_oriented_source_jpeg failed: {e}")
@@ -2695,28 +3078,9 @@ def process_image(
     # Cache miss or load failed - process normally
     logger.info(f"Processing image (cache miss): {cache_key}")
     
-    # Load image (BGR) and apply EXIF orientation so we start from the
-    # same upright view that cameras/phones intend.
-    image = cv2.imread(image_path)
-    if image is None:
-        raise ValueError(f"Failed to load image from {image_path}. Check if file exists and is a valid image format.")
-    
-    if image.size == 0:
-        raise ValueError("Loaded image is empty")
-    
-    # Apply EXIF orientation (cv2.imread ignores EXIF by default)
-    image = apply_exif_orientation(image, image_path)
-    
-    # Convert BGR to RGB
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    
-    # Ensure image is uint8 and in valid range
-    if image.dtype != np.uint8:
-        image = np.clip(image, 0, 255).astype(np.uint8)
-    else:
-        # Ensure values are in valid range
-        image = np.clip(image, 0, 255)
-    
+    # Upright sRGB, including an embedded ProPhoto / Display P3 profile.
+    image = load_rgb_image_oriented(image_path)
+
     # Check for invalid values
     if np.any(np.isnan(image)) or np.any(np.isinf(image)):
         raise ValueError("Image contains invalid (NaN or Inf) values after loading")
@@ -2725,6 +3089,7 @@ def process_image(
     try:
         cv2.imwrite(str(oriented_file), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
         write_source_thumb_for_oriented(oriented_file)
+        write_source_display_for_oriented(oriented_file)
     except Exception as e:
         logger.warning(f"Failed to save oriented source image to {oriented_file}: {e}")
     

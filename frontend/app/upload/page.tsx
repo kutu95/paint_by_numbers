@@ -24,6 +24,7 @@ import {
   type ImageStylePreset,
 } from '@/lib/imageStylePresets'
 import { PriorityRegionEditor } from '@/components/PriorityRegionEditor'
+import { StylePresetGrid } from '@/components/StylePresetGrid'
 
 interface PaletteColor {
   index: number
@@ -194,6 +195,7 @@ interface SessionResponse {
   order: number[]
   quantized_preview_url: string
   original_url?: string
+  display_url?: string
   artifacts_version?: number
   layers: Layer[]
   gradient_regions?: GradientRegion[]
@@ -273,6 +275,7 @@ export default function Home() {
   const [stylePreviewPalette, setStylePreviewPalette] = useState<PaletteColor[] | null>(null)
   const [stylePreviewLoading, setStylePreviewLoading] = useState(false)
   const [stylePreviewError, setStylePreviewError] = useState<string | null>(null)
+  const [styleGridOpen, setStyleGridOpen] = useState(false)
   const stylePreviewObjectUrlRef = useRef<string | null>(null)
   const [processing, setProcessing] = useState(false)
   const [optimizingPalette, setOptimizingPalette] = useState(false)
@@ -300,6 +303,7 @@ export default function Home() {
   const [savedProjectName, setSavedProjectName] = useState('')
   const [nameSaveState, setNameSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [editSessionOriginalUrl, setEditSessionOriginalUrl] = useState<string | null>(null)
+  const [editSessionDisplayUrl, setEditSessionDisplayUrl] = useState<string | null>(null)
 
   const appendPriorityRegionToForm = (formData: FormData) => {
     formData.append('priority_region_strength', priorityRegionStrength.toString())
@@ -386,6 +390,11 @@ export default function Home() {
   const originalImageSrc = useMemo(() => {
     if (preview) return preview
     if (uploadObjectUrl) return uploadObjectUrl
+    if (editSessionDisplayUrl) {
+      return editSessionDisplayUrl.startsWith('http')
+        ? editSessionDisplayUrl
+        : `${API_BASE_URL}${editSessionDisplayUrl}`
+    }
     if (editSessionOriginalUrl) {
       return projectAssetUrl(
         editSessionOriginalUrl,
@@ -393,7 +402,7 @@ export default function Home() {
       )
     }
     return null
-  }, [preview, uploadObjectUrl, editSessionOriginalUrl, sessionData?.artifacts_version, editArtifactsVersion])
+  }, [preview, uploadObjectUrl, editSessionDisplayUrl, editSessionOriginalUrl, sessionData?.artifacts_version, editArtifactsVersion])
 
   const canShowImageComparison = Boolean(
     originalImageSrc || image || (editSessionId && editSessionCanReprocess)
@@ -706,6 +715,7 @@ export default function Home() {
       if (info) {
         setEditSessionCanReprocess(Boolean(info.has_stored_image))
         if (info.original_url) setEditSessionOriginalUrl(info.original_url)
+        if (info.display_url) setEditSessionDisplayUrl(info.display_url)
         if (info.priority_region_url) {
           setEditPriorityRegionUrl(projectAssetUrl(info.priority_region_url))
         } else {
@@ -715,6 +725,7 @@ export default function Home() {
       if (session && Array.isArray(session.layers) && session.layers.length > 0) {
         setSessionData(session as SessionResponse)
         if (session.original_url) setEditSessionOriginalUrl(session.original_url)
+        if (session.display_url) setEditSessionDisplayUrl(session.display_url)
         if (typeof session.artifacts_version === 'number') {
           setEditArtifactsVersion(session.artifacts_version)
         }
@@ -728,7 +739,8 @@ export default function Home() {
           setCanvasWidthCm(next.widthCm)
           setCanvasHeightCm(next.heightCm)
         }
-      } else if (info?.original_url) {
+      } else if (info?.display_url || info?.original_url) {
+        const src = info.display_url || info.original_url
         const img = new Image()
         img.onload = () => {
           const next = canvasCmForImageOrientation(
@@ -740,7 +752,7 @@ export default function Home() {
           setCanvasWidthCm(next.widthCm)
           setCanvasHeightCm(next.heightCm)
         }
-        img.src = `${API_BASE_URL}${info.original_url}`
+        img.src = src!.startsWith('http') ? src! : `${API_BASE_URL}${src}`
       }
     })()
 
@@ -905,7 +917,20 @@ export default function Home() {
     }
   }, [sessionData, orderMode])
 
-  const handleGenerate = async () => {
+  const handleGenerate = async (presetOverride?: ImageStylePreset) => {
+    const preset = presetOverride ?? stylePreset
+    const forceFigure = presetForcesFigureDetail(preset)
+    const faceDetail = forceFigure || easyFaceDetail
+    const eyesOn = forceFigure || detailEyes
+    const faceOn = forceFigure || detailFace
+    const outlineOn = forceFigure || detailBodyOutline
+    if (preset !== stylePreset) setStylePreset(preset)
+    if (forceFigure) {
+      setEasyFaceDetail(true)
+      setDetailEyes(true)
+      setDetailFace(true)
+      setDetailBodyOutline(true)
+    }
     const useStoredImage = Boolean(editSessionId && !image && editSessionCanReprocess)
     if (!image && !useStoredImage) {
       if (preview) {
@@ -929,13 +954,13 @@ export default function Home() {
       formData.append('canvas_height_cm', canvasHeightCm.toString())
       formData.append('saturation_boost', saturationBoost.toString())
       formData.append('detail_level', detailLevel.toString())
-      formData.append('style_preset', stylePreset)
+      formData.append('style_preset', preset)
       formData.append('easy_painting', easyPainting ? 'true' : 'false')
       formData.append('easy_simplify', easySimplify.toString())
-      formData.append('easy_face_detail', easyFaceDetail ? 'true' : 'false')
-      formData.append('detail_eyes', detailEyes ? 'true' : 'false')
-      formData.append('detail_face', detailFace ? 'true' : 'false')
-      formData.append('detail_body_outline', detailBodyOutline ? 'true' : 'false')
+      formData.append('easy_face_detail', faceDetail ? 'true' : 'false')
+      formData.append('detail_eyes', eyesOn ? 'true' : 'false')
+      formData.append('detail_face', faceOn ? 'true' : 'false')
+      formData.append('detail_body_outline', outlineOn ? 'true' : 'false')
       formData.append('favor_skin_tones', favorSkinTones ? 'true' : 'false')
       formData.append('skin_tone_strength', skinToneStrength.toString())
       appendPriorityRegionToForm(formData)
@@ -1020,11 +1045,11 @@ export default function Home() {
           skinToneStrength,
           easyPainting,
           easySimplify,
-          easyFaceDetail,
-          stylePreset,
-          detailEyes,
-          detailFace,
-          detailBodyOutline,
+          easyFaceDetail: faceDetail,
+          stylePreset: preset,
+          detailEyes: eyesOn,
+          detailFace: faceOn,
+          detailBodyOutline: outlineOn,
           priorityRegionStrength,
           hasPriorityRegion: Boolean(priorityRegionMaskBlob) || Boolean(editPriorityRegionUrl),
           mustIncludeColors,
@@ -1052,11 +1077,11 @@ export default function Home() {
           skinToneStrength,
           easyPainting,
           easySimplify,
-          easyFaceDetail,
-          stylePreset,
-          detailEyes,
-          detailFace,
-          detailBodyOutline,
+          easyFaceDetail: faceDetail,
+          stylePreset: preset,
+          detailEyes: eyesOn,
+          detailFace: faceOn,
+          detailBodyOutline: outlineOn,
           priorityRegionStrength,
           hasPriorityRegion: Boolean(priorityRegionMaskBlob),
           mustIncludeColors,
@@ -1305,6 +1330,50 @@ export default function Home() {
   }
 
 
+  const canPreviewStyles = Boolean(image) || Boolean(editSessionId && editSessionCanReprocess)
+  const canGenerateLayers = !(
+    processing ||
+    (isNewProject && (!image || !projectName.trim())) ||
+    (!editSessionId && !image) ||
+    (editSessionId && !image && !editSessionCanReprocess)
+  )
+  const generateHint = canGenerateLayers
+    ? null
+    : isNewProject && !projectName.trim()
+      ? 'Add a project name before generating layers.'
+      : 'Upload an image before generating layers.'
+
+  const buildStyleGridFormData = () => {
+    const formData = new FormData()
+    if (image) {
+      formData.append('image', image)
+    } else if (editSessionId) {
+      formData.append('project_id', editSessionId)
+    }
+    formData.append('n_colors', nColors.toString())
+    formData.append('max_side', maxSide.toString())
+    formData.append('preview_max_side', '720')
+    formData.append('saturation_boost', saturationBoost.toString())
+    formData.append('easy_painting', easyPainting ? 'true' : 'false')
+    formData.append('easy_simplify', easySimplify.toString())
+    formData.append('easy_face_detail', easyFaceDetail ? 'true' : 'false')
+    formData.append('detail_eyes', detailEyes ? 'true' : 'false')
+    formData.append('detail_face', detailFace ? 'true' : 'false')
+    formData.append('detail_body_outline', detailBodyOutline ? 'true' : 'false')
+    formData.append('favor_skin_tones', favorSkinTones ? 'true' : 'false')
+    formData.append('skin_tone_strength', skinToneStrength.toString())
+    formData.append('detail_level', detailLevel.toString())
+    formData.append('priority_region_strength', priorityRegionStrength.toString())
+    if (priorityRegionMaskBlob) {
+      formData.append('priority_region_mask', priorityRegionMaskBlob, 'priority_region.png')
+      formData.append('clear_priority_region', 'false')
+    } else if (priorityRegionCleared) {
+      formData.append('clear_priority_region', 'true')
+    }
+    formData.append('must_include_colors', JSON.stringify(mustIncludeColors))
+    return formData
+  }
+
   return (
     <div className="min-h-screen bg-gray-900 text-white p-8">
       <div className="max-w-6xl mx-auto">
@@ -1380,7 +1449,8 @@ export default function Home() {
                 <p className="text-sm text-gray-500 mb-4">
                   Mark a priority region (brush/lasso) or use <strong className="text-gray-400">Pick colour</strong> to
                   force colours into the palette. Toggle <strong className="text-gray-400">Mask Dim/Off</strong> to
-                  inspect the photo. Settings below update the processed preview (right).
+                  inspect the photo. Settings below update the processed preview. That preview is a faster pass;
+                  generating layers still uses the full output resolution.
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="flex flex-col min-w-0">
@@ -1503,6 +1573,15 @@ export default function Home() {
                   <p className="text-xs text-gray-500 mt-1">
                     {IMAGE_STYLE_PRESETS.find((p) => p.id === stylePreset)?.description}
                   </p>
+                  <button
+                    type="button"
+                    onClick={() => setStyleGridOpen(true)}
+                    disabled={!canPreviewStyles || processing}
+                    title="Preview every style preset on this image"
+                    className="mt-2 w-full px-3 py-2 text-sm rounded border border-gray-600 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Compare all styles
+                  </button>
                 </div>
               </div>
 
@@ -1844,8 +1923,9 @@ export default function Home() {
             </details>
 
             <button
-              onClick={handleGenerate}
-              disabled={Boolean(processing || (isNewProject && (!image || !projectName.trim())) || (!editSessionId && !image) || (editSessionId && !image && !editSessionCanReprocess))}
+              type="button"
+              onClick={() => void handleGenerate()}
+              disabled={!canGenerateLayers}
               title={editSessionId && editSessionCanReprocess ? 'Use stored image and current settings, or upload a new image to replace.' : undefined}
               className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
@@ -1874,6 +1954,22 @@ export default function Home() {
               {processing ? 'Processing...' : sessionData ? 'Regenerate Layers' : 'Generate Layers'}
             </button>
           </div>
+
+        {styleGridOpen && (
+          <StylePresetGrid
+            currentPreset={stylePreset}
+            buildFormData={buildStyleGridFormData}
+            canGenerate={canGenerateLayers}
+            generating={processing}
+            hasLayers={Boolean(sessionData && sessionData.layers && sessionData.layers.length > 0)}
+            generateHint={generateHint}
+            onClose={() => setStyleGridOpen(false)}
+            onRegenerate={(preset) => {
+              setStyleGridOpen(false)
+              void handleGenerate(preset)
+            }}
+          />
+        )}
 
         {/* Color Modal - only render after mount to avoid hydration issues */}
         {mounted && selectedColor && (

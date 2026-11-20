@@ -485,7 +485,8 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
 
   const layers = sessionData.layers as LayerWithSource[]
   const assetVersion = sessionData.artifacts_version
-  const hasOriginal = Boolean(sessionData.original_url)
+  const hasOriginal = Boolean(sessionData.display_url || sessionData.original_url)
+  const originalViewUrl = sessionData.display_url || sessionData.original_url
   const hasPreview = Boolean(sessionData.quantized_preview_url)
   const canFlipImage = hasOriginal && hasPreview
   const showingOriginal = imageView === 'original' && hasOriginal
@@ -551,7 +552,7 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
             {showingOriginal && (
               <img
                 key={`original-${sessionId}-${assetVersion ?? 0}`}
-                src={projectAssetUrl(sessionData.original_url!, assetVersion)}
+                src={projectAssetUrl(originalViewUrl!, assetVersion)}
                 alt="Original"
                 className="max-w-full max-h-[min(70vh,640px)] object-contain"
               />
@@ -575,7 +576,7 @@ export function SessionResultsContent({ sessionId, sessionData }: SessionResults
             {!showingOriginal && !showingPreview && hasOriginal && (
               <img
                 key={`original-fallback-${sessionId}-${assetVersion ?? 0}`}
-                src={projectAssetUrl(sessionData.original_url!, assetVersion)}
+                src={projectAssetUrl(originalViewUrl!, assetVersion)}
                 alt="Original"
                 className="max-w-full max-h-[min(70vh,640px)] object-contain"
               />

@@ -23,6 +23,12 @@ from image_processor import (
     regenerate_pure_mask_from_labels,
     make_quantization_preview_jpeg,
     make_quantization_preview,
+    render_preset_preview_jpeg,
+    STYLE_PRESET_ORDER,
+    PREVIEW_MAX_SIDE,
+    refresh_project_color_management,
+    project_preview_source,
+    load_rgb_from_bytes,
 )
 import project_store
 import auth
@@ -472,6 +478,7 @@ async def startup_event():
 def _project_info_payload(project_id: str) -> dict:
     if not project_store.project_root(project_id).is_dir():
         raise HTTPException(status_code=404, detail="Project not found")
+    refresh_project_color_management(project_id)
     has_source = project_store.find_source_input(project_id) is not None
     has_oriented = project_store.has_oriented_source(project_id)
     original_url = project_store.source_url(project_id, project_store.SOURCE_ORIENTED) if has_oriented else None
@@ -482,6 +489,7 @@ def _project_info_payload(project_id: str) -> dict:
         "session_id": project_id,
         "project_id": project_id,
         "original_url": original_url,
+        "display_url": project_store.source_display_url(project_id) if has_oriented else None,
         "priority_region_url": pr_url,
         "has_stored_image": has_source,
         "has_artifacts": project_store.load_session_snapshot(project_id) is not None,
@@ -705,7 +713,7 @@ async def preview_quantize(
             if not preview_pid:
                 raise HTTPException(status_code=400, detail="Provide an image or project_id")
             auth.require_project_access(auth.current_user(request), preview_pid)
-            image_path = project_store.find_source_input(preview_pid)
+            image_path = project_preview_source(preview_pid)
             if not image_path:
                 raise HTTPException(status_code=404, detail="No stored source image for this project")
 
@@ -716,7 +724,7 @@ async def preview_quantize(
                 _parse_form_bool(clear_priority_region),
             )
 
-        quantize_side = int(max_side)
+        quantize_side = min(int(max_side), PREVIEW_MAX_SIDE)
         priority_mask = None
         if priority_region_mask is not None and priority_region_mask.filename and not preview_pid:
             mask_bytes = await priority_region_mask.read()
@@ -745,7 +753,7 @@ async def preview_quantize(
         preview_kwargs = dict(
             image_path=str(image_path),
             n_colors=n_colors,
-            max_side=max_side,
+            max_side=quantize_side,
             saturation_boost=saturation_boost,
             easy_painting=style.easy_painting,
             easy_simplify=easy_simp,
@@ -788,6 +796,189 @@ async def preview_quantize(
                 pass
 
 
+def _unlink_quiet(path: Optional[Path]) -> None:
+    if path is not None and path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+@app.post("/api/preview/quantize-styles")
+async def preview_quantize_styles(
+    request: Request,
+    image: Optional[UploadFile] = File(None),
+    project_id: str = Form(""),
+    n_colors: int = Form(16),
+    max_side: int = Form(1024),
+    preview_max_side: int = Form(720),
+    saturation_boost: float = Form(1.0),
+    easy_painting: str = Form("false"),
+    easy_simplify: float = Form(0.65),
+    easy_face_detail: str = Form("false"),
+    detail_eyes: str = Form("true"),
+    detail_face: str = Form("true"),
+    detail_body_outline: str = Form("true"),
+    favor_skin_tones: str = Form("true"),
+    skin_tone_strength: float = Form(0.65),
+    priority_region_mask: Optional[UploadFile] = File(None),
+    clear_priority_region: str = Form("false"),
+    priority_region_strength: float = Form(0.7),
+    detail_level: float = Form(0.5),
+    must_include_colors: str = Form(""),
+):
+    """Stream one JPEG preview per style preset (NDJSON). No layer masks.
+
+    Comparison frames use a smaller long side than full layer generation so the
+    whole grid can be built in one pass. Portrait forces face/eye/outline
+    protection, matching the style dropdown.
+    """
+    if n_colors < 2 or n_colors > 100:
+        raise HTTPException(status_code=400, detail="n_colors must be between 2 and 100")
+    if max_side < 200 or max_side > 2400:
+        raise HTTPException(status_code=400, detail="max_side must be between 200 and 2400")
+    if preview_max_side < 320 or preview_max_side > 960:
+        raise HTTPException(status_code=400, detail="preview_max_side must be between 320 and 960")
+    if saturation_boost < 0.5 or saturation_boost > 5.0:
+        raise HTTPException(status_code=400, detail="saturation_boost must be between 0.5 and 5.0")
+    if detail_level < 0.0 or detail_level > 1.0:
+        raise HTTPException(status_code=400, detail="detail_level must be between 0.0 and 1.0")
+
+    preserve, d_eyes, d_face, d_outline = _parse_figure_detail_params(
+        easy_face_detail, detail_eyes, detail_face, detail_body_outline
+    )
+    legacy_easy = _parse_form_bool(easy_painting)
+    favor_skin = _parse_form_bool(favor_skin_tones)
+    skin_strength = _validate_skin_tone_strength(skin_tone_strength)
+    pr_strength = _validate_priority_region_strength(priority_region_strength)
+    easy_simp = _validate_easy_painting_params(easy_simplify)
+    mask_detail = float(detail_level)
+    side = max(320, min(int(max_side), int(preview_max_side), 960))
+
+    from image_processor import (
+        load_priority_region_mask,
+        load_priority_region_mask_bytes,
+        load_rgb_image_normalized,
+    )
+
+    tmp_path: Optional[Path] = None
+    try:
+        if image is not None and image.filename:
+            content = await image.read()
+            if not content:
+                raise HTTPException(status_code=400, detail="Uploaded image is empty")
+            fd, tmp_name = tempfile.mkstemp(suffix=".jpg", prefix="pbn_stylegrid_")
+            os.close(fd)
+            tmp_path = Path(tmp_name)
+            tmp_path.write_bytes(content)
+            image_path = tmp_path
+            preview_pid = ""
+        else:
+            preview_pid = (project_id or "").strip()
+            if not preview_pid:
+                raise HTTPException(status_code=400, detail="Provide an image or project_id")
+            auth.require_project_access(auth.current_user(request), preview_pid)
+            image_path = project_preview_source(preview_pid)
+            if not image_path:
+                raise HTTPException(status_code=404, detail="No stored source image for this project")
+
+        if preview_pid:
+            await _handle_priority_region_upload(
+                preview_pid,
+                priority_region_mask,
+                _parse_form_bool(clear_priority_region),
+            )
+
+        normalized = load_rgb_image_normalized(str(image_path), side)
+        priority_mask = None
+        if priority_region_mask is not None and priority_region_mask.filename and not preview_pid:
+            mask_bytes = await priority_region_mask.read()
+            if mask_bytes:
+                priority_mask = load_priority_region_mask_bytes(
+                    mask_bytes, normalized.shape[0], normalized.shape[1]
+                )
+        if priority_mask is None and preview_pid and project_store.has_priority_region(preview_pid):
+            priority_mask = load_priority_region_mask(
+                str(project_store.priority_region_path(preview_pid)),
+                normalized.shape[0],
+                normalized.shape[1],
+            )
+
+        must_include = _parse_must_include_colors(must_include_colors)
+        if not must_include and preview_pid:
+            must_include = _manifest_must_include_colors(preview_pid)
+        if must_include and len(must_include) >= n_colors:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Too many must-include colours ({len(must_include)}) for palette size {n_colors}",
+            )
+    except HTTPException:
+        _unlink_quiet(tmp_path)
+        raise
+    except Exception as e:
+        _unlink_quiet(tmp_path)
+        logger.error(f"Style grid preview setup failed: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
+
+    preview_kwargs = dict(
+        n_colors=n_colors,
+        saturation_boost=saturation_boost,
+        easy_painting=legacy_easy,
+        easy_simplify=easy_simp,
+        favor_skin_tones=favor_skin,
+        skin_tone_strength=skin_strength,
+        priority_region_mask=priority_mask,
+        priority_region_strength=pr_strength,
+        mask_detail_level=mask_detail,
+        must_include_hex=must_include or None,
+    )
+
+    async def stream():
+        try:
+            for preset_id in STYLE_PRESET_ORDER:
+                if await request.is_disconnected():
+                    break
+                face_on, eyes_on, face_region, outline_on = preserve, d_eyes, d_face, d_outline
+                if preset_id == "portrait":
+                    face_on, eyes_on, face_region, outline_on = True, True, True, True
+                started = time.perf_counter()
+                try:
+                    jpeg = await asyncio.to_thread(
+                        render_preset_preview_jpeg,
+                        normalized,
+                        preset_id,
+                        easy_face_detail=face_on,
+                        detail_eyes=eyes_on,
+                        detail_face=face_region,
+                        detail_body_outline=outline_on,
+                        **preview_kwargs,
+                    )
+                    payload = {
+                        "id": preset_id,
+                        "jpeg_base64": base64.standard_b64encode(jpeg).decode("ascii"),
+                    }
+                    logger.info(
+                        "Style preset preview %s ready in %.2fs (%d bytes)",
+                        preset_id,
+                        time.perf_counter() - started,
+                        len(jpeg),
+                    )
+                except Exception as exc:
+                    logger.error("Style preset preview failed for %s: %s", preset_id, exc)
+                    logger.error(traceback.format_exc())
+                    payload = {"id": preset_id, "error": str(exc)}
+                yield (json.dumps(payload) + "\n").encode("utf-8")
+        finally:
+            _unlink_quiet(tmp_path)
+
+    return StreamingResponse(
+        stream(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/api/sessions/{session_id}/info")
 async def get_session_info(session_id: str):
     """Legacy alias for project info."""
@@ -802,6 +993,7 @@ async def get_project_info(project_id: str):
 @app.get("/api/projects/{project_id}/session")
 async def get_project_session(project_id: str):
     """Full layer pipeline data for a project (single source of truth on disk)."""
+    refresh_project_color_management(project_id)
     session = project_store.build_session_response(project_id)
     if not session:
         raise HTTPException(status_code=404, detail="No generated layers for this project yet")
@@ -1122,7 +1314,13 @@ def _serve_project_artifact(project_id: str, filename: str, request: Request) ->
             file_path.resolve().relative_to(project_store.source_dir(project_id).resolve())
         except ValueError:
             raise HTTPException(status_code=403, detail="Access denied")
-    return _cors_file_response(file_path, request)
+    versioned = bool((request.query_params.get("v") or "").strip())
+    cache_control = (
+        "private, max-age=31536000"
+        if versioned and filename == "preview.jpg"
+        else "no-store, must-revalidate"
+    )
+    return _cors_file_response(file_path, request, cache_control)
 
 
 def _options_cors_response(request: Request) -> Response:
@@ -1163,12 +1361,18 @@ async def get_project_artifact(project_id: str, filename: str, request: Request)
 async def get_project_source(project_id: str, filename: str, request: Request):
     if not project_store.project_root(project_id).is_dir():
         raise HTTPException(status_code=404, detail="Project not found")
+    refresh_project_color_management(project_id)
     if filename == project_store.SOURCE_THUMB:
         project_store.ensure_source_thumb(project_id)
     file_path = project_store.resolve_source_file(project_id, filename)
     if not file_path:
         raise HTTPException(status_code=404, detail="File not found")
-    cache_control = "private, max-age=31536000" if filename == project_store.SOURCE_THUMB else "no-store, must-revalidate"
+    versioned = bool((request.query_params.get("v") or "").strip())
+    cache_control = (
+        "private, max-age=31536000"
+        if versioned and filename in (project_store.SOURCE_THUMB, project_store.SOURCE_DISPLAY)
+        else "no-store, must-revalidate"
+    )
     return _cors_file_response(file_path, request, cache_control)
 
 
@@ -1828,18 +2032,12 @@ def _gamut_library_signature(group: str, library: dict) -> str:
 
 
 def _optimize_image_from_upload_bytes(image_bytes: bytes) -> np.ndarray:
-    arr = np.frombuffer(image_bytes, dtype=np.uint8)
-    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if bgr is None:
-        raise ValueError("Failed to decode image bytes")
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    return load_rgb_from_bytes(image_bytes)
 
 
 def _optimize_image_from_path(image_path: Path) -> np.ndarray:
-    bgr = cv2.imread(str(image_path))
-    if bgr is None:
-        raise ValueError(f"Failed to load image: {image_path}")
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    from image_processor import load_rgb_image_oriented
+    return load_rgb_image_oriented(str(image_path))
 
 
 def _downsample_longest_side(image_rgb: np.ndarray, longest_side: int = 150) -> np.ndarray:

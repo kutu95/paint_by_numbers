@@ -9,8 +9,9 @@ import { ProjectionControlPanel } from '@/app/project/[sessionId]/ProjectionCont
 import { ProjectFileList } from '@/components/ProjectFileList'
 import { AccountBar } from '@/components/AccountBar'
 import { ProjectCollaborators } from '@/components/ProjectCollaborators'
+import { TechniqueGuide } from '@/components/TechniqueGuide'
 
-const PROJECT_TABS = ['projects', 'image', 'layers', 'projection'] as const
+const PROJECT_TABS = ['projects', 'image', 'layers', 'projection', 'technique'] as const
 type ProjectTab = (typeof PROJECT_TABS)[number]
 type AdminSection = 'library' | 'users' | 'defaults'
 type WorkspaceTab = ProjectTab | 'admin'
@@ -19,7 +20,7 @@ const AUTH_REQUIRED = process.env.NEXT_PUBLIC_AUTH_REQUIRED === '1'
 
 function projectTabFromParam(tab: string | null): ProjectTab {
   if (tab === 'file' || tab === 'projects') return 'projects'
-  if (tab === 'image' || tab === 'layers' || tab === 'projection') return tab
+  if (tab === 'image' || tab === 'layers' || tab === 'projection' || tab === 'technique') return tab
   return 'projects'
 }
 
@@ -531,6 +532,10 @@ export default function Home() {
               </div>
             )}
           </div>
+        </div>
+
+        <div className={activeTab !== 'technique' ? 'hidden' : ''}>
+          <TechniqueGuide />
         </div>
       </main>
 

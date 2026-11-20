@@ -25,6 +25,8 @@ export interface SessionData {
   layers: Layer[]
   quantized_preview_url?: string
   original_url?: string
+  /** Smaller JPEG for on-screen preview. */
+  display_url?: string
   canvas_width_cm?: number
   canvas_height_cm?: number
   /** Manifest updatedAt — bump when source/artifacts regenerate (cache bust). */

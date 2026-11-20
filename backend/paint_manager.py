@@ -737,16 +737,9 @@ def delta_e_lab(lab1: List[float], lab2: List[float]) -> float:
 
 def sample_color_from_image(image_path: str, x: int, y: int, radius: int = 5) -> Tuple[List[int], List[float]]:
     """Sample color from image at given coordinates (average over small area)."""
-    from image_processor import apply_exif_orientation
-    
-    image = cv2.imread(image_path)
-    if image is None:
-        raise ValueError(f"Failed to load image: {image_path}")
-    
-    # Apply EXIF orientation if present
-    image = apply_exif_orientation(image, image_path)
-    
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    from image_processor import load_rgb_image_oriented
+
+    image = load_rgb_image_oriented(image_path)
     h, w = image.shape[:2]
     
     # Clamp coordinates
@@ -876,14 +869,9 @@ def sample_color_from_region(
     order does not matter. Region is clamped to image bounds. All pixels in the
     region are averaged, then converted to Lab.
     """
-    from image_processor import apply_exif_orientation
-    
-    image = cv2.imread(image_path)
-    if image is None:
-        raise ValueError(f"Failed to load image: {image_path}")
-    
-    image = apply_exif_orientation(image, image_path)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    from image_processor import load_rgb_image_oriented
+
+    image = load_rgb_image_oriented(image_path)
     h, w = image.shape[:2]
     
     x_min = max(0, min(x1, x2))
